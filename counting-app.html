@@ -3196,13 +3196,26 @@ async function handleBarcodeResult(code) {
   }
 
   // Strategy 1: Check if barcode matches any UPC in the item master
-  // The Bevager export has UPCs like '851694003675' or '80686836025'
-  // Scanned barcodes may have leading zeros or different formatting
-  const cleanCode = code.replace(/^0+/, ''); // remove leading zeros
+  // Strip ALL non-digit characters from scanned code for matching
+  const digitsOnly = code.replace(/\D/g, '');
+  const noLeadZeros = digitsOnly.replace(/^0+/, '');
+
   const masterMatch = itemMaster.find(item => {
     if (!item.upc) return false;
-    const cleanUpc = item.upc.replace(/^0+/, '');
-    return cleanUpc === cleanCode || item.upc === code || cleanUpc === code || item.sku === code;
+    const itemDigits = item.upc.replace(/\D/g, '');
+    const itemNoZeros = itemDigits.replace(/^0+/, '');
+
+    // Exact match (digits only)
+    if (itemDigits === digitsOnly) return true;
+    // Match without leading zeros
+    if (itemNoZeros === noLeadZeros && noLeadZeros.length >= 6) return true;
+    // Scanned code contains item UPC or vice versa (handles check digit differences)
+    if (digitsOnly.length >= 8 && itemDigits.length >= 8) {
+      if (digitsOnly.includes(itemDigits) || itemDigits.includes(digitsOnly)) return true;
+      // Match last N digits (some scanners add/remove leading zero)
+      if (digitsOnly.slice(-10) === itemDigits.slice(-10) && itemDigits.length >= 10) return true;
+    }
+    return false;
   });
 
   if (masterMatch) {
