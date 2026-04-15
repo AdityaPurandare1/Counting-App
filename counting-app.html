@@ -2073,6 +2073,8 @@ function loadState() {
 if (window.location.search.includes('reset=1')) {
   localStorage.removeItem('hwood_v3');
   localStorage.removeItem('hwood_upc');
+  // Note: learned UPCs are NOT cleared on reset — they are valuable.
+  // To clear them too, add: localStorage.removeItem('hwood_learned_upc');
   window.location.href = window.location.pathname;
 }
 
@@ -2089,13 +2091,52 @@ if (appState.user && !appState.user.venueIds) {
 }
 
 /* ================================================================
-   UPC CACHE
+   UPC CACHE + LEARNED UPCs
+   upcCache: temporary API lookup cache (session-level)
+   learnedUPCs: persistent user-taught barcode-to-item mappings
+   When a barcode doesn't match and the user manually enters the
+   item, we save that mapping so it auto-matches next time.
+   Later: synced to Supabase so all users benefit.
    ================================================================ */
 let upcCache = {};
 try { upcCache = JSON.parse(localStorage.getItem('hwood_upc') || '{}'); } catch (e) {}
 
+let learnedUPCs = {};
+try { learnedUPCs = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}'); } catch (e) {}
+
 function saveUpcCache() {
   try { localStorage.setItem('hwood_upc', JSON.stringify(upcCache)); } catch (e) {}
+}
+
+function saveLearnedUPCs() {
+  try { localStorage.setItem('hwood_learned_upc', JSON.stringify(learnedUPCs)); } catch (e) {}
+}
+
+function learnUPC(code, itemName, brand, category, masterId) {
+  const cleanCode = code.replace(/\D/g, '');
+  if (!cleanCode || cleanCode.length < 6) return;
+
+  learnedUPCs[cleanCode] = {
+    title: itemName,
+    brand: brand || '',
+    category: category || 'other',
+    masterId: masterId || null,
+    learnedAt: new Date().toISOString(),
+  };
+  saveLearnedUPCs();
+  logActivity('Learned UPC ' + cleanCode + ' = ' + itemName);
+}
+
+function lookupLearnedUPC(code) {
+  const cleanCode = code.replace(/\D/g, '');
+  // Try exact match
+  if (learnedUPCs[cleanCode]) return learnedUPCs[cleanCode];
+  // Try without leading zeros
+  const noZeros = cleanCode.replace(/^0+/, '');
+  for (const [key, val] of Object.entries(learnedUPCs)) {
+    if (key.replace(/^0+/, '') === noZeros) return val;
+  }
+  return null;
 }
 
 /* ================================================================
@@ -3189,9 +3230,17 @@ function detectCategory(title, description) {
 }
 
 async function handleBarcodeResult(code) {
-  // Check cache first
+  // Check API cache first
   if (upcCache[code]) {
     openBarcodeEntryModal(code, upcCache[code]);
+    return;
+  }
+
+  // Strategy 0: Check learned UPCs (user-taught mappings from previous scans)
+  const learned = lookupLearnedUPC(code);
+  if (learned) {
+    openBarcodeEntryModal(code, learned);
+    showToast('Matched (learned): ' + learned.title, 'success');
     return;
   }
 
@@ -3318,7 +3367,7 @@ function closeBarcodeEntry(event) {
 }
 
 function submitBarcodeEntry() {
-  if (isAuditLocked()) return; // FIX #1
+  if (isAuditLocked()) return;
 
   const name = document.getElementById('barcodeName').value.trim();
   if (!name) { showToast('Enter item name', 'error'); return; }
@@ -3326,22 +3375,30 @@ function submitBarcodeEntry() {
   const brand = document.getElementById('barcodeBrand').value.trim();
   const fullName = brand ? brand + ' — ' + name : name;
   const sku = document.getElementById('barcodeSku').value;
+  const category = document.getElementById('barcodeCategory').value;
 
   // Check UPC cache for masterId (set during lookup)
   const cachedEntry = upcCache[sku];
-  let masterId = cachedEntry?.masterId || null;
+  const learnedEntry = lookupLearnedUPC(sku);
+  let masterId = cachedEntry?.masterId || learnedEntry?.masterId || null;
 
   // Fallback: try to match against item master by SKU or name
   if (!masterId) {
     const masterMatch = itemMaster.find(item =>
-      item.sku === sku || item.name.toLowerCase() === fullName.toLowerCase()
+      item.sku === sku || item.name.toLowerCase() === fullName.toLowerCase() ||
+      item.name.toLowerCase() === name.toLowerCase()
     );
     masterId = masterMatch?.id || null;
   }
 
+  // Learn this UPC for future scans
+  if (sku && sku.length >= 6) {
+    learnUPC(sku, fullName, brand, category, masterId);
+  }
+
   addCountEntry(
     fullName,
-    document.getElementById('barcodeCategory').value,
+    category,
     document.getElementById('barcodeQty').value,
     'barcode',
     sku,
