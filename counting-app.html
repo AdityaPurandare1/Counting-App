@@ -1,0 +1,4819 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0a0a0a">
+<title>HWOOD Count</title>
+<link rel="manifest" href="manifest.json">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+/* ============================================================
+   CSS VARIABLES
+   ============================================================ */
+:root {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface2: #1c1c1c;
+  --surface3: #242424;
+  --border: #2a2a2a;
+  --text: #e8e4dd;
+  --text-muted: #8a8680;
+  --text-dim: #5a5854;
+  --accent: #c8ff00;
+  --accent-dim: rgba(200, 255, 0, 0.12);
+  --danger: #ff4444;
+  --danger-dim: rgba(255, 68, 68, 0.12);
+  --success: #00d68f;
+  --success-dim: rgba(0, 214, 143, 0.12);
+  --warning: #ffaa00;
+  --warning-dim: rgba(255, 170, 0, 0.12);
+  --blue: #4488ff;
+  --blue-dim: rgba(68, 136, 255, 0.12);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+  --font: 'DM Sans', sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ============================================================
+   RESET AND BASE
+   ============================================================ */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  overscroll-behavior: none;
+}
+
+/* ============================================================
+   UTILITIES
+   ============================================================ */
+.hide { display: none !important; }
+.fade-in { animation: fadeIn 0.25s ease; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes scanLine {
+  0% { top: 20%; }
+  100% { top: 80%; }
+}
+
+/* ============================================================
+   APP SHELL
+   ============================================================ */
+#app {
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+/* ============================================================
+   HEADER
+   ============================================================ */
+.header {
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.venue-badge {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface2);
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.count-badge {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  padding: 3px 10px;
+  border-radius: 20px;
+  font-weight: 500;
+}
+
+.icon-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.icon-btn:active {
+  background: var(--surface3);
+  transform: scale(0.95);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ============================================================
+   PAGES
+   ============================================================ */
+.page {
+  flex: 1;
+  padding: 16px;
+  padding-bottom: calc(80px + var(--safe-bottom));
+  overflow-y: auto;
+}
+
+/* ============================================================
+   PROGRESS BAR
+   ============================================================ */
+.progress-wrap {
+  margin-bottom: 14px;
+}
+
+.progress-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.progress-info strong {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.progress-bar {
+  height: 6px;
+  background: var(--surface3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 0.3s;
+  min-width: 0;
+}
+
+/* ============================================================
+   ZONE TABS
+   ============================================================ */
+.zone-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 0 0 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.zone-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.zone-tab {
+  flex-shrink: 0;
+  padding: 5px 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  font-family: var(--font);
+}
+
+.zone-tab.active {
+  background: var(--accent);
+  color: #0a0a0a;
+  border-color: var(--accent);
+}
+
+.zone-tab .zcnt {
+  font-family: var(--mono);
+  font-size: 10px;
+  margin-left: 4px;
+  opacity: 0.7;
+}
+
+/* ============================================================
+   SCAN ACTION BUTTONS
+   ============================================================ */
+.scan-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.scan-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.scan-btn:active {
+  background: var(--surface3);
+  transform: scale(0.97);
+}
+
+.scan-btn.locked {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.scan-icon {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-xs);
+}
+
+.scan-btn.barcode .scan-icon { background: var(--accent-dim); color: var(--accent); }
+.scan-btn.photo .scan-icon { background: var(--blue-dim); color: var(--blue); }
+.scan-btn.manual .scan-icon { background: var(--surface3); color: var(--text-muted); }
+
+/* ============================================================
+   MODE TOGGLE (Guided / Free / Quick)
+   ============================================================ */
+.mode-toggle {
+  display: flex;
+  gap: 4px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  margin-bottom: 12px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 6px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  color: var(--text-muted);
+  transition: all 0.15s;
+  background: none;
+  border: none;
+  font-family: var(--font);
+}
+
+.mode-btn.active {
+  background: var(--surface3);
+  color: var(--text);
+}
+
+/* ============================================================
+   SEARCH BAR
+   ============================================================ */
+.search-bar {
+  position: relative;
+  margin-bottom: 10px;
+}
+
+.search-bar input {
+  width: 100%;
+  padding: 9px 12px 9px 36px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: var(--font);
+  outline: none;
+}
+
+.search-bar input:focus {
+  border-color: var(--accent);
+}
+
+.search-bar input::placeholder {
+  color: var(--text-dim);
+}
+
+.search-bar .si {
+  position: absolute;
+  left: 11px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+  display: flex;
+}
+
+.search-bar .si svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ============================================================
+   LIST HEADER
+   ============================================================ */
+.list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.list-header h3 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.list-header .total {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* ============================================================
+   COUNT ITEM ROW
+   ============================================================ */
+.c-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.c-item.counted {
+  border-left: 3px solid var(--success);
+}
+
+.c-item.flagged {
+  border-left: 3px solid var(--danger);
+}
+
+.c-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-xs);
+  background: var(--surface3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.c-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.c-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.c-name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.c-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-top: 1px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.method-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.method-badge.barcode { background: var(--accent-dim); color: var(--accent); }
+.method-badge.photo { background: var(--blue-dim); color: var(--blue); }
+.method-badge.manual { background: var(--surface3); color: var(--text-muted); }
+.method-badge.guided { background: var(--success-dim); color: var(--success); }
+
+.c-qty {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.qty-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 15px;
+  font-weight: 600;
+  transition: all 0.1s;
+  font-family: var(--font);
+}
+
+.qty-btn:active {
+  background: var(--surface3);
+  transform: scale(0.9);
+}
+
+.qty-val {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  min-width: 32px;
+  text-align: center;
+  color: var(--accent);
+}
+
+/* ============================================================
+   VENUE CARDS
+   ============================================================ */
+.venue-select-page h1 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
+.venue-select-page .subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+.venue-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.venue-card:active {
+  background: var(--surface2);
+  transform: scale(0.98);
+}
+
+.venue-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.venue-addr {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 1px;
+}
+
+/* ============================================================
+   BOTTOM NAV
+   ============================================================ */
+.bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg);
+  border-top: 1px solid var(--border);
+  display: flex;
+  padding: 6px 12px;
+  padding-bottom: calc(6px + var(--safe-bottom));
+  z-index: 100;
+}
+
+.nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 500;
+  transition: color 0.15s;
+  background: none;
+  border: none;
+  font-family: var(--font);
+}
+
+.nav-item.active {
+  color: var(--accent);
+}
+
+.nav-item svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ============================================================
+   CAMERA MODAL
+   ============================================================ */
+.camera-modal {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+}
+
+.camera-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.8);
+  z-index: 1;
+}
+
+.camera-header h3 {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.camera-close {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.camera-viewfinder {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.camera-viewfinder video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.scan-frame {
+  width: 240px;
+  height: 140px;
+  border: 2px solid rgba(200, 255, 0, 0.6);
+  border-radius: 10px;
+  position: relative;
+}
+
+.scan-frame::after {
+  content: '';
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  height: 2px;
+  background: var(--accent);
+  animation: scanLine 1.5s ease-in-out infinite alternate;
+  box-shadow: 0 0 10px var(--accent);
+}
+
+.camera-controls {
+  padding: 16px;
+  padding-bottom: calc(16px + var(--safe-bottom));
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  justify-content: center;
+}
+
+.capture-btn {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 4px solid rgba(200, 255, 0, 0.3);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.capture-btn:active {
+  transform: scale(0.9);
+}
+
+.scan-status {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 12px;
+  text-align: center;
+  padding: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+}
+
+/* ============================================================
+   MODAL / BOTTOM SHEET
+   ============================================================ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.modal-sheet {
+  width: 100%;
+  max-width: 480px;
+  background: var(--surface);
+  border-radius: var(--radius) var(--radius) 0 0;
+  padding: 16px;
+  padding-bottom: calc(16px + var(--safe-bottom));
+  max-height: 85vh;
+  overflow-y: auto;
+  animation: slideUp 0.2s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.modal-sheet h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.close-x {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px;
+}
+
+/* ============================================================
+   FORM ELEMENTS
+   ============================================================ */
+.form-group {
+  margin-bottom: 12px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.form-input {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  font-family: var(--font);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.form-input:focus {
+  border-color: var(--accent);
+}
+
+.form-input::placeholder {
+  color: var(--text-dim);
+}
+
+select.form-input {
+  appearance: none;
+  cursor: pointer;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.submit-btn {
+  width: 100%;
+  padding: 12px;
+  background: var(--accent);
+  color: #0a0a0a;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s;
+  margin-top: 6px;
+}
+
+.submit-btn:active {
+  transform: scale(0.98);
+  opacity: 0.9;
+}
+
+.submit-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.submit-btn.secondary {
+  background: var(--surface3);
+  color: var(--text);
+}
+
+/* ============================================================
+   ISSUE CHIPS
+   ============================================================ */
+.issue-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.issue-chip {
+  padding: 4px 10px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  font-family: var(--font);
+}
+
+.issue-chip.selected {
+  background: var(--warning-dim);
+  color: var(--warning);
+  border-color: rgba(255, 170, 0, 0.3);
+}
+
+/* ============================================================
+   SUMMARY CARD / STATS
+   ============================================================ */
+.summary-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 8px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+}
+
+.stat-row + .stat-row {
+  border-top: 1px solid var(--border);
+}
+
+.stat-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.stat-value {
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.stat-value.accent { color: var(--accent); }
+.stat-value.danger { color: var(--danger); }
+.stat-value.success { color: var(--success); }
+.stat-value.warning { color: var(--warning); }
+
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 16px 0 8px;
+}
+
+/* ============================================================
+   QUICK COUNT GRID
+   ============================================================ */
+.quick-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.quick-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 6px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.12s;
+  position: relative;
+}
+
+.quick-tile:active {
+  transform: scale(0.95);
+  background: var(--surface2);
+}
+
+.quick-tile.locked {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.quick-tile .qt-name {
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-tile .qt-count {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-top: 2px;
+}
+
+.quick-tile .qt-cat {
+  font-size: 9px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-top: 1px;
+}
+
+.quick-tile.has-count {
+  border-color: rgba(200, 255, 0, 0.2);
+}
+
+/* ============================================================
+   VARIANCE ROW
+   ============================================================ */
+.var-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 4px;
+}
+
+.var-row.over { border-left: 3px solid var(--success); }
+.var-row.under { border-left: 3px solid var(--danger); }
+.var-row.ok { border-left: 3px solid var(--text-dim); }
+
+.var-info { flex: 1; min-width: 0; }
+.var-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.var-detail { font-size: 11px; color: var(--text-muted); }
+.var-diff { font-family: var(--mono); font-size: 14px; font-weight: 700; min-width: 50px; text-align: right; }
+
+/* ============================================================
+   AUDIT BADGE
+   ============================================================ */
+.audit-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.audit-badge.active { background: var(--accent-dim); color: var(--accent); }
+.audit-badge.submitted { background: var(--blue-dim); color: var(--blue); }
+
+/* ============================================================
+   TIMER BAR
+   ============================================================ */
+.timer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.timer-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: pulse 1.5s infinite;
+}
+
+/* ============================================================
+   RECOUNT BANNER
+   ============================================================ */
+.recount-banner {
+  padding: 8px 12px;
+  background: var(--warning-dim);
+  border: 1px solid rgba(255, 170, 0, 0.2);
+  border-radius: var(--radius-sm);
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: var(--warning);
+  cursor: pointer;
+  text-align: center;
+  font-weight: 500;
+}
+
+/* ============================================================
+   TOAST
+   ============================================================ */
+.toast {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--surface3);
+  color: var(--text);
+  padding: 8px 18px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  z-index: 300;
+  animation: fadeIn 0.2s ease;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+  max-width: 90vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast.success { background: var(--success-dim); color: var(--success); border-color: rgba(0, 214, 143, 0.3); }
+.toast.error { background: var(--danger-dim); color: var(--danger); border-color: rgba(255, 68, 68, 0.3); }
+.toast.warn { background: var(--warning-dim); color: var(--warning); border-color: rgba(255, 170, 0, 0.3); }
+
+/* ============================================================
+   CONFIRM DIALOG
+   ============================================================ */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  z-index: 250;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  width: 300px;
+  text-align: center;
+}
+
+.confirm-box p {
+  font-size: 14px;
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+.confirm-btns {
+  display: flex;
+  gap: 8px;
+}
+
+.confirm-btns button {
+  flex: 1;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+
+.confirm-btns .c-cancel {
+  background: var(--surface2);
+  color: var(--text);
+}
+
+.confirm-btns .c-confirm {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+.empty-state {
+  text-align: center;
+  padding: 30px 20px;
+  color: var(--text-dim);
+}
+
+.empty-state svg {
+  margin-bottom: 10px;
+  opacity: 0.4;
+}
+
+.empty-state p {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ============================================================
+   ACTIVITY LOG
+   ============================================================ */
+.log-entry {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.log-entry .log-time {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.log-entry .log-user {
+  color: var(--blue);
+  font-weight: 500;
+}
+
+.log-entry .log-text {
+  color: var(--text-muted);
+}
+
+/* ============================================================
+   PAR LEVEL ALERT
+   ============================================================ */
+.par-alert {
+  background: var(--warning-dim);
+  border: 1px solid rgba(255, 170, 0, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--warning);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+/* ============================================================
+   PARTIAL BOTTLE BUTTONS
+   ============================================================ */
+.partial-btn {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-weight: 500;
+  transition: all 0.1s;
+}
+
+.partial-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: rgba(200, 255, 0, 0.3);
+}
+
+/* AVT Upload area */
+.upload-zone {
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 12px;
+}
+
+.upload-zone:active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.upload-zone .uz-label {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.upload-zone .uz-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Count phase indicator */
+.count-phase {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+
+.count-phase .phase {
+  flex: 1;
+  padding: 8px;
+  text-align: center;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+
+.count-phase .phase.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.count-phase .phase.done {
+  border-color: var(--success);
+  background: var(--success-dim);
+  color: var(--success);
+}
+
+/* Severity badges */
+.sev-badge {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  display: inline-block;
+}
+
+.sev-badge.critical { background: var(--danger-dim); color: var(--danger); }
+.sev-badge.high { background: rgba(255, 138, 101, 0.12); color: #ff8a65; }
+.sev-badge.medium { background: var(--warning-dim); color: var(--warning); }
+.sev-badge.watch { background: var(--blue-dim); color: var(--blue); }
+.sev-badge.low { background: var(--success-dim); color: var(--success); }
+
+/* Recount focus item */
+.focus-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 6px;
+  border-left: 3px solid var(--danger);
+}
+
+.focus-item.medium {
+  border-left-color: var(--warning);
+}
+
+.focus-item.resolved {
+  border-left-color: var(--success);
+  opacity: 0.6;
+}
+
+/* Admin-only section */
+.admin-section {
+  border: 1px solid rgba(200, 255, 0, 0.15);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 12px;
+  background: rgba(200, 255, 0, 0.03);
+}
+
+.admin-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+</style>
+</head>
+
+<body>
+<div id="app">
+  <!-- ========== HEADER ========== -->
+  <div class="header">
+    <div class="header-left">
+      <span class="logo">HWOOD</span>
+      <span class="venue-badge" id="headerVenue">Select venue</span>
+    </div>
+    <div class="header-right">
+      <span class="count-badge" id="headerCount">0 / 0</span>
+      <span class="audit-badge active" id="headerAuditBadge" style="display:none">Active</span>
+      <button class="icon-btn" onclick="showPage('summary')">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M2 4h12M2 8h12M2 12h12"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ========== LOGIN PAGE ========== -->
+  <div class="page" id="page-login">
+    <div style="padding:40px 0 20px;text-align:center">
+      <div style="font-family:var(--mono);font-size:28px;font-weight:700;color:var(--accent);letter-spacing:4px;margin-bottom:4px">HWOOD</div>
+      <div style="font-size:13px;color:var(--text-muted)">Inventory counting system</div>
+    </div>
+    <div class="form-group">
+      <label>Email</label>
+      <input class="form-input" id="loginEmail" placeholder="your@email.com" type="email">
+    </div>
+    <div class="form-group">
+      <label>Name</label>
+      <input class="form-input" id="loginName" placeholder="Your name">
+    </div>
+    <button class="submit-btn" onclick="handleLogin()">Sign in</button>
+    <p id="loginError" style="font-size:12px;color:var(--danger);text-align:center;margin-top:10px;display:none"></p>
+    <p style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:10px">Access is restricted to authorized emails only.</p>
+  </div>
+
+  <!-- ========== VENUES PAGE ========== -->
+  <div class="page hide" id="page-venues">
+    <div class="venue-select-page">
+      <h1>Select venue</h1>
+      <p class="subtitle" id="venueSubtitle">Choose the venue you are counting today</p>
+      <div id="venueList"></div>
+    </div>
+  </div>
+
+  <!-- ========== COUNT PAGE ========== -->
+  <div class="page hide" id="page-count">
+    <!-- PRE-AUDIT SCREEN: shown when venue is selected but no audit is active -->
+    <div id="preAuditScreen" class="hide">
+      <div style="text-align:center;padding:30px 0 20px">
+        <div style="font-size:18px;font-weight:600;margin-bottom:4px" id="preAuditVenue"></div>
+        <div style="font-size:13px;color:var(--text-muted)" id="preAuditAddr"></div>
+      </div>
+      <div class="summary-card">
+        <div class="stat-row">
+          <span class="stat-label">Items in inventory</span>
+          <span class="stat-value accent" id="preAuditItemCount">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Zones</span>
+          <span class="stat-value" id="preAuditZoneCount">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Counted by</span>
+          <span class="stat-value" id="preAuditUser">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Date</span>
+          <span class="stat-value" id="preAuditDate">-</span>
+        </div>
+      </div>
+      <div id="preAuditExisting" class="hide" style="margin-bottom:12px"></div>
+      <button class="submit-btn" onclick="startNewAudit()" id="startAuditBtn">Start new audit</button>
+      <button class="submit-btn secondary" style="margin-top:8px" onclick="showPage('venues')">Back to venues</button>
+    </div>
+
+    <!-- ACTIVE AUDIT CONTENT: shown when audit is in progress -->
+    <div id="activeAuditContent" class="hide">
+      <div id="auditTimer" class="timer-bar hide">
+        <div class="timer-dot"></div>
+        <span id="timerDisplay">00:00</span>
+        <span style="flex:1"></span>
+        <span id="auditStatusLabel" class="audit-badge active">In progress</span>
+        <button onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:11px;padding:3px 10px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:8px">End audit</button>
+      </div>
+      <div id="recountBanner" class="recount-banner hide" onclick="showPage('recount')"></div>
+      <div id="countProgress" class="progress-wrap"></div>
+      <div class="zone-tabs" id="zoneTabs"></div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-mode="guided" onclick="setCountMode('guided')">Guided</button>
+        <button class="mode-btn" data-mode="free" onclick="setCountMode('free')">Free count</button>
+        <button class="mode-btn" data-mode="quick" onclick="setCountMode('quick')">Quick tap</button>
+      </div>
+      <div id="guidedContent"></div>
+      <div id="freeContent" class="hide">
+      <div class="scan-actions" id="scanActions">
+        <button class="scan-btn barcode" onclick="openBarcodeScanner()">
+          <span class="scan-icon">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
+              <rect x="1" y="3" width="2" height="12"/>
+              <rect x="5" y="3" width="1" height="12"/>
+              <rect x="8" y="3" width="2" height="12"/>
+              <rect x="12" y="3" width="1" height="12"/>
+              <rect x="15" y="3" width="2" height="12"/>
+            </svg>
+          </span>
+          Barcode
+        </button>
+        <button class="scan-btn photo" onclick="openPhotoCapture()">
+          <span class="scan-icon">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="5" width="14" height="10" rx="2"/>
+              <circle cx="9" cy="10" r="2.5"/>
+              <path d="M6 5l1-2h4l1 2"/>
+            </svg>
+          </span>
+          Photo
+        </button>
+        <button class="scan-btn manual" onclick="openManualEntry()">
+          <span class="scan-icon">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M13 3l2 2-8 8H4v-3z"/>
+            </svg>
+          </span>
+          Manual
+        </button>
+      </div>
+      <div class="search-bar">
+        <span class="si">
+          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+            <circle cx="6" cy="6" r="4"/>
+            <path d="M9 9l3.5 3.5"/>
+          </svg>
+        </span>
+        <input type="text" placeholder="Search counted items..." id="searchInput" oninput="renderFreeList()">
+      </div>
+      <div class="list-header">
+        <h3>Counted items</h3>
+        <span class="total" id="zoneTotal">0</span>
+      </div>
+      <div id="countList"></div>
+    </div>
+    <div id="quickContent" class="hide"></div>
+    </div><!-- end activeAuditContent -->
+  </div>
+
+  <!-- ========== VIEW / SEARCH PAGE ========== -->
+  <div class="page hide" id="page-view">
+    <div class="section-title">Item lookup</div>
+    <div class="search-bar">
+      <span class="si">
+        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <circle cx="6" cy="6" r="4"/>
+          <path d="M9 9l3.5 3.5"/>
+        </svg>
+      </span>
+      <input type="text" placeholder="Search all items..." id="viewSearchInput" oninput="renderViewPage()">
+    </div>
+    <div id="viewList"></div>
+  </div>
+
+  <!-- ========== VARIANCE PAGE (with Count 1 / Count 2 lifecycle) ========== -->
+  <div class="page hide" id="page-variance">
+    <!-- Count Phase Indicator -->
+    <div class="count-phase" id="countPhaseIndicator">
+      <div class="phase" id="phaseAvt">AVT Upload</div>
+      <div class="phase" id="phaseCount1">Count 1</div>
+      <div class="phase" id="phaseReview">Review</div>
+      <div class="phase" id="phaseCount2">Count 2</div>
+      <div class="phase" id="phaseFinal">Final</div>
+    </div>
+
+    <!-- AVT Upload Section (Admin only) -->
+    <div id="avtSection" class="admin-section">
+      <div class="admin-label">Admin only - AVT data</div>
+      <div id="avtStatus" style="font-size:13px;color:var(--text-muted);margin-bottom:10px">No AVT data loaded. Upload a Craftable AVT report to enable variance analysis.</div>
+      <div class="upload-zone" onclick="document.getElementById('avtFileInput').click()">
+        <div class="uz-label">Upload Craftable AVT Report</div>
+        <div class="uz-hint">XLSX or CSV from Craftable - Actual vs Theoretical</div>
+      </div>
+      <input type="file" id="avtFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleAvtUpload(event)">
+      <div id="avtStoreFilter" class="hide" style="margin-top:8px">
+        <div class="form-group" style="margin-bottom:0">
+          <label>Filter by store</label>
+          <select class="form-input" id="avtStoreSelect" onchange="renderVariancePage()">
+            <option value="">All stores</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Variance Stats -->
+    <div class="section-title">Variance report</div>
+    <div id="varianceStats" class="summary-card" style="margin-bottom:12px"></div>
+
+    <!-- Filter -->
+    <div class="mode-toggle" style="margin-bottom:10px">
+      <button class="mode-btn active" data-vf="all" onclick="setVarianceFilter('all', this)">All</button>
+      <button class="mode-btn" data-vf="flagged" onclick="setVarianceFilter('flagged', this)">Flagged</button>
+      <button class="mode-btn" data-vf="missing" onclick="setVarianceFilter('missing', this)">Missing</button>
+      <button class="mode-btn" data-vf="critical" onclick="setVarianceFilter('critical', this)">Critical</button>
+    </div>
+    <div id="varianceList"></div>
+    <div id="parAlerts" style="margin-top:12px"></div>
+
+    <!-- Action buttons (change based on audit phase) -->
+    <div id="varianceActions" style="margin-top:16px">
+      <button class="submit-btn" id="closeCount1Btn" onclick="closeCount1()">Close Count 1 and generate recount list</button>
+      <button class="submit-btn hide" id="closeCount2Btn" onclick="closeCount2()">Close Count 2 and generate final report</button>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="submit-btn secondary" style="flex:1" id="exportCount1Btn" onclick="exportCountCSV(1)">Export Count 1 CSV</button>
+        <button class="submit-btn secondary hide" style="flex:1" id="exportCount2Btn" onclick="exportCountCSV(2)">Export Count 2 CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== SUMMARY PAGE ========== -->
+  <div class="page hide" id="page-summary">
+    <div class="section-title">Audit summary</div>
+    <div id="summaryStats" class="summary-card"></div>
+    <div class="section-title">By zone</div>
+    <div id="zoneSummary"></div>
+    <div class="section-title">Activity log</div>
+    <div id="activityLog" style="max-height:200px;overflow-y:auto"></div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="submit-btn secondary" style="flex:1" onclick="exportCSV()">Export raw CSV</button>
+      <button class="submit-btn" style="flex:1" onclick="submitAudit()">Submit audit</button>
+    </div>
+    <div class="section-title" style="margin-top:24px">Past audits</div>
+    <div id="historyList"></div>
+  </div>
+
+  <!-- ========== RECOUNT PAGE (Count 2 focus list) ========== -->
+  <div class="page hide" id="page-recount">
+    <div class="section-title">Recount - items needing focus</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:8px">
+      These items were flagged after Count 1 due to high variance. Count them again carefully.
+    </p>
+    <div id="recountProgress" class="progress-wrap"></div>
+    <div class="mode-toggle" style="margin-bottom:10px">
+      <button class="mode-btn active" data-rf="all" onclick="setRecountFilter('all', this)">All</button>
+      <button class="mode-btn" data-rf="critical" onclick="setRecountFilter('critical', this)">Critical</button>
+      <button class="mode-btn" data-rf="high" onclick="setRecountFilter('high', this)">High</button>
+      <button class="mode-btn" data-rf="pending" onclick="setRecountFilter('pending', this)">Pending</button>
+    </div>
+    <div id="recountList"></div>
+    <button class="submit-btn" style="margin-top:12px" onclick="submitRecount()">Mark all recount done</button>
+  </div>
+
+  <!-- ========== BOTTOM NAV ========== -->
+  <div class="bottom-nav">
+    <button class="nav-item" data-page="venues" onclick="showPage('venues')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 9l6-6 6 6"/><path d="M5 8v6a1 1 0 001 1h6a1 1 0 001-1V8"/>
+      </svg>
+      Venues
+    </button>
+    <button class="nav-item active" data-page="count" onclick="showPage('count')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="2" width="10" height="14" rx="2"/><path d="M7 6h4M7 9h4M7 12h2"/>
+      </svg>
+      Count
+    </button>
+    <button class="nav-item" data-page="variance" onclick="showPage('variance')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 14l4-5 3 3 5-7"/>
+      </svg>
+      Variance
+    </button>
+    <button class="nav-item" data-page="view" onclick="showPage('view')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="8" cy="8" r="4.5"/><path d="M11.5 11.5L16 16"/>
+      </svg>
+      Search
+    </button>
+    <button class="nav-item" data-page="summary" onclick="showPage('summary')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="11" width="3" height="4"/><rect x="7.5" y="7" width="3" height="8"/><rect x="12" y="3" width="3" height="12"/>
+      </svg>
+      Summary
+    </button>
+  </div>
+</div>
+
+<!-- ========== CAMERA MODAL: BARCODE ========== -->
+<div class="camera-modal hide" id="barcodeModal">
+  <div class="camera-header">
+    <h3>Scan barcode</h3>
+    <button class="camera-close" onclick="closeBarcodeScanner()">X</button>
+  </div>
+  <div class="camera-viewfinder">
+    <div id="barcodeViewfinder"></div>
+    <div class="scan-overlay"><div class="scan-frame"></div></div>
+    <div class="scan-status" id="barcodeStatus">Point camera at barcode</div>
+  </div>
+</div>
+
+<!-- ========== CAMERA MODAL: PHOTO ========== -->
+<div class="camera-modal hide" id="photoModal">
+  <div class="camera-header">
+    <h3>Capture label</h3>
+    <button class="camera-close" onclick="closePhotoCapture()">X</button>
+  </div>
+  <div class="camera-viewfinder">
+    <video id="photoVideo" autoplay playsinline></video>
+  </div>
+  <div class="camera-controls">
+    <button class="capture-btn" onclick="capturePhoto()"></button>
+  </div>
+</div>
+
+<!-- ========== BARCODE ENTRY MODAL ========== -->
+<div class="modal-overlay hide" id="barcodeEntryModal" onclick="closeBarcodeEntry(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <h3>Scanned item <button class="close-x" onclick="closeBarcodeEntry()">X</button></h3>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(200,255,0,.15);border-radius:var(--radius-sm)">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="var(--accent)">
+        <rect x="0" y="2" width="2" height="10"/><rect x="4" y="2" width="1" height="10"/>
+        <rect x="7" y="2" width="2" height="10"/><rect x="11" y="2" width="1" height="10"/>
+        <rect x="13" y="2" width="1" height="10"/>
+      </svg>
+      <span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent)" id="barcodeUpc"></span>
+    </div>
+    <div id="barcodeLookupStatus" style="font-size:12px;margin-bottom:12px">Searching...</div>
+    <img id="barcodeProductImg" style="display:none;width:70px;height:70px;object-fit:contain;border-radius:var(--radius-sm);background:var(--surface2);margin-bottom:12px;padding:4px">
+    <div class="form-group">
+      <label>Product name</label>
+      <input class="form-input" id="barcodeName">
+    </div>
+    <div class="form-group">
+      <label>Brand</label>
+      <input class="form-input" id="barcodeBrand">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Category</label>
+        <select class="form-input" id="barcodeCategory">
+          <option value="wine">Wine</option>
+          <option value="spirits">Spirits</option>
+          <option value="beer">Beer</option>
+          <option value="food">Food</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Quantity</label>
+        <input class="form-input" id="barcodeQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>UPC</label>
+      <input class="form-input" id="barcodeSku" readonly style="color:var(--text-muted)">
+    </div>
+    <button class="submit-btn" onclick="submitBarcodeEntry()">Add to count</button>
+  </div>
+</div>
+
+<!-- ========== MANUAL ENTRY MODAL ========== -->
+<div class="modal-overlay hide" id="manualModal" onclick="closeManualEntry(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <h3>Add item <button class="close-x" onclick="closeManualEntry()">X</button></h3>
+    <div class="form-group">
+      <label>Item name</label>
+      <input class="form-input" id="manualName" placeholder="Search inventory or type name..." autocomplete="off" oninput="onManualSearch(this.value)">
+      <div id="manualSuggestions" style="max-height:150px;overflow-y:auto"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Category</label>
+        <select class="form-input" id="manualCategory">
+          <option value="wine">Wine</option>
+          <option value="spirits">Spirits</option>
+          <option value="beer">Beer</option>
+          <option value="food">Food</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Quantity</label>
+        <input class="form-input" id="manualQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>SKU / Barcode</label>
+      <input class="form-input" id="manualSku" placeholder="Optional">
+    </div>
+    <div class="form-group">
+      <label>Notes</label>
+      <input class="form-input" id="manualNotes" placeholder="Optional">
+    </div>
+    <div class="form-group">
+      <label>Issue</label>
+      <div class="issue-chips" id="issueChips">
+        <span class="issue-chip selected" data-issue="none" onclick="selectIssue(this)">None</span>
+        <span class="issue-chip" data-issue="damaged" onclick="selectIssue(this)">Damaged</span>
+        <span class="issue-chip" data-issue="misplaced" onclick="selectIssue(this)">Misplaced</span>
+        <span class="issue-chip" data-issue="expired" onclick="selectIssue(this)">Expired</span>
+        <span class="issue-chip" data-issue="no-label" onclick="selectIssue(this)">No label</span>
+        <span class="issue-chip" data-issue="other" onclick="selectIssue(this)">Other</span>
+      </div>
+    </div>
+    <button class="submit-btn" onclick="submitManualEntry()">Add to count</button>
+  </div>
+</div>
+
+<!-- ========== PHOTO REVIEW MODAL ========== -->
+<div class="modal-overlay hide" id="photoReviewModal" onclick="closePhotoReview(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <h3>Review capture <button class="close-x" onclick="closePhotoReview()">X</button></h3>
+    <div style="border-radius:var(--radius);overflow:hidden;margin-bottom:12px">
+      <img id="photoPreviewImg" style="width:100%;display:block">
+    </div>
+    <div id="parsingStatus" style="text-align:center;color:var(--text-muted);font-size:12px;margin-bottom:12px">Analyzing label...</div>
+    <div class="form-group">
+      <label>Item name (search or use OCR result)</label>
+      <input class="form-input" id="photoName" placeholder="Search inventory or type name..." autocomplete="off" oninput="onPhotoSearch(this.value)">
+      <div id="photoSearchResults" style="max-height:150px;overflow-y:auto"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Category</label>
+        <select class="form-input" id="photoCategory">
+          <option value="wine">Wine</option>
+          <option value="spirits">Spirits</option>
+          <option value="beer">Beer</option>
+          <option value="food">Food</option>
+          <option value="other">Other</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Quantity</label>
+        <input class="form-input" id="photoQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Vintage / Details</label>
+      <input class="form-input" id="photoDetails" placeholder="e.g. 2019, Napa Valley">
+    </div>
+    <button class="submit-btn" onclick="submitPhotoEntry()">Add to count</button>
+  </div>
+</div>
+
+<!-- ========== GUIDED ENTRY MODAL ========== -->
+<div class="modal-overlay hide" id="guidedEntryModal" onclick="closeGuidedEntry(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <h3 id="guidedItemTitle">Count item <button class="close-x" onclick="closeGuidedEntry()">X</button></h3>
+    <div id="guidedItemInfo" style="margin-bottom:12px"></div>
+    <div class="form-group">
+      <label>Quantity</label>
+      <input class="form-input" id="guidedQty" type="number" min="0" step="0.25" inputmode="decimal"
+             placeholder="Enter count" style="font-size:20px;text-align:center;font-family:var(--mono)">
+    </div>
+    <div id="guidedPartialBtns" style="display:flex;gap:6px;justify-content:center;margin-bottom:12px">
+      <button class="partial-btn" onclick="setPartial(0)">Empty</button>
+      <button class="partial-btn" onclick="setPartial(0.25)">1/4</button>
+      <button class="partial-btn" onclick="setPartial(0.5)">1/2</button>
+      <button class="partial-btn" onclick="setPartial(0.75)">3/4</button>
+      <button class="partial-btn active" onclick="setPartial(1)">Full</button>
+    </div>
+    <div class="form-group">
+      <label>Issue</label>
+      <div class="issue-chips" id="guidedIssueChips">
+        <span class="issue-chip selected" data-issue="none" onclick="selectGuidedIssue(this)">None</span>
+        <span class="issue-chip" data-issue="damaged" onclick="selectGuidedIssue(this)">Damaged</span>
+        <span class="issue-chip" data-issue="misplaced" onclick="selectGuidedIssue(this)">Misplaced</span>
+        <span class="issue-chip" data-issue="expired" onclick="selectGuidedIssue(this)">Expired</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="submit-btn secondary" style="flex:1" onclick="closeGuidedEntry()">Skip</button>
+      <button class="submit-btn" style="flex:1" onclick="submitGuidedEntry()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== CONFIRM DIALOG ========== -->
+<div class="confirm-overlay hide" id="confirmDialog">
+  <div class="confirm-box">
+    <p id="confirmMsg"></p>
+    <div class="confirm-btns">
+      <button class="c-cancel" onclick="closeConfirm(false)">Cancel</button>
+      <button class="c-confirm" onclick="closeConfirm(true)">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<canvas id="photoCanvas" style="display:none"></canvas>
+
+<script>
+/* ================================================================
+   HWOOD COUNTING APP v3
+   All 12 diagnostic fixes applied:
+   [1] Audit lock enforcement on all write operations
+   [2] Deterministic expected quantities (seeded, cached)
+   [3] HTML escaping on all innerHTML with dynamic data
+   [4] Recount banner on count page for navigation
+   [5] Recount reset confirmation before overwriting
+   [6] Audit history rendering
+   [7] CSV quote escaping (RFC 4180)
+   [8] CORS note (deferred to Supabase phase)
+   [9] AI parsing note (deferred to API key phase)
+   [10] Full readable variable names
+   [11] Timer is per-audit (no change needed)
+   [12] Debounced save() for performance
+   ================================================================ */
+
+/* ================================================================
+   CONSTANTS
+   ================================================================ */
+const VARIANCE_THRESHOLD = 10; // percent
+const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
+
+/* ================================================================
+   FIX #3: HTML ESCAPE UTILITY
+   Prevents XSS when injecting dynamic data into innerHTML
+   ================================================================ */
+function esc(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/* ================================================================
+   FIX #2: DETERMINISTIC EXPECTED QUANTITIES
+   Uses a seeded hash based on SKU so values are stable across reloads.
+   In production, this comes from Supabase instead.
+   ================================================================ */
+function seededRandom(seed, max) {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash + seed.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash % max);
+}
+
+/* ================================================================
+   ITEM MASTER (simulates Keva/Supabase data)
+   ================================================================ */
+let itemMaster = [];
+let itemMasterLoaded = false;
+
+/* ================================================================
+   LOAD ITEM MASTER FROM EXTERNAL JSON
+   The items.json file contains 4,592 items from Bevager export.
+   Format: [[name, brand, category_code, subcategory, upc], ...]
+   Category codes: w=wine, s=spirits, b=beer, o=other
+   
+   In production, this will be fetched from Supabase instead.
+   ================================================================ */
+const CAT_EXPAND = { 'w': 'wine', 's': 'spirits', 'b': 'beer', 'o': 'other' };
+
+async function loadItemMaster() {
+  try {
+    const response = await fetch('items.json');
+    if (!response.ok) throw new Error('Failed to load items.json');
+    const rawItems = await response.json();
+
+    itemMaster = rawItems.map((item, index) => ({
+      id: 'IM' + String(index).padStart(4, '0'),
+      name: item[0],
+      brand: item[1] || '',
+      category: CAT_EXPAND[item[2]] || 'other',
+      subcategory: item[3] || '',
+      upc: item[4] || '',
+      sku: item[4] || ('SKU' + String(index).padStart(4, '0')),
+      par: 0,
+      expectedQty: 0,
+    }));
+
+    itemMasterLoaded = true;
+    console.log('Item master loaded: ' + itemMaster.length + ' items');
+    showToast(itemMaster.length + ' items loaded from inventory', 'success');
+
+    // Re-render current page if needed
+    const currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage) {
+      const pageId = currentPage.id.replace('page-', '');
+      if (pageId === 'count') renderCountPage();
+    }
+  } catch (error) {
+    console.error('Failed to load item master:', error);
+    showToast('Could not load inventory data. Check items.json file.', 'error');
+  }
+}
+
+/* ================================================================
+   APPLICATION STATE
+   ================================================================ */
+const appState = {
+  user: null,
+  venues: [
+    {
+      id: 'v1',
+      name: 'Delilah LA',
+      address: '7969 Santa Monica Blvd, West Hollywood',
+      zones: ['Main Bar', 'Service Bar', 'Wine Room', 'Fridge 1', 'Fridge 2', 'Storage', 'Back Office']
+    },
+    {
+      id: 'v2',
+      name: 'Delilah Miami',
+      address: '2201 Collins Ave, Miami Beach',
+      zones: ['Main Bar', 'Service Bar', 'Wine Room', 'Pool Bar', 'Fridge', 'Storage']
+    },
+    {
+      id: 'v3',
+      name: 'The Nice Guy',
+      address: '401 N La Cienega Blvd, Los Angeles',
+      zones: ['Main Bar', 'Back Bar', 'Wine Fridge', 'Cellar', 'Kitchen', 'Storage']
+    },
+    {
+      id: 'v4',
+      name: 'The Birdstreet Club',
+      address: '8741 Sunset Blvd, West Hollywood',
+      zones: ['Main Bar', 'Lounge Bar', 'Wine Cellar', 'Fridge', 'Storage']
+    },
+    {
+      id: 'v5',
+      name: 'Poppy',
+      address: '8171 Santa Monica Blvd, West Hollywood',
+      zones: ['Main Bar', 'DJ Booth Bar', 'VIP Bar', 'Fridge', 'Storage']
+    },
+    {
+      id: 'v6',
+      name: 'Keys',
+      address: 'West Hollywood',
+      zones: ['Main Bar', 'Back Bar', 'Fridge', 'Storage']
+    },
+  ],
+  currentVenue: null,
+  currentZone: null,
+  countMode: 'guided',
+  audit: null,
+  selectedIssue: 'none',
+  guidedIssue: 'none',
+  guidedCurrentItem: null,
+  varianceFilter: 'all',
+  auditHistory: [],
+  avtData: [],
+  avtUploadedAt: null,
+  avtStores: [],
+};
+
+/* ================================================================
+   INDEXEDDB FOR PHOTOS (FIX from v2 — no photos in localStorage)
+   ================================================================ */
+let photoDB = null;
+
+function openPhotoDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('hwood_photos', 1);
+    request.onupgradeneeded = (event) => {
+      event.target.result.createObjectStore('photos');
+    };
+    request.onsuccess = (event) => {
+      photoDB = event.target.result;
+      resolve();
+    };
+    request.onerror = reject;
+  });
+}
+
+async function savePhoto(id, data) {
+  if (!photoDB) await openPhotoDB();
+  return new Promise((resolve, reject) => {
+    const transaction = photoDB.transaction('photos', 'readwrite');
+    transaction.objectStore('photos').put(data, id);
+    transaction.oncomplete = resolve;
+    transaction.onerror = reject;
+  });
+}
+
+/* ================================================================
+   FIX #12: DEBOUNCED STATE PERSISTENCE
+   Prevents jank during rapid counting by batching localStorage writes
+   ================================================================ */
+let saveTimeout = null;
+
+function saveState() {
+  if (saveTimeout) clearTimeout(saveTimeout);
+  saveTimeout = setTimeout(() => {
+    try {
+      localStorage.setItem('hwood_v3', JSON.stringify({
+        user: appState.user,
+        currentVenueId: appState.currentVenue?.id,
+        currentZone: appState.currentZone,
+        audit: appState.audit,
+        auditHistory: appState.auditHistory,
+        avtData: appState.avtData,
+        avtUploadedAt: appState.avtUploadedAt,
+        avtStores: appState.avtStores,
+      }));
+    } catch (error) {
+      console.warn('State save failed:', error);
+    }
+  }, 100);
+}
+
+function loadState() {
+  try {
+    const data = JSON.parse(localStorage.getItem('hwood_v3'));
+    if (!data) return;
+    if (data.user) appState.user = data.user;
+    if (data.currentVenueId) appState.currentVenue = appState.venues.find(v => v.id === data.currentVenueId);
+    if (data.currentZone) appState.currentZone = data.currentZone;
+    if (data.audit) appState.audit = data.audit;
+    if (data.auditHistory) appState.auditHistory = data.auditHistory;
+    if (data.avtData) appState.avtData = data.avtData;
+    if (data.avtUploadedAt) appState.avtUploadedAt = data.avtUploadedAt;
+    if (data.avtStores) appState.avtStores = data.avtStores;
+  } catch (error) {
+    console.warn('State load failed:', error);
+  }
+}
+
+// Auto-reset if ?reset=1 is in URL
+if (window.location.search.includes('reset=1')) {
+  localStorage.removeItem('hwood_v3');
+  localStorage.removeItem('hwood_upc');
+  window.location.href = window.location.pathname;
+}
+
+loadState();
+
+// Validate loaded user has required fields for new auth format
+if (appState.user && !appState.user.venueIds) {
+  // Old format user without venueIds — clear and force re-login
+  console.log('Clearing stale user session (old format)');
+  appState.user = null;
+  appState.audit = null;
+  appState.currentVenue = null;
+  saveState();
+}
+
+/* ================================================================
+   UPC CACHE
+   ================================================================ */
+let upcCache = {};
+try { upcCache = JSON.parse(localStorage.getItem('hwood_upc') || '{}'); } catch (e) {}
+
+function saveUpcCache() {
+  try { localStorage.setItem('hwood_upc', JSON.stringify(upcCache)); } catch (e) {}
+}
+
+/* ================================================================
+   TIMER
+   ================================================================ */
+let timerInterval = null;
+
+function startTimer() {
+  if (timerInterval) clearInterval(timerInterval);
+  document.getElementById('auditTimer').classList.remove('hide');
+
+  timerInterval = setInterval(() => {
+    if (!appState.audit) return;
+    const elapsedSeconds = Math.floor((Date.now() - new Date(appState.audit.startedAt).getTime()) / 1000);
+    const minutes = Math.floor(elapsedSeconds / 60);
+    const seconds = elapsedSeconds % 60;
+    document.getElementById('timerDisplay').textContent =
+      String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
+  }, 1000);
+}
+
+/* ================================================================
+   ACTIVITY LOG
+   ================================================================ */
+function logActivity(text) {
+  if (!appState.audit) return;
+  appState.audit.log.push({
+    time: new Date().toISOString(),
+    text: text,
+    user: appState.user?.name || 'Unknown',
+  });
+  saveState();
+}
+
+/* ================================================================
+   FIX #1: AUDIT LOCK CHECK
+   Single guard function used by all write operations
+   ================================================================ */
+function isAuditLocked() {
+  if (appState.audit && appState.audit.status === 'submitted') {
+    showToast('Audit is locked after submission', 'error');
+    return true;
+  }
+  return false;
+}
+
+/* ================================================================
+   ACCESS CONTROL LIST
+   Edit this list to control who can access the app.
+   Each entry has: email, name, role, and assigned venues (by ID).
+   Roles: 'corporate' = all venues, 'manager' = assigned venues,
+          'counter' = assigned venues only.
+   
+   To add a new user: copy a line and change the email/name/role.
+   To remove a user: delete their line.
+   To change venue access: update the venueIds array.
+   ================================================================ */
+const ACCESS_LIST = [
+  // Corporate — full access to all venues
+  { email: 'admin@hwood.com',         name: 'Admin',            role: 'corporate', venueIds: 'all' },
+  { email: 'ceo@hwood.com',           name: 'CEO',              role: 'corporate', venueIds: 'all' },
+
+  // Managers — access to assigned venues
+  // v1=Delilah LA, v2=Delilah Miami, v3=The Nice Guy, v4=The Birdstreet Club, v5=Poppy, v6=Keys
+  { email: 'manager1@hwood.com',      name: 'Manager 1',        role: 'manager',   venueIds: ['v1', 'v2', 'v3'] },
+  { email: 'manager2@hwood.com',      name: 'Manager 2',        role: 'manager',   venueIds: ['v4', 'v5', 'v6'] },
+
+  // Counters (3rd party) — access to assigned venues
+  { email: 'counter1@team.com',       name: 'Counter 1',        role: 'counter',   venueIds: ['v1', 'v2'] },
+  { email: 'counter2@team.com',       name: 'Counter 2',        role: 'counter',   venueIds: ['v3', 'v4'] },
+  { email: 'counter3@team.com',       name: 'Counter 3',        role: 'counter',   venueIds: ['v5', 'v6'] },
+
+  // Add more users below this line:
+  // { email: 'newuser@example.com', name: 'New User', role: 'counter', venueIds: ['v1'] },
+];
+
+/* ================================================================
+   AUTHENTICATION
+   Validates email against ACCESS_LIST.
+   Role and venue access are determined by the list, not the user.
+   ================================================================ */
+function handleLogin() {
+  const email = document.getElementById('loginEmail').value.trim().toLowerCase();
+  const nameInput = document.getElementById('loginName').value.trim();
+  const errorEl = document.getElementById('loginError');
+
+  if (!email) {
+    errorEl.textContent = 'Enter your email address.';
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  // Look up email in access list
+  const accessEntry = ACCESS_LIST.find(entry => entry.email.toLowerCase() === email);
+
+  if (!accessEntry) {
+    errorEl.textContent = 'Access denied. Your email is not authorized. Contact your admin.';
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  errorEl.style.display = 'none';
+
+  appState.user = {
+    email: accessEntry.email,
+    name: nameInput || accessEntry.name,
+    role: accessEntry.role,
+    venueIds: accessEntry.venueIds,
+  };
+
+  saveState();
+  showToast('Signed in as ' + appState.user.name + ' (' + appState.user.role + ')', 'success');
+  showPage('venues');
+}
+
+function getVisibleVenues() {
+  if (!appState.user) return [];
+
+  // Corporate sees all venues
+  if (appState.user.role === 'corporate' || appState.user.venueIds === 'all') {
+    return appState.venues;
+  }
+
+  // Manager and counter see only assigned venues
+  const assignedIds = appState.user.venueIds || [];
+  return appState.venues.filter(venue => assignedIds.includes(venue.id));
+}
+
+/* ================================================================
+   NAVIGATION
+   ================================================================ */
+function showPage(page) {
+  if (!appState.user && page !== 'login') {
+    showPage('login');
+    return;
+  }
+
+  // Hide all pages
+  document.querySelectorAll('.page').forEach(el => el.classList.add('hide'));
+  const pageElement = document.getElementById('page-' + page);
+  if (pageElement) pageElement.classList.remove('hide');
+
+  // Update nav active state
+  document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
+  const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
+  if (navItem) navItem.classList.add('active');
+
+  // Render the page
+  const renderMap = {
+    venues: renderVenues,
+    count: renderCountPage,
+    view: renderViewPage,
+    variance: renderVariancePage,
+    summary: renderSummaryPage,
+    recount: renderRecountPage,
+  };
+
+  if (renderMap[page]) renderMap[page]();
+}
+
+/* ================================================================
+   VENUES PAGE
+   ================================================================ */
+function renderVenues() {
+  const venues = getVisibleVenues();
+  document.getElementById('venueSubtitle').innerHTML =
+    appState.user
+      ? esc(appState.user.name) + ' <span style="opacity:0.6">(' + esc(appState.user.role) + ' | ' + esc(appState.user.email) + ')</span>' +
+        '<br><a href="#" onclick="handleLogout();return false" style="color:var(--danger);font-size:12px;text-decoration:none">Sign out</a>'
+      : '';
+
+  if (venues.length === 0) {
+    document.getElementById('venueList').innerHTML =
+      '<div class="empty-state"><p>No venues assigned to your account.<br>Contact your admin for access.</p></div>';
+    return;
+  }
+
+  document.getElementById('venueList').innerHTML = venues.map(venue =>
+    '<div class="venue-card" onclick="selectVenue(\'' + venue.id + '\')">' +
+      '<div>' +
+        '<div class="venue-name">' + esc(venue.name) + '</div>' +
+        '<div class="venue-addr">' + esc(venue.address) + '</div>' +
+      '</div>' +
+      '<span style="color:var(--text-dim)">></span>' +
+    '</div>'
+  ).join('');
+}
+
+function handleLogout() {
+  showConfirm('Sign out? You will need to sign in again.', () => {
+    appState.user = null;
+    appState.currentVenue = null;
+    appState.currentZone = null;
+    document.getElementById('headerVenue').textContent = 'Select venue';
+    document.getElementById('headerAuditBadge').style.display = 'none';
+    if (timerInterval) clearInterval(timerInterval);
+    saveState();
+    showPage('login');
+  });
+}
+
+function selectVenue(id) {
+  appState.currentVenue = appState.venues.find(v => v.id === id);
+  appState.currentZone = appState.currentVenue.zones[0];
+
+  document.getElementById('headerVenue').textContent = appState.currentVenue.name;
+  saveState();
+  showPage('count');
+}
+
+/* ================================================================
+   COUNT PAGE
+   Shows pre-audit screen if no audit is active for this venue.
+   Shows active audit content if an audit is in progress.
+   ================================================================ */
+function renderCountPage() {
+  if (!appState.currentVenue) {
+    showPage('venues');
+    return;
+  }
+
+  const hasActiveAudit = appState.audit &&
+    appState.audit.venueId === appState.currentVenue.id &&
+    (appState.audit.status === 'active' || appState.audit.status === 'submitted');
+
+  if (hasActiveAudit) {
+    // Show the active audit content
+    document.getElementById('preAuditScreen').classList.add('hide');
+    document.getElementById('activeAuditContent').classList.remove('hide');
+    document.getElementById('headerAuditBadge').style.display = '';
+    document.getElementById('headerAuditBadge').className = 'audit-badge ' + appState.audit.status;
+    document.getElementById('headerAuditBadge').textContent = appState.audit.status;
+
+    const isLocked = appState.audit.status === 'submitted';
+
+    renderProgress();
+    renderRecountBanner();
+    renderZoneTabs();
+    updateHeaderCount();
+    startTimer();
+
+    // Update mode toggle
+    const mode = appState.countMode;
+    document.querySelectorAll('.mode-btn[data-mode]').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.mode === mode);
+    });
+
+    document.getElementById('guidedContent').classList.toggle('hide', mode !== 'guided');
+    document.getElementById('freeContent').classList.toggle('hide', mode !== 'free');
+    document.getElementById('quickContent').classList.toggle('hide', mode !== 'quick');
+
+    // Disable scan buttons when locked
+    document.querySelectorAll('.scan-btn').forEach(btn => {
+      btn.classList.toggle('locked', isLocked);
+    });
+
+    if (mode === 'guided') renderGuidedMode();
+    else if (mode === 'quick') renderQuickMode();
+    else renderFreeList();
+
+  } else {
+    // Show pre-audit screen
+    document.getElementById('preAuditScreen').classList.remove('hide');
+    document.getElementById('activeAuditContent').classList.add('hide');
+    document.getElementById('headerAuditBadge').style.display = 'none';
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    document.getElementById('auditTimer').classList.add('hide');
+
+    renderPreAuditScreen();
+  }
+}
+
+function renderPreAuditScreen() {
+  const venue = appState.currentVenue;
+  if (!venue) return;
+
+  document.getElementById('preAuditVenue').textContent = venue.name;
+  document.getElementById('preAuditAddr').textContent = venue.address;
+  document.getElementById('preAuditItemCount').textContent = itemMaster.length;
+  document.getElementById('preAuditZoneCount').textContent = venue.zones.join(', ');
+  document.getElementById('preAuditUser').textContent = appState.user?.name || '-';
+  document.getElementById('preAuditDate').textContent = new Date().toLocaleDateString('en-US', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+  });
+
+  // Check if there is a previous submitted audit for this venue
+  const previousAudits = appState.auditHistory.filter(a => a.venueId === venue.id);
+  const existingDiv = document.getElementById('preAuditExisting');
+
+  if (previousAudits.length > 0) {
+    const last = previousAudits[previousAudits.length - 1];
+    const lastDate = new Date(last.startedAt).toLocaleDateString();
+    existingDiv.classList.remove('hide');
+    existingDiv.innerHTML =
+      '<div class="summary-card" style="border-left:3px solid var(--blue);border-radius:0">' +
+        '<div style="font-size:13px;color:var(--text-muted)">Last audit</div>' +
+        '<div style="font-size:14px;font-weight:500;margin-top:2px">' + esc(lastDate) + '</div>' +
+      '</div>';
+  } else {
+    existingDiv.classList.add('hide');
+  }
+
+  // Check if there is a cancelled/incomplete audit we can resume
+  if (appState.audit && appState.audit.venueId === venue.id && appState.audit.status === 'cancelled') {
+    document.getElementById('startAuditBtn').textContent = 'Start new audit';
+  } else {
+    document.getElementById('startAuditBtn').textContent = 'Start audit';
+  }
+}
+
+function startNewAudit() {
+  const venue = appState.currentVenue;
+  if (!venue) return;
+
+  // If there was a previous active audit for this venue, confirm
+  if (appState.audit && appState.audit.venueId === venue.id && appState.audit.status === 'active') {
+    showConfirm('An audit is already in progress for this venue. Start a new one? The current audit will be discarded.', () => {
+      createAndStartAudit(venue);
+    });
+    return;
+  }
+
+  createAndStartAudit(venue);
+}
+
+function createAndStartAudit(venue) {
+  appState.audit = {
+    id: 'A' + Date.now(),
+    venueId: venue.id,
+    status: 'active',
+    countPhase: 'count1',
+    startedAt: new Date().toISOString(),
+    counts: {},
+    log: [],
+    recounts: {},
+    count1Data: null,
+    count1ClosedAt: null,
+    count2Data: null,
+    count2ClosedAt: null,
+  };
+
+  venue.zones.forEach(zone => {
+    appState.audit.counts[zone] = [];
+  });
+
+  logActivity('Audit started by ' + (appState.user?.name || 'Unknown'));
+  saveState();
+  showToast('Audit started for ' + venue.name, 'success');
+  renderCountPage();
+}
+
+function endAuditEarly() {
+  if (!appState.audit) return;
+
+  const itemCount = getAllCountedItems().length;
+
+  if (itemCount === 0) {
+    // No items counted — just cancel
+    showConfirm('Cancel this audit? No items have been counted.', () => {
+      appState.audit.status = 'cancelled';
+      appState.audit.completedAt = new Date().toISOString();
+      logActivity('Audit cancelled (no items)');
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      appState.audit = null;
+      saveState();
+      showToast('Audit cancelled', 'warn');
+      renderCountPage();
+    });
+  } else {
+    // Items exist — ask what to do
+    showConfirm('End this audit? ' + itemCount + ' items have been counted. Choose Cancel to keep counting, or Confirm to end and save.', () => {
+      appState.audit.status = 'submitted';
+      appState.audit.completedAt = new Date().toISOString();
+      logActivity('Audit ended early (' + itemCount + ' items)');
+      appState.auditHistory.push({
+        ...appState.audit,
+        venueName: appState.currentVenue?.name,
+      });
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      saveState();
+      showToast('Audit saved and submitted', 'success');
+      renderCountPage();
+    });
+  }
+}
+
+function setCountMode(mode) {
+  appState.countMode = mode;
+  renderCountPage();
+}
+
+function renderProgress() {
+  const countedCount = getCountedItemIds().size;
+  const totalCount = itemMaster.length;
+  const percent = totalCount > 0 ? Math.round(countedCount / totalCount * 100) : 0;
+
+  document.getElementById('countProgress').innerHTML =
+    '<div class="progress-info">' +
+      '<span><strong>' + countedCount + '</strong> of <strong>' + totalCount + '</strong> items counted</span>' +
+      '<span><strong>' + percent + '%</strong></span>' +
+    '</div>' +
+    '<div class="progress-bar"><div class="progress-fill" style="width:' + percent + '%"></div></div>';
+}
+
+/* FIX #4: Recount banner on count page */
+function renderRecountBanner() {
+  const banner = document.getElementById('recountBanner');
+  if (!appState.audit?.recounts || Object.keys(appState.audit.recounts).length === 0) {
+    banner.classList.add('hide');
+    return;
+  }
+
+  const total = Object.keys(appState.audit.recounts).length;
+  const done = Object.values(appState.audit.recounts).filter(r => r.status === 'done').length;
+  banner.classList.remove('hide');
+  banner.textContent = 'Recount in progress: ' + done + ' of ' + total + ' done — tap to continue';
+}
+
+function getCountedItemIds() {
+  const ids = new Set();
+  if (!appState.audit) return ids;
+  Object.values(appState.audit.counts).forEach(zoneItems => {
+    zoneItems.forEach(item => {
+      if (item.masterId) ids.add(item.masterId);
+    });
+  });
+  return ids;
+}
+
+function renderZoneTabs() {
+  const venue = appState.currentVenue;
+  document.getElementById('zoneTabs').innerHTML = venue.zones.map(zone => {
+    const count = (appState.audit.counts[zone] || []).length;
+    const isActive = zone === appState.currentZone ? 'active' : '';
+    return '<button class="zone-tab ' + isActive + '" onclick="switchZone(this)" data-zone="' + esc(zone) + '">' +
+      esc(zone) + '<span class="zcnt">' + count + '</span></button>';
+  }).join('');
+}
+
+function switchZone(element) {
+  appState.currentZone = element.dataset.zone;
+  saveState();
+  renderCountPage();
+}
+
+function updateHeaderCount() {
+  const counted = getCountedItemIds().size;
+  document.getElementById('headerCount').textContent = counted + ' / ' + itemMaster.length;
+}
+
+/* ================================================================
+   GUIDED MODE
+   ================================================================ */
+function renderGuidedMode() {
+  const countedIds = getCountedItemIds();
+  const isLocked = appState.audit.status === 'submitted';
+  const totalItems = itemMaster.length;
+  const countedCount = countedIds.size;
+
+  let html = '';
+
+  // Search bar for finding items
+  html += '<div class="search-bar" style="margin-bottom:12px">' +
+    '<span class="si"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M9 9l3.5 3.5"/></svg></span>' +
+    '<input type="text" placeholder="Search ' + totalItems + ' items by name, brand, or SKU..." id="guidedSearchInput" oninput="onGuidedSearch(this.value)" autocomplete="off">' +
+  '</div>';
+
+  // Search results appear here
+  html += '<div id="guidedSearchResults"></div>';
+
+  // Scan buttons for quick entry
+  html += '<div class="scan-actions" style="margin-bottom:12px">' +
+    '<button class="scan-btn barcode ' + (isLocked ? 'locked' : '') + '" onclick="openBarcodeScanner()">' +
+      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><rect x="1" y="3" width="2" height="12"/><rect x="5" y="3" width="1" height="12"/><rect x="8" y="3" width="2" height="12"/><rect x="12" y="3" width="1" height="12"/><rect x="15" y="3" width="2" height="12"/></svg></span>' +
+      'Barcode</button>' +
+    '<button class="scan-btn photo ' + (isLocked ? 'locked' : '') + '" onclick="openPhotoCapture()">' +
+      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="14" height="10" rx="2"/><circle cx="9" cy="10" r="2.5"/><path d="M6 5l1-2h4l1 2"/></svg></span>' +
+      'Photo</button>' +
+    '<button class="scan-btn manual ' + (isLocked ? 'locked' : '') + '" onclick="openManualEntry()">' +
+      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3l2 2-8 8H4v-3z"/></svg></span>' +
+      'Manual</button>' +
+  '</div>';
+
+  // Show recently counted items (last 20)
+  const allCounted = getAllCountedItems();
+  if (allCounted.length > 0) {
+    html += '<div class="list-header"><h3>Recently counted (' + allCounted.length + ')</h3></div>';
+    html += allCounted.slice(0, 20).map(item =>
+      '<div class="c-item counted">' +
+        '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
+        '<div class="c-info">' +
+          '<div class="c-name">' + esc(item.name) + '</div>' +
+          '<div class="c-meta">' +
+            '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
+            '<span>' + esc(item.zone) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="qty-val">' + formatQty(item.qty) + '</div>' +
+      '</div>'
+    ).join('');
+    if (allCounted.length > 20) {
+      html += '<div style="text-align:center;padding:8px;font-size:12px;color:var(--text-dim)">+ ' + (allCounted.length - 20) + ' more items. Use Search tab to see all.</div>';
+    }
+  } else {
+    html += '<div class="empty-state">' +
+      '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
+      '<p>Search for an item above, scan a barcode, or take a photo to start counting.</p>' +
+    '</div>';
+  }
+
+  document.getElementById('guidedContent').innerHTML = html;
+}
+
+/* Guided mode search — searches item master on each keystroke (debounced) */
+let guidedSearchTimeout = null;
+
+function onGuidedSearch(value) {
+  if (guidedSearchTimeout) clearTimeout(guidedSearchTimeout);
+  guidedSearchTimeout = setTimeout(() => doGuidedSearch(value), 150);
+}
+
+function doGuidedSearch(value) {
+  const query = value.toLowerCase().trim();
+  const resultsEl = document.getElementById('guidedSearchResults');
+
+  if (query.length < 2) {
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  const countedIds = getCountedItemIds();
+  const isLocked = appState.audit?.status === 'submitted';
+
+  // Search item master — limit to 30 results for performance
+  const matches = [];
+  for (let i = 0; i < itemMaster.length && matches.length < 30; i++) {
+    const item = itemMaster[i];
+    const searchable = (item.name + ' ' + item.brand + ' ' + item.sku + ' ' + item.upc).toLowerCase();
+    if (searchable.includes(query)) {
+      matches.push(item);
+    }
+  }
+
+  if (matches.length === 0) {
+    resultsEl.innerHTML = '<div style="padding:10px;font-size:13px;color:var(--text-dim);text-align:center">No items matching "' + esc(value) + '"</div>';
+    return;
+  }
+
+  resultsEl.innerHTML = matches.map(item => {
+    const isCounted = countedIds.has(item.id);
+    const entry = isCounted ? findCountEntry(item.id) : null;
+    return '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
+      '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
+      '<div class="c-info">' +
+        '<div class="c-name">' + esc(item.name) + '</div>' +
+        '<div class="c-meta">' +
+          '<span>' + esc(item.brand) + '</span>' +
+          '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' +
+          (isCounted ? '<span class="method-badge guided">counted: ' + formatQty(entry.qty) + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div style="color:var(--text-dim)">></div>' +
+    '</div>';
+  }).join('');
+}
+
+function findCountEntry(masterId) {
+  if (!appState.audit) return null;
+  for (const [zone, items] of Object.entries(appState.audit.counts)) {
+    const found = items.find(item => item.masterId === masterId);
+    if (found) return { ...found, zone };
+  }
+  return null;
+}
+
+function openGuidedEntry(masterId) {
+  if (isAuditLocked()) return; // FIX #1
+
+  const item = itemMaster.find(i => i.id === masterId);
+  if (!item) return;
+
+  appState.guidedCurrentItem = item;
+  appState.guidedIssue = 'none';
+
+  const existing = findCountEntry(masterId);
+
+  document.getElementById('guidedItemTitle').childNodes[0].textContent = item.name + ' ';
+  document.getElementById('guidedItemInfo').innerHTML =
+    '<div style="font-size:12px;color:var(--text-muted)">' +
+      esc(item.brand) + ' | ' + esc(item.sku) +
+      ' | Expected: <strong style="color:var(--text)">' + item.expectedQty + '</strong>' +
+    '</div>';
+  document.getElementById('guidedQty').value = existing ? existing.qty : '';
+  document.getElementById('guidedEntryModal').classList.remove('hide');
+  document.getElementById('guidedEntryModal').dataset.mode = 'count';
+
+  // Reset issue chips
+  document.querySelectorAll('#guidedIssueChips .issue-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.issue === 'none');
+  });
+
+  setTimeout(() => document.getElementById('guidedQty').focus(), 100);
+}
+
+function setPartial(value) {
+  const input = document.getElementById('guidedQty');
+  const base = Math.floor(parseFloat(input.value) || 0);
+  input.value = base + value;
+  document.querySelectorAll('#guidedPartialBtns .partial-btn').forEach(btn => btn.classList.remove('active'));
+}
+
+function selectGuidedIssue(element) {
+  appState.guidedIssue = element.dataset.issue;
+  document.querySelectorAll('#guidedIssueChips .issue-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.issue === appState.guidedIssue);
+  });
+}
+
+function submitGuidedEntry() {
+  const modal = document.getElementById('guidedEntryModal');
+
+  // Handle recount mode
+  if (modal.dataset.mode === 'recount') {
+    const recountKey = modal.dataset.masterId;
+    const qty = parseFloat(document.getElementById('guidedQty').value);
+    if (isNaN(qty)) {
+      showToast('Enter a quantity', 'error');
+      return;
+    }
+
+    const rec = appState.audit.recounts[recountKey];
+    if (rec) {
+      // New AVT-based recount format (key is item name)
+      if (rec.avtItem !== undefined) {
+        rec.recountQty = qty;
+        rec.status = 'done';
+      } else {
+        // Legacy format (key is masterId)
+        rec.recount = qty;
+        rec.status = 'done';
+      }
+    }
+
+    logActivity('Recounted ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty);
+    saveState();
+    closeGuidedEntry();
+    renderRecountPage();
+    return;
+  }
+
+  // Normal guided entry
+  if (isAuditLocked()) return;
+
+  const item = appState.guidedCurrentItem;
+  if (!item) return;
+
+  const qty = parseFloat(document.getElementById('guidedQty').value);
+  if (isNaN(qty) || qty < 0) {
+    showToast('Enter a valid quantity', 'error');
+    return;
+  }
+
+  // Remove existing entry for this item in any zone
+  Object.values(appState.audit.counts).forEach(zoneItems => {
+    const index = zoneItems.findIndex(i => i.masterId === item.id);
+    if (index > -1) zoneItems.splice(index, 1);
+  });
+
+  addCountEntry(item.name, item.category, qty, 'guided', item.sku, null, appState.guidedIssue, null, null, item.id);
+  closeGuidedEntry();
+  renderCountPage();
+}
+
+function closeGuidedEntry(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('guidedEntryModal').classList.add('hide');
+}
+
+/* ================================================================
+   FREE COUNT MODE
+   ================================================================ */
+function renderFreeList() {
+  const items = appState.audit?.counts[appState.currentZone] || [];
+  const search = (document.getElementById('searchInput')?.value || '').toLowerCase();
+  const filtered = search
+    ? items.filter(i => i.name.toLowerCase().includes(search) || (i.sku || '').toLowerCase().includes(search))
+    : items;
+
+  document.getElementById('zoneTotal').textContent = filtered.length + ' item' + (filtered.length !== 1 ? 's' : '');
+
+  if (filtered.length === 0) {
+    document.getElementById('countList').innerHTML =
+      '<div class="empty-state">' +
+        '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5">' +
+          '<rect x="6" y="4" width="24" height="28" rx="3"/>' +
+          '<path d="M12 12h12M12 18h12M12 24h6"/>' +
+        '</svg>' +
+        '<p>No items in this zone yet.</p>' +
+      '</div>';
+    return;
+  }
+
+  document.getElementById('countList').innerHTML = filtered.map(item =>
+    '<div class="c-item fade-in">' +
+      '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
+      '<div class="c-info">' +
+        '<div class="c-name">' + esc(item.name) + '</div>' +
+        '<div class="c-meta">' +
+          '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
+          (item.sku ? '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' : '') +
+          (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<div class="c-qty">' +
+        '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
+        '<span class="qty-val">' + formatQty(item.qty) + '</span>' +
+        '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', 1)">+</button>' +
+      '</div>' +
+    '</div>'
+  ).join('');
+}
+
+/* ================================================================
+   QUICK TAP MODE
+   ================================================================ */
+function renderQuickMode() {
+  const isLocked = appState.audit.status === 'submitted';
+  const countedMap = {};
+  Object.values(appState.audit.counts).forEach(zoneItems => {
+    zoneItems.forEach(item => {
+      if (item.masterId) countedMap[item.masterId] = (countedMap[item.masterId] || 0) + item.qty;
+    });
+  });
+
+  // Show search + recently counted as quick-tap tiles
+  let html = '<div class="search-bar" style="margin-bottom:12px">' +
+    '<span class="si"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M9 9l3.5 3.5"/></svg></span>' +
+    '<input type="text" placeholder="Search to quick-tap..." id="quickSearchInput" oninput="onQuickSearch(this.value)" autocomplete="off">' +
+  '</div>';
+  html += '<div id="quickSearchResults"></div>';
+
+  // Show items already counted as quick-tap tiles for fast +1
+  const countedItems = Object.entries(countedMap);
+  if (countedItems.length > 0) {
+    html += '<div class="list-header"><h3>Tap to +1</h3></div>';
+    html += '<div class="quick-grid">';
+    html += countedItems.slice(0, 30).map(([masterId, qty]) => {
+      const item = itemMaster.find(i => i.id === masterId);
+      if (!item) return '';
+      return '<div class="quick-tile has-count' + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + masterId + '\')">' +
+        '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
+        '<div class="qt-count">' + qty + '</div>' +
+        '<div class="qt-cat">' + item.category + '</div>' +
+      '</div>';
+    }).join('');
+    html += '</div>';
+  } else {
+    html += '<div class="empty-state"><p>Search for items above, then tap to count. Items you have counted will appear here for quick +1.</p></div>';
+  }
+
+  document.getElementById('quickContent').innerHTML = html;
+}
+
+let quickSearchTimeout = null;
+
+function onQuickSearch(value) {
+  if (quickSearchTimeout) clearTimeout(quickSearchTimeout);
+  quickSearchTimeout = setTimeout(() => doQuickSearch(value), 150);
+}
+
+function doQuickSearch(value) {
+  const query = value.toLowerCase().trim();
+  const resultsEl = document.getElementById('quickSearchResults');
+
+  if (query.length < 2) {
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  const isLocked = appState.audit?.status === 'submitted';
+  const countedMap = {};
+  Object.values(appState.audit.counts).forEach(zoneItems => {
+    zoneItems.forEach(item => {
+      if (item.masterId) countedMap[item.masterId] = (countedMap[item.masterId] || 0) + item.qty;
+    });
+  });
+
+  const matches = [];
+  for (let i = 0; i < itemMaster.length && matches.length < 20; i++) {
+    const item = itemMaster[i];
+    if ((item.name + ' ' + item.brand + ' ' + item.sku).toLowerCase().includes(query)) {
+      matches.push(item);
+    }
+  }
+
+  if (matches.length === 0) {
+    resultsEl.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--text-dim);text-align:center">No matches</div>';
+    return;
+  }
+
+  resultsEl.innerHTML = '<div class="quick-grid">' + matches.map(item => {
+    const count = countedMap[item.id] || 0;
+    return '<div class="quick-tile ' + (count > 0 ? 'has-count' : '') + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + item.id + '\')">' +
+      '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
+      '<div class="qt-count">' + count + '</div>' +
+      '<div class="qt-cat">' + item.category + '</div>' +
+    '</div>';
+  }).join('') + '</div>';
+}
+
+function quickTap(masterId) {
+  if (isAuditLocked()) return; // FIX #1
+
+  const item = itemMaster.find(i => i.id === masterId);
+  if (!item) return;
+
+  const zoneItems = appState.audit.counts[appState.currentZone] || [];
+  const existing = zoneItems.find(i => i.masterId === masterId);
+
+  if (existing) {
+    existing.qty += 1;
+    logActivity('+1 ' + item.name + ' (' + existing.qty + ' total)');
+  } else {
+    addCountEntry(item.name, item.category, 1, 'guided', item.sku, null, 'none', null, null, masterId);
+  }
+
+  if (navigator.vibrate) navigator.vibrate(30);
+  saveState();
+  renderQuickMode();
+  renderProgress();
+  updateHeaderCount();
+}
+
+/* ================================================================
+   CORE: ADD COUNT ENTRY
+   FIX #1: Lock check at entry point
+   FIX #3: All output uses esc()
+   ================================================================ */
+function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
+  if (isAuditLocked()) return; // FIX #1
+  if (!appState.audit) return;
+
+  if (!appState.audit.counts[appState.currentZone]) {
+    appState.audit.counts[appState.currentZone] = [];
+  }
+
+  const zoneItems = appState.audit.counts[appState.currentZone];
+  const parsedQty = parseFloat(qty) || 1;
+
+  // Duplicate detection within same zone
+  if (masterId) {
+    const duplicateInZone = zoneItems.find(item => item.masterId === masterId);
+    if (duplicateInZone) {
+      duplicateInZone.qty += parsedQty;
+      showToast('Updated: ' + name + ' (' + formatQty(duplicateInZone.qty) + ' total)', 'warn');
+      logActivity('Updated ' + name + ' to ' + formatQty(duplicateInZone.qty) + ' in ' + appState.currentZone);
+      saveState();
+      return;
+    }
+
+    // Cross-zone duplicate notification
+    for (const [zoneName, items] of Object.entries(appState.audit.counts)) {
+      if (zoneName === appState.currentZone) continue;
+      if (items.find(item => item.masterId === masterId)) {
+        showToast('Note: ' + name + ' also counted in ' + zoneName, 'warn');
+        break;
+      }
+    }
+  }
+
+  // Add new entry
+  zoneItems.unshift({
+    id: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+    name: name,
+    category: category,
+    qty: parsedQty,
+    method: method,
+    sku: sku || null,
+    notes: notes || null,
+    issue: issue || 'none',
+    photoId: photoId || null,
+    details: details || null,
+    masterId: masterId || null,
+    timestamp: new Date().toISOString(),
+  });
+
+  logActivity('Counted ' + name + ' x' + formatQty(parsedQty) + ' in ' + appState.currentZone + ' via ' + method);
+  showToast('Added: ' + name, 'success');
+  saveState();
+}
+
+/* ================================================================
+   CORE: ADJUST QUANTITY
+   FIX #1: Lock check
+   ================================================================ */
+function adjustQuantity(itemId, delta) {
+  if (isAuditLocked()) return; // FIX #1
+
+  const items = appState.audit.counts[appState.currentZone] || [];
+  const item = items.find(i => i.id === itemId);
+  if (!item) return;
+
+  const newQty = Math.max(0, item.qty + delta);
+
+  if (newQty === 0) {
+    showConfirm('Remove "' + item.name + '" from count?', () => {
+      const index = items.indexOf(item);
+      if (index > -1) items.splice(index, 1);
+      logActivity('Removed ' + item.name + ' from ' + appState.currentZone);
+      saveState();
+      renderFreeList();
+      updateHeaderCount();
+      renderProgress();
+    });
+    return;
+  }
+
+  item.qty = newQty;
+  saveState();
+  renderFreeList();
+  updateHeaderCount();
+}
+
+/* ================================================================
+   BARCODE SCANNER
+   Uses native BarcodeDetector API (Chrome 83+, most modern phones)
+   for much better accuracy. Falls back to QuaggaJS on older browsers.
+   ================================================================ */
+let barcodeActive = false;
+let barcodeListenerAttached = false;
+let lastScannedCode = '';
+let lastScanTime = 0;
+let nativeBarcodeStream = null;
+let nativeScanInterval = null;
+
+const hasNativeBarcode = 'BarcodeDetector' in window;
+
+function onBarcodeDetected(result) {
+  if (!barcodeActive) return;
+
+  const code = result.codeResult.code;
+  const now = Date.now();
+
+  if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
+    lastScannedCode = code;
+    lastScanTime = now;
+    barcodeActive = false;
+
+    if (navigator.vibrate) navigator.vibrate(100);
+    Quagga.stop();
+    closeBarcodeScanner();
+    handleBarcodeResult(code);
+  }
+}
+
+function openBarcodeScanner() {
+  if (isAuditLocked()) return;
+
+  document.getElementById('barcodeModal').classList.remove('hide');
+  document.getElementById('barcodeStatus').textContent = 'Initializing...';
+  barcodeActive = true;
+  lastScannedCode = '';
+
+  if (hasNativeBarcode) {
+    openNativeBarcodeScanner();
+  } else {
+    openQuaggaBarcodeScanner();
+  }
+}
+
+/* Native BarcodeDetector — uses phone's built-in barcode engine */
+async function openNativeBarcodeScanner() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    nativeBarcodeStream = stream;
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('autoplay', '');
+    video.style.cssText = 'width:100%;height:100%;object-fit:cover';
+    const viewfinder = document.getElementById('barcodeViewfinder');
+    viewfinder.innerHTML = '';
+    viewfinder.appendChild(video);
+    await video.play();
+
+    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
+
+    const detector = new BarcodeDetector({
+      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
+    });
+
+    nativeScanInterval = setInterval(async () => {
+      if (!barcodeActive || video.readyState < 2) return;
+
+      try {
+        const barcodes = await detector.detect(video);
+        if (barcodes.length > 0) {
+          const code = barcodes[0].rawValue;
+          const now = Date.now();
+          if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
+            lastScannedCode = code;
+            lastScanTime = now;
+            barcodeActive = false;
+            if (navigator.vibrate) navigator.vibrate(100);
+            closeBarcodeScanner();
+            handleBarcodeResult(code);
+          }
+        }
+      } catch (e) {}
+    }, 200);
+
+  } catch (error) {
+    document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
+    openQuaggaBarcodeScanner();
+  }
+}
+
+/* QuaggaJS fallback for older browsers */
+function openQuaggaBarcodeScanner() {
+  if (barcodeListenerAttached) {
+    Quagga.offDetected(onBarcodeDetected);
+    barcodeListenerAttached = false;
+  }
+
+  Quagga.init({
+    inputStream: {
+      type: 'LiveStream',
+      target: document.getElementById('barcodeViewfinder'),
+      constraints: {
+        facingMode: 'environment',
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+    },
+    decoder: {
+      readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader'],
+    },
+    locate: true,
+    frequency: 10,
+  }, function (err) {
+    if (err) {
+      document.getElementById('barcodeStatus').textContent = 'Camera failed. Use photo or manual.';
+      return;
+    }
+    Quagga.start();
+    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode (fallback mode)';
+  });
+
+  Quagga.onDetected(onBarcodeDetected);
+  barcodeListenerAttached = true;
+}
+
+function closeBarcodeScanner() {
+  barcodeActive = false;
+
+  // Stop native scanner
+  if (nativeScanInterval) { clearInterval(nativeScanInterval); nativeScanInterval = null; }
+  if (nativeBarcodeStream) {
+    nativeBarcodeStream.getTracks().forEach(t => t.stop());
+    nativeBarcodeStream = null;
+  }
+
+  // Stop QuaggaJS
+  try { Quagga.stop(); } catch (e) {}
+  if (barcodeListenerAttached) {
+    Quagga.offDetected(onBarcodeDetected);
+    barcodeListenerAttached = false;
+  }
+
+  document.getElementById('barcodeModal').classList.add('hide');
+  document.getElementById('barcodeViewfinder').innerHTML = '';
+}
+
+// FIX: Clean up cameras when user switches tabs
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    closeBarcodeScanner();
+    closePhotoCapture();
+  }
+});
+
+function detectCategory(title, description) {
+  const text = ((title || '') + (description || '')).toLowerCase();
+  if (/wine|cabernet|merlot|pinot|chardonnay|champagne|prosecco/.test(text)) return 'wine';
+  if (/vodka|whiskey|bourbon|gin|rum|tequila|cognac|scotch|hennessy|patron/.test(text)) return 'spirits';
+  if (/beer|ale|lager|stout|ipa|heineken|corona|modelo|seltzer/.test(text)) return 'beer';
+  return 'other';
+}
+
+async function handleBarcodeResult(code) {
+  // Check cache first
+  if (upcCache[code]) {
+    openBarcodeEntryModal(code, upcCache[code]);
+    return;
+  }
+
+  // Strategy 1: Check if barcode matches any UPC in the item master
+  // The Bevager export has UPCs like '851694003675' or '80686836025'
+  // Scanned barcodes may have leading zeros or different formatting
+  const cleanCode = code.replace(/^0+/, ''); // remove leading zeros
+  const masterMatch = itemMaster.find(item => {
+    if (!item.upc) return false;
+    const cleanUpc = item.upc.replace(/^0+/, '');
+    return cleanUpc === cleanCode || item.upc === code || cleanUpc === code || item.sku === code;
+  });
+
+  if (masterMatch) {
+    const result = {
+      title: masterMatch.name,
+      brand: masterMatch.brand,
+      category: masterMatch.category,
+      image: null,
+      masterId: masterMatch.id,
+    };
+    upcCache[code] = result;
+    saveUpcCache();
+    openBarcodeEntryModal(code, result);
+    showToast('Matched: ' + masterMatch.name, 'success');
+    return;
+  }
+
+  // Show loading state
+  openBarcodeEntryModal(code, null);
+
+  // Strategy 2: Try UPCitemdb API (direct, works on localhost)
+  try {
+    const response = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + code);
+    if (!response.ok) throw new Error('API error ' + response.status);
+
+    const data = await response.json();
+
+    if (data.items && data.items.length > 0) {
+      const apiItem = data.items[0];
+      const result = {
+        title: apiItem.title || 'Unknown',
+        brand: apiItem.brand || '',
+        category: detectCategory(apiItem.title, apiItem.description),
+        image: apiItem.images?.[0] || null,
+      };
+
+      // Try to match the UPC result against item master for variance tracking
+      const nameMatch = itemMaster.find(item =>
+        item.name.toLowerCase().includes((result.brand || '').toLowerCase()) &&
+        result.title.toLowerCase().includes(item.name.split(' ')[0].toLowerCase())
+      );
+      if (nameMatch) result.masterId = nameMatch.id;
+
+      upcCache[code] = result;
+      saveUpcCache();
+      updateBarcodeEntryModal(code, result);
+      return;
+    }
+  } catch (error) {
+    // CORS failed or network error — this is expected on non-localhost
+    console.log('Direct UPC lookup failed (CORS expected on tunnel):', error.message);
+  }
+
+  // Strategy 3: If API fails (CORS), try fuzzy matching the UPC digits
+  // against known patterns in the item master
+  // (In production, this lookup goes through Supabase Edge Function)
+  updateBarcodeEntryModal(code, { notFound: true });
+  showToast('UPC not found — enter item details', 'warn');
+}
+
+function openBarcodeEntryModal(code, product) {
+  document.getElementById('barcodeEntryModal').classList.remove('hide');
+  document.getElementById('barcodeUpc').textContent = code;
+  document.getElementById('barcodeSku').value = code;
+  document.getElementById('barcodeQty').value = '1';
+  document.getElementById('barcodeBrand').value = '';
+  document.getElementById('barcodeName').value = '';
+  document.getElementById('barcodeProductImg').style.display = 'none';
+
+  if (product) {
+    updateBarcodeEntryModal(code, product);
+  } else {
+    document.getElementById('barcodeLookupStatus').innerHTML =
+      '<span style="animation:pulse 1s infinite;display:inline-block">Searching UPCitemdb...</span>';
+    document.getElementById('barcodeLookupStatus').style.color = 'var(--text-muted)';
+  }
+}
+
+function updateBarcodeEntryModal(code, product) {
+  if (product.notFound) {
+    document.getElementById('barcodeLookupStatus').textContent = 'Not found — enter manually';
+    document.getElementById('barcodeLookupStatus').style.color = 'var(--warning)';
+  } else {
+    document.getElementById('barcodeLookupStatus').textContent = 'Product found';
+    document.getElementById('barcodeLookupStatus').style.color = 'var(--success)';
+    document.getElementById('barcodeName').value = product.title || '';
+    document.getElementById('barcodeBrand').value = product.brand || '';
+    document.getElementById('barcodeCategory').value = product.category || 'other';
+
+    if (product.image) {
+      document.getElementById('barcodeProductImg').src = product.image;
+      document.getElementById('barcodeProductImg').style.display = 'block';
+    }
+  }
+}
+
+function closeBarcodeEntry(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('barcodeEntryModal').classList.add('hide');
+}
+
+function submitBarcodeEntry() {
+  if (isAuditLocked()) return; // FIX #1
+
+  const name = document.getElementById('barcodeName').value.trim();
+  if (!name) { showToast('Enter item name', 'error'); return; }
+
+  const brand = document.getElementById('barcodeBrand').value.trim();
+  const fullName = brand ? brand + ' — ' + name : name;
+  const sku = document.getElementById('barcodeSku').value;
+
+  // Check UPC cache for masterId (set during lookup)
+  const cachedEntry = upcCache[sku];
+  let masterId = cachedEntry?.masterId || null;
+
+  // Fallback: try to match against item master by SKU or name
+  if (!masterId) {
+    const masterMatch = itemMaster.find(item =>
+      item.sku === sku || item.name.toLowerCase() === fullName.toLowerCase()
+    );
+    masterId = masterMatch?.id || null;
+  }
+
+  addCountEntry(
+    fullName,
+    document.getElementById('barcodeCategory').value,
+    document.getElementById('barcodeQty').value,
+    'barcode',
+    sku,
+    null,
+    'none',
+    null,
+    null,
+    masterId
+  );
+
+  closeBarcodeEntry();
+  renderCountPage();
+}
+
+/* ================================================================
+   PHOTO CAPTURE
+   ================================================================ */
+let photoStream = null;
+let capturedPhotoData = null;
+
+function openPhotoCapture() {
+  if (isAuditLocked()) return; // FIX #1
+
+  document.getElementById('photoModal').classList.remove('hide');
+
+  navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+  })
+    .then(stream => {
+      photoStream = stream;
+      document.getElementById('photoVideo').srcObject = stream;
+    })
+    .catch(() => {
+      showToast('Camera failed', 'error');
+      closePhotoCapture();
+    });
+}
+
+function closePhotoCapture() {
+  if (photoStream) {
+    photoStream.getTracks().forEach(track => track.stop());
+    photoStream = null;
+  }
+  document.getElementById('photoModal').classList.add('hide');
+}
+
+/* ================================================================
+   ON-DEVICE OCR + FUZZY MATCHING
+   Uses Tesseract.js (runs entirely on phone, no API calls, no limits).
+   Extracts text from label photo, then fuzzy-matches against item
+   master to find the closest product.
+   ================================================================ */
+let tesseractWorker = null;
+
+async function getTesseractWorker() {
+  if (tesseractWorker) return tesseractWorker;
+  tesseractWorker = await Tesseract.createWorker('eng', 1, {
+    workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/worker.min.js',
+    corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5/tesseract-core.wasm.js',
+  });
+  return tesseractWorker;
+}
+
+function fuzzyMatch(ocrText, items) {
+  const text = ocrText.toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const words = text.split(/\s+/).filter(w => w.length > 2);
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  items.forEach(item => {
+    const itemWords = (item.name + ' ' + item.brand).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+    let score = 0;
+
+    itemWords.forEach(iw => {
+      words.forEach(ow => {
+        if (ow === iw) {
+          score += 3;
+        } else if (ow.includes(iw) || iw.includes(ow)) {
+          score += 2;
+        } else if (levenshtein(ow, iw) <= 2) {
+          score += 1;
+        }
+      });
+    });
+
+    // Normalize by item word count to avoid bias toward longer names
+    const normalizedScore = itemWords.length > 0 ? score / itemWords.length : 0;
+
+    if (normalizedScore > bestScore) {
+      bestScore = normalizedScore;
+      bestMatch = item;
+    }
+  });
+
+  // Only return match if confidence is reasonable
+  return bestScore >= 1.0 ? { item: bestMatch, score: bestScore } : null;
+}
+
+function levenshtein(a, b) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function extractVintageFromText(text) {
+  const yearMatch = text.match(/\b(19|20)\d{2}\b/);
+  return yearMatch ? yearMatch[0] : '';
+}
+
+function detectCategoryFromText(text) {
+  const t = text.toLowerCase();
+  if (/cabernet|merlot|pinot|chardonnay|sauvignon|champagne|prosecco|ros[eé]|shiraz|malbec|riesling|zinfandel|wine|brut|cuvee|blanc|noir|grenache|syrah|tempranillo|sangiovese/.test(t)) return 'wine';
+  if (/vodka|whiskey|whisky|bourbon|gin|rum|tequila|mezcal|cognac|brandy|scotch|liqueur|hennessy|patron|grey goose|absolut|aperol|campari|vermouth/.test(t)) return 'spirits';
+  if (/beer|ale|lager|stout|ipa|pilsner|heineken|corona|modelo|stella|seltzer|cider/.test(t)) return 'beer';
+  return 'other';
+}
+
+/* Photo search fallback — lets user search item master from photo review modal */
+function onPhotoSearch(value) {
+  const query = value.toLowerCase().trim();
+  const resultsEl = document.getElementById('photoSearchResults');
+
+  if (query.length < 2) {
+    resultsEl.innerHTML = '';
+    return;
+  }
+
+  const matches = [];
+  for (let i = 0; i < itemMaster.length && matches.length < 8; i++) {
+    const item = itemMaster[i];
+    if ((item.name + ' ' + item.brand).toLowerCase().includes(query)) {
+      matches.push(item);
+    }
+  }
+
+  resultsEl.innerHTML = matches.map(item =>
+    '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectPhotoItem(\'' + item.id + '\')">' +
+      '<span style="font-weight:500">' + esc(item.name) + '</span> ' +
+      '<span style="color:var(--text-dim);font-size:11px">' + esc(item.brand) + '</span>' +
+    '</div>'
+  ).join('');
+}
+
+function selectPhotoItem(id) {
+  const item = itemMaster.find(i => i.id === id);
+  if (!item) return;
+
+  document.getElementById('photoName').value = item.name;
+  document.getElementById('photoCategory').value = item.category;
+  document.getElementById('photoName').dataset.masterId = item.id;
+  document.getElementById('photoSearchResults').innerHTML = '';
+  document.getElementById('parsingStatus').textContent = 'Selected: ' + item.name;
+  document.getElementById('parsingStatus').style.color = 'var(--success)';
+  document.getElementById('parsingStatus').style.animation = 'none';
+}
+
+/* Preprocess image for better OCR — increase contrast, convert to grayscale */
+function preprocessImageForOCR(imageDataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+
+      // Draw original
+      ctx.drawImage(img, 0, 0);
+
+      // Get pixel data and enhance
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+
+      for (let i = 0; i < data.length; i += 4) {
+        // Convert to grayscale
+        const gray = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+
+        // Increase contrast (stretch histogram)
+        let enhanced = ((gray - 128) * 1.5) + 128;
+        enhanced = Math.max(0, Math.min(255, enhanced));
+
+        // Sharpen by thresholding (binarize for text)
+        const final = enhanced > 140 ? 255 : 0;
+
+        data[i] = final;
+        data[i+1] = final;
+        data[i+2] = final;
+      }
+
+      ctx.putImageData(imageData, 0, 0);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.src = imageDataUrl;
+  });
+}
+
+async function parsePhotoLabel(imageDataUrl) {
+  const statusEl = document.getElementById('parsingStatus');
+
+  try {
+    // Step 1: Initialize OCR
+    statusEl.textContent = 'Loading OCR engine...';
+    statusEl.style.animation = 'pulse 1s infinite';
+    statusEl.style.color = 'var(--text-muted)';
+
+    const worker = await getTesseractWorker();
+
+    // Step 2: Preprocess image for better OCR accuracy
+    statusEl.textContent = 'Enhancing image...';
+    const processedImage = await preprocessImageForOCR(imageDataUrl);
+
+    // Step 3: Run OCR on the preprocessed image
+    statusEl.textContent = 'Reading label text...';
+    const result = await worker.recognize(processedImage);
+    const ocrText = result.data.text.trim();
+
+    if (!ocrText || ocrText.length < 3) {
+      statusEl.textContent = 'No text detected. Search for the item below or enter manually.';
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--warning)';
+      return;
+    }
+
+    // Step 4: Try to match against item master
+    statusEl.textContent = 'Matching against inventory...';
+    const match = fuzzyMatch(ocrText, itemMaster);
+
+    // Step 5: Extract additional info from OCR text
+    const vintage = extractVintageFromText(ocrText);
+    const detectedCategory = detectCategoryFromText(ocrText);
+
+    if (match) {
+      // Found a match in item master
+      document.getElementById('photoName').value = match.item.name;
+      document.getElementById('photoCategory').value = match.item.category;
+      if (vintage) document.getElementById('photoDetails').value = vintage;
+
+      // Store master ID for variance tracking
+      document.getElementById('photoName').dataset.masterId = match.item.id;
+
+      statusEl.textContent = 'Match found: ' + match.item.name;
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--success)';
+    } else {
+      // No match, but populate what we can from OCR
+      document.getElementById('photoCategory').value = detectedCategory;
+      if (vintage) document.getElementById('photoDetails').value = vintage;
+
+      // Try to extract a reasonable name from the first lines of OCR text
+      const lines = ocrText.split('\n').filter(l => l.trim().length > 2);
+      if (lines.length > 0) {
+        // Use the longest line as the likely product name
+        const bestLine = lines.reduce((a, b) => a.length > b.length ? a : b).trim();
+        document.getElementById('photoName').value = bestLine.substring(0, 60);
+      }
+
+      statusEl.textContent = 'No exact match found. Type in the name field to search inventory, or edit the OCR result below.';
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--warning)';
+    }
+
+    // Show raw OCR text for reference (collapsed)
+    const existingRaw = document.getElementById('ocrRawText');
+    if (existingRaw) existingRaw.remove();
+
+    const rawDiv = document.createElement('div');
+    rawDiv.id = 'ocrRawText';
+    rawDiv.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--surface2);padding:8px;border-radius:6px;margin-top:6px;max-height:80px;overflow-y:auto;font-family:var(--mono);line-height:1.4;word-break:break-word';
+    rawDiv.textContent = 'OCR: ' + ocrText.substring(0, 300);
+    statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
+
+  } catch (error) {
+    console.error('OCR error:', error);
+    statusEl.textContent = 'OCR failed. Enter details manually.';
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--danger)';
+  }
+}
+
+function capturePhoto() {
+  const video = document.getElementById('photoVideo');
+  const canvas = document.getElementById('photoCanvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  capturedPhotoData = canvas.toDataURL('image/jpeg', 0.7);
+
+  closePhotoCapture();
+
+  // Show review modal
+  document.getElementById('photoReviewModal').classList.remove('hide');
+  document.getElementById('photoPreviewImg').src = capturedPhotoData;
+  document.getElementById('photoName').value = '';
+  document.getElementById('photoName').dataset.masterId = '';
+  document.getElementById('photoDetails').value = '';
+  document.getElementById('photoQty').value = '1';
+
+  // Remove previous OCR raw text if present
+  const existingRaw = document.getElementById('ocrRawText');
+  if (existingRaw) existingRaw.remove();
+
+  // Run real OCR parsing
+  parsePhotoLabel(capturedPhotoData);
+}
+
+function closePhotoReview(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('photoReviewModal').classList.add('hide');
+}
+
+async function submitPhotoEntry() {
+  if (isAuditLocked()) return; // FIX #1
+
+  const name = document.getElementById('photoName').value.trim();
+  if (!name) { showToast('Enter item name', 'error'); return; }
+
+  // Save photo to IndexedDB (not localStorage)
+  const photoId = 'P' + Date.now();
+  try { await savePhoto(photoId, capturedPhotoData); } catch (e) {}
+
+  // Get masterId if OCR matched an item
+  const masterId = document.getElementById('photoName').dataset.masterId || null;
+
+  addCountEntry(
+    name,
+    document.getElementById('photoCategory').value,
+    document.getElementById('photoQty').value,
+    'photo',
+    null,
+    document.getElementById('photoDetails').value.trim(),
+    'none',
+    photoId,
+    null,
+    masterId
+  );
+
+  closePhotoReview();
+  renderCountPage();
+}
+
+/* ================================================================
+   MANUAL ENTRY
+   ================================================================ */
+function openManualEntry() {
+  if (isAuditLocked()) return; // FIX #1
+
+  document.getElementById('manualModal').classList.remove('hide');
+  document.getElementById('manualName').value = '';
+  document.getElementById('manualQty').value = '1';
+  document.getElementById('manualSku').value = '';
+  document.getElementById('manualNotes').value = '';
+  document.getElementById('manualSuggestions').innerHTML = '';
+  document.getElementById('manualName').dataset.masterId = '';
+
+  appState.selectedIssue = 'none';
+  document.querySelectorAll('#issueChips .issue-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.issue === 'none');
+  });
+
+  setTimeout(() => document.getElementById('manualName').focus(), 100);
+}
+
+function closeManualEntry(event) {
+  if (event && event.target !== event.currentTarget) return;
+  document.getElementById('manualModal').classList.add('hide');
+}
+
+function onManualSearch(value) {
+  const query = value.toLowerCase().trim();
+  if (query.length < 2) {
+    document.getElementById('manualSuggestions').innerHTML = '';
+    return;
+  }
+
+  const matches = itemMaster.filter(item =>
+    item.name.toLowerCase().includes(query) ||
+    item.brand.toLowerCase().includes(query) ||
+    item.sku.toLowerCase().includes(query)
+  ).slice(0, 6);
+
+  document.getElementById('manualSuggestions').innerHTML = matches.map(item =>
+    '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectMasterItem(\'' + item.id + '\')">' +
+      '<span style="font-weight:500">' + esc(item.name) + '</span> ' +
+      '<span style="color:var(--text-dim);font-size:11px">' + esc(item.sku) + '</span>' +
+    '</div>'
+  ).join('');
+}
+
+function selectMasterItem(id) {
+  const item = itemMaster.find(i => i.id === id);
+  if (!item) return;
+
+  document.getElementById('manualName').value = item.name;
+  document.getElementById('manualCategory').value = item.category;
+  document.getElementById('manualSku').value = item.sku;
+  document.getElementById('manualSuggestions').innerHTML = '';
+  document.getElementById('manualName').dataset.masterId = item.id;
+}
+
+function selectIssue(element) {
+  appState.selectedIssue = element.dataset.issue;
+  document.querySelectorAll('#issueChips .issue-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.issue === appState.selectedIssue);
+  });
+}
+
+function submitManualEntry() {
+  if (isAuditLocked()) return; // FIX #1
+
+  const name = document.getElementById('manualName').value.trim();
+  if (!name) { showToast('Enter item name', 'error'); return; }
+
+  addCountEntry(
+    name,
+    document.getElementById('manualCategory').value,
+    document.getElementById('manualQty').value,
+    'manual',
+    document.getElementById('manualSku').value.trim(),
+    document.getElementById('manualNotes').value.trim(),
+    appState.selectedIssue,
+    null,
+    null,
+    document.getElementById('manualName').dataset.masterId || null
+  );
+
+  closeManualEntry();
+  renderCountPage();
+}
+
+/* ================================================================
+   VIEW / SEARCH PAGE
+   ================================================================ */
+function renderViewPage() {
+  const allItems = getAllCountedItems();
+
+  // Group by master ID or name
+  const grouped = {};
+  allItems.forEach(item => {
+    const key = item.masterId || item.name.toLowerCase();
+    if (!grouped[key]) {
+      grouped[key] = { name: item.name, category: item.category, locations: {}, totalQty: 0 };
+    }
+    grouped[key].locations[item.zone] = (grouped[key].locations[item.zone] || 0) + item.qty;
+    grouped[key].totalQty += item.qty;
+  });
+
+  const items = Object.values(grouped);
+  const query = (document.getElementById('viewSearchInput')?.value || '').toLowerCase();
+  const filtered = query ? items.filter(i => i.name.toLowerCase().includes(query)) : items;
+
+  if (filtered.length === 0) {
+    document.getElementById('viewList').innerHTML = '<div class="empty-state"><p>No items found</p></div>';
+    return;
+  }
+
+  document.getElementById('viewList').innerHTML = filtered.map(item =>
+    '<div class="summary-card" style="margin-bottom:6px;padding:10px 12px">' +
+      '<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">' +
+        '<div class="c-thumb" style="width:32px;height:32px;color:' + getCategoryColor(item.category) + ';font-size:9px">' + getCategoryLabel(item.category) + '</div>' +
+        '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(item.name) + '</div></div>' +
+        '<div style="font-family:var(--mono);font-size:16px;font-weight:700;color:var(--accent)">' + formatQty(item.totalQty) + '</div>' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:4px">' +
+        Object.entries(item.locations).map(([zone, qty]) =>
+          '<span style="font-size:11px;padding:2px 7px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);color:var(--text-muted)">' +
+            esc(zone) + ': <span style="color:var(--text);font-family:var(--mono)">' + formatQty(qty) + '</span>' +
+          '</span>'
+        ).join('') +
+      '</div>' +
+    '</div>'
+  ).join('');
+}
+
+/* ================================================================
+   STORE NAME MAPPING
+   Maps AVT report store names to counting app venue names.
+   Add new mappings here when venues are added.
+   ================================================================ */
+const STORE_MAP = {
+  'bird street': 'v4',
+  'birdstreet': 'v4',
+  'the birdstreet club': 'v4',
+  'delilah la': 'v1',
+  'delilah - la': 'v1',
+  'delilah': 'v1',
+  'delilah miami': 'v2',
+  'delilah - miami': 'v2',
+  'the nice guy': 'v3',
+  'nice guy': 'v3',
+  'poppy': 'v5',
+  'keys': 'v6',
+};
+
+function mapStoreToVenueId(storeName) {
+  const normalized = (storeName || '').toLowerCase().trim();
+  return STORE_MAP[normalized] || null;
+}
+
+function mapStoreToVenueName(storeName) {
+  const vid = mapStoreToVenueId(storeName);
+  if (!vid) return storeName;
+  const venue = appState.venues.find(v => v.id === vid);
+  return venue ? venue.name : storeName;
+}
+
+/* ================================================================
+   AVT DATA MANAGEMENT
+   Parses Craftable AVT reports (XLSX or CSV).
+   Stores parsed data in appState.avtData[]
+   ================================================================ */
+async function handleAvtUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  // Check admin access
+  if (appState.user?.role !== 'corporate' && appState.user?.role !== 'manager') {
+    showToast('Only admin/manager can upload AVT data', 'error');
+    event.target.value = '';
+    return;
+  }
+
+  showToast('Parsing AVT report...', '');
+
+  try {
+    const data = await file.arrayBuffer();
+    const workbook = XLSX.read(data, { type: 'array' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+
+    // Find header row (look for STORE, ITEM, VARIANCE etc)
+    let headerRow = -1;
+    let colMap = {};
+
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      const row = rows[i].map(c => String(c).trim().toUpperCase());
+      if (row.includes('STORE') || row.some(c => c.includes('STORE'))) {
+        headerRow = i;
+        row.forEach((cell, j) => {
+          const c = cell.replace(/\s+/g, ' ').trim();
+          if (c.includes('STORE')) colMap.store = j;
+          if (c === 'ITEM' || c.includes('ITEM')) colMap.item = j;
+          if (c === 'CATEGORY' || c.includes('CATEGORY')) colMap.category = j;
+          if (c === 'ACTUAL INVENTORY' || c.includes('ACTUAL')) colMap.actual = j;
+          if (c === 'THEO INVENTORY' || c.includes('THEO')) colMap.theo = j;
+          if (c === 'VARIANCE' && !c.includes('%') && !c.includes('VALUE')) colMap.variance = j;
+          if (c.includes('VARIANCE VALUE') || c.includes('VARIANCE $')) colMap.varianceValue = j;
+          if (c.includes('VARIANCE %') && c.includes('ACTUAL')) colMap.variancePctActual = j;
+          if (c.includes('VARIANCE %') && c.includes('DEPLETION')) colMap.variancePctDepl = j;
+          if (c === 'CU PRICE' || c.includes('PRICE')) colMap.cuPrice = j;
+          if (c === 'START' || c.includes('START')) colMap.start = j;
+          if (c === 'PURCHASES' || c.includes('PURCHASES')) colMap.purchases = j;
+          if (c === 'DEPLETIONS' || c.includes('DEPLETIONS')) colMap.depletions = j;
+          if (c === 'ID') colMap.id = j;
+        });
+        break;
+      }
+    }
+
+    if (headerRow === -1 || colMap.item === undefined) {
+      showToast('Could not find headers in AVT file. Expected: STORE, ITEM, ACTUAL INVENTORY, THEO INVENTORY', 'error');
+      event.target.value = '';
+      return;
+    }
+
+    // Parse data rows
+    const avtItems = [];
+    const stores = new Set();
+
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const itemName = String(row[colMap.item] || '').trim();
+      if (!itemName) continue;
+
+      const store = String(row[colMap.store] || '').trim();
+      stores.add(store);
+
+      avtItems.push({
+        store: store,
+        venueId: mapStoreToVenueId(store),
+        venueName: mapStoreToVenueName(store),
+        itemName: itemName,
+        category: String(row[colMap.category] || '').trim(),
+        actual: parseFloat(row[colMap.actual]) || 0,
+        theo: parseFloat(row[colMap.theo]) || 0,
+        variance: parseFloat(row[colMap.variance]) || 0,
+        varianceValue: parseFloat(row[colMap.varianceValue]) || 0,
+        variancePct: parseFloat(row[colMap.variancePctActual]) || 0,
+        cuPrice: parseFloat(row[colMap.cuPrice]) || 0,
+        start: parseFloat(row[colMap.start]) || 0,
+        purchases: parseFloat(row[colMap.purchases]) || 0,
+        depletions: parseFloat(row[colMap.depletions]) || 0,
+      });
+    }
+
+    appState.avtData = avtItems;
+    appState.avtUploadedAt = new Date().toISOString();
+    appState.avtStores = [...stores];
+    saveState();
+
+    // Populate store filter
+    const storeSelect = document.getElementById('avtStoreSelect');
+    storeSelect.innerHTML = '<option value="">All stores</option>';
+    stores.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      opt.textContent = s + ' (' + mapStoreToVenueName(s) + ')';
+      storeSelect.appendChild(opt);
+    });
+    document.getElementById('avtStoreFilter').classList.remove('hide');
+
+    document.getElementById('avtStatus').innerHTML =
+      '<span style="color:var(--success)">' + avtItems.length + ' items loaded from ' + stores.size + ' store(s).</span>' +
+      '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date().toLocaleString() + '</span>';
+
+    logActivity('AVT report uploaded: ' + avtItems.length + ' items from ' + file.name);
+    showToast(avtItems.length + ' AVT items loaded from ' + stores.size + ' store(s)', 'success');
+    renderVariancePage();
+
+  } catch (error) {
+    console.error('AVT parse error:', error);
+    showToast('Failed to parse AVT file: ' + error.message, 'error');
+  }
+
+  event.target.value = '';
+}
+
+/* ================================================================
+   SEVERITY SCORING
+   Matches the logic from the inventory workflow app.
+   Uses Craftable AVT data + count data to score each item.
+   ================================================================ */
+const SEVERITY_THRESHOLDS = {
+  liquorVarianceDollars: 50,
+  wineVarianceDollars: 200,
+  bottleVariance: 1,
+  criticalWeeks: 10,
+  criticalDollars: 200,
+  highWeeks: 5,
+  highDollars: 500,
+};
+
+function isWineCategory(category) {
+  return (category || '').toLowerCase().includes('wine') || (category || '').includes('5320');
+}
+
+function scoreSeverity(item) {
+  const absVar = Math.abs(item.varianceValue || 0);
+  const absQty = Math.abs(item.variance || 0);
+  const weeksActive = item.weeksActive || 0;
+  const isWine = isWineCategory(item.category);
+  const threshold = isWine ? SEVERITY_THRESHOLDS.wineVarianceDollars : SEVERITY_THRESHOLDS.liquorVarianceDollars;
+
+  // CRITICAL: very high variance or long-standing
+  if (weeksActive >= SEVERITY_THRESHOLDS.criticalWeeks || (weeksActive >= 5 && absVar >= SEVERITY_THRESHOLDS.criticalDollars)) {
+    return 'CRITICAL';
+  }
+
+  // HIGH: significant variance
+  if (weeksActive >= SEVERITY_THRESHOLDS.highWeeks || absVar >= SEVERITY_THRESHOLDS.highDollars || absVar >= threshold * 3) {
+    return 'HIGH';
+  }
+
+  // MEDIUM: above threshold
+  if (weeksActive >= 3 || absVar >= threshold || absQty >= SEVERITY_THRESHOLDS.bottleVariance * 3) {
+    return 'MEDIUM';
+  }
+
+  // WATCH: minor but notable
+  if (absVar >= threshold * 0.5 || absQty >= SEVERITY_THRESHOLDS.bottleVariance) {
+    return 'WATCH';
+  }
+
+  return 'LOW';
+}
+
+function needsRecount(severity, absVar) {
+  return severity === 'CRITICAL' || severity === 'HIGH' || (severity === 'MEDIUM' && absVar >= 100);
+}
+
+function severityOrder(sev) {
+  return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, WATCH: 3, LOW: 4 }[sev] || 5;
+}
+
+/* ================================================================
+   VARIANCE PAGE RENDERING
+   Shows AVT data cross-referenced with count data.
+   Adapts based on audit phase (Count 1 vs Count 2).
+   ================================================================ */
+function renderVariancePage() {
+  updateCountPhaseIndicator();
+
+  const avtData = appState.avtData || [];
+  const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
+
+  // Show/hide admin section
+  document.getElementById('avtSection').style.display = isAdmin ? 'block' : 'none';
+
+  // Update AVT status if data exists
+  if (avtData.length > 0 && document.getElementById('avtStatus').textContent.includes('No AVT')) {
+    document.getElementById('avtStatus').innerHTML =
+      '<span style="color:var(--success)">' + avtData.length + ' items loaded.</span>' +
+      '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date(appState.avtUploadedAt).toLocaleString() + '</span>';
+  }
+
+  // Filter by store if selected
+  const storeFilter = document.getElementById('avtStoreSelect')?.value || '';
+  let filteredAvt = avtData;
+  if (storeFilter) {
+    filteredAvt = avtData.filter(a => a.store === storeFilter);
+  }
+
+  // Also filter by current venue if an audit is active
+  if (appState.audit && appState.currentVenue) {
+    const vid = appState.currentVenue.id;
+    filteredAvt = filteredAvt.filter(a => a.venueId === vid || !a.venueId);
+  }
+
+  // Cross-reference with count data
+  const countedMap = getCountedMap();
+  let totalExpected = 0, totalCounted = 0, flaggedCount = 0, missingCount = 0, criticalCount = 0;
+
+  const rows = filteredAvt.map(avt => {
+    const counted = findCountedQtyForAvtItem(avt, countedMap);
+    const expected = avt.theo;
+    const diff = counted - expected;
+    const pct = expected > 0 ? Math.round(diff / expected * 100) : 0;
+    const severity = scoreSeverity({
+      varianceValue: avt.varianceValue,
+      variance: avt.variance,
+      category: avt.category,
+      weeksActive: 0,
+    });
+    const recount = needsRecount(severity, Math.abs(avt.varianceValue));
+    const isMissing = counted === 0 && expected > 0;
+
+    totalExpected += expected;
+    totalCounted += counted;
+    if (recount) flaggedCount++;
+    if (isMissing) missingCount++;
+    if (severity === 'CRITICAL') criticalCount++;
+
+    return {
+      avt,
+      counted,
+      expected,
+      diff,
+      pct,
+      severity,
+      recount,
+      isMissing,
+      absVarianceValue: Math.abs(avt.varianceValue),
+    };
+  });
+
+  // Stats
+  document.getElementById('varianceStats').innerHTML =
+    '<div class="stat-row"><span class="stat-label">AVT items</span><span class="stat-value">' + filteredAvt.length + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Items counted</span><span class="stat-value accent">' + Object.keys(countedMap).length + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Flagged for recount</span><span class="stat-value danger">' + flaggedCount + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Critical</span><span class="stat-value danger">' + criticalCount + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Missing (not counted)</span><span class="stat-value warning">' + missingCount + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Total variance value</span><span class="stat-value ' +
+      (filteredAvt.reduce((s, a) => s + a.varianceValue, 0) < 0 ? 'danger' : 'success') + '">$' +
+      Math.abs(filteredAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '</span></div>';
+
+  // Filter
+  let filtered = rows;
+  if (appState.varianceFilter === 'flagged') filtered = rows.filter(r => r.recount);
+  if (appState.varianceFilter === 'missing') filtered = rows.filter(r => r.isMissing);
+  if (appState.varianceFilter === 'critical') filtered = rows.filter(r => r.severity === 'CRITICAL' || r.severity === 'HIGH');
+  filtered.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity) || b.absVarianceValue - a.absVarianceValue);
+
+  // Render list
+  document.getElementById('varianceList').innerHTML = filtered.length === 0
+    ? '<div class="empty-state"><p>No items match this filter.' + (avtData.length === 0 ? ' Upload an AVT report first.' : '') + '</p></div>'
+    : filtered.slice(0, 200).map(r =>
+      '<div class="var-row ' + (r.diff > 0 ? 'over' : r.diff < 0 ? 'under' : 'ok') + '">' +
+        '<div class="var-info">' +
+          '<div class="var-name">' + esc(r.avt.itemName) + '</div>' +
+          '<div class="var-detail">' +
+            'Actual: ' + r.avt.actual.toFixed(1) + ' | Theo: ' + r.avt.theo.toFixed(1) +
+            ' | Var: ' + (r.avt.variance >= 0 ? '+' : '') + r.avt.variance.toFixed(2) +
+            ' | $' + (r.avt.varianceValue >= 0 ? '+' : '') + r.avt.varianceValue.toFixed(2) +
+            (r.counted > 0 ? ' | Counted: ' + formatQty(r.counted) : '') +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">' +
+          '<span class="sev-badge ' + r.severity.toLowerCase() + '">' + r.severity + '</span>' +
+          (r.recount ? '<span style="font-size:9px;color:var(--danger);font-weight:600">RECOUNT</span>' : '') +
+        '</div>' +
+      '</div>'
+    ).join('');
+
+  // Update action buttons based on audit phase
+  updateVarianceActions();
+}
+
+function findCountedQtyForAvtItem(avt, countedMap) {
+  // Try to match AVT item to a counted item by fuzzy name matching
+  const avtName = (avt.itemName || '').toLowerCase();
+  let bestQty = 0;
+
+  for (const [masterId, qty] of Object.entries(countedMap)) {
+    const masterItem = itemMaster.find(m => m.id === masterId);
+    if (!masterItem) continue;
+    const masterName = masterItem.name.toLowerCase();
+    if (masterName === avtName || masterName.includes(avtName) || avtName.includes(masterName)) {
+      bestQty = qty;
+      break;
+    }
+  }
+
+  // Also check non-master-linked items in the audit
+  if (bestQty === 0 && appState.audit) {
+    for (const [zone, items] of Object.entries(appState.audit.counts)) {
+      for (const item of items) {
+        const itemName = item.name.toLowerCase();
+        if (itemName === avtName || itemName.includes(avtName) || avtName.includes(itemName)) {
+          bestQty += item.qty;
+        }
+      }
+    }
+  }
+
+  return bestQty;
+}
+
+function updateCountPhaseIndicator() {
+  const phase = appState.audit?.countPhase || 'pre';
+  const phases = {
+    pre: ['', '', '', '', ''],
+    avt: ['active', '', '', '', ''],
+    count1: ['done', 'active', '', '', ''],
+    review: ['done', 'done', 'active', '', ''],
+    count2: ['done', 'done', 'done', 'active', ''],
+    final: ['done', 'done', 'done', 'done', 'active'],
+  };
+
+  const states = phases[phase] || phases.pre;
+  ['phaseAvt', 'phaseCount1', 'phaseReview', 'phaseCount2', 'phaseFinal'].forEach((id, i) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.className = 'phase ' + states[i];
+    }
+  });
+}
+
+function updateVarianceActions() {
+  const phase = appState.audit?.countPhase || 'pre';
+  const c1Btn = document.getElementById('closeCount1Btn');
+  const c2Btn = document.getElementById('closeCount2Btn');
+  const e1Btn = document.getElementById('exportCount1Btn');
+  const e2Btn = document.getElementById('exportCount2Btn');
+
+  if (phase === 'count1' || phase === 'avt' || phase === 'pre') {
+    c1Btn.classList.remove('hide');
+    c2Btn.classList.add('hide');
+    e1Btn.classList.remove('hide');
+    e2Btn.classList.add('hide');
+  } else if (phase === 'review' || phase === 'count2') {
+    c1Btn.classList.add('hide');
+    c2Btn.classList.remove('hide');
+    e1Btn.classList.remove('hide');
+    e2Btn.classList.add('hide');
+  } else if (phase === 'final') {
+    c1Btn.classList.add('hide');
+    c2Btn.classList.add('hide');
+    e1Btn.classList.remove('hide');
+    e2Btn.classList.remove('hide');
+  }
+}
+
+function setVarianceFilter(filter, element) {
+  appState.varianceFilter = filter;
+  element.closest('.mode-toggle').querySelectorAll('.mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.vf === filter);
+  });
+  renderVariancePage();
+}
+
+function getCountedMap() {
+  const map = {};
+  if (!appState.audit) return map;
+  Object.values(appState.audit.counts).forEach(zoneItems => {
+    zoneItems.forEach(item => {
+      if (item.masterId) map[item.masterId] = (map[item.masterId] || 0) + item.qty;
+    });
+  });
+  return map;
+}
+
+/* ================================================================
+   COUNT 1 CLOSE
+   Compares counted data against AVT, generates severity scores,
+   and creates the recount focus list for counters.
+   ================================================================ */
+function closeCount1() {
+  if (!appState.audit) { showToast('No active audit', 'error'); return; }
+
+  const avtData = appState.avtData || [];
+  if (avtData.length === 0) {
+    showToast('Upload an AVT report first before closing Count 1', 'error');
+    return;
+  }
+
+  showConfirm('Close Count 1? This will generate the recount list for Count 2.', () => {
+    // Save Count 1 data snapshot
+    appState.audit.count1Data = JSON.parse(JSON.stringify(appState.audit.counts));
+    appState.audit.count1ClosedAt = new Date().toISOString();
+    appState.audit.countPhase = 'review';
+
+    // Generate recount list from AVT variance data
+    const recountItems = generateRecountFromAvt();
+    appState.audit.recounts = {};
+
+    recountItems.forEach(item => {
+      const key = item.avt.itemName;
+      appState.audit.recounts[key] = {
+        avtItem: item.avt,
+        severity: item.severity,
+        varianceValue: item.avt.varianceValue,
+        variance: item.avt.variance,
+        actual: item.avt.actual,
+        theo: item.avt.theo,
+        count1Qty: item.counted,
+        recountQty: null,
+        status: 'pending',
+        notes: '',
+      };
+    });
+
+    logActivity('Count 1 closed. ' + recountItems.length + ' items flagged for recount.');
+    saveState();
+    showToast('Count 1 closed. ' + recountItems.length + ' items need recount.', 'success');
+
+    // Navigate to recount page
+    showPage('recount');
+  });
+}
+
+function generateRecountFromAvt() {
+  const avtData = appState.avtData || [];
+  const countedMap = getCountedMap();
+
+  // Filter AVT to current venue
+  let venueAvt = avtData;
+  if (appState.currentVenue) {
+    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id || !a.venueId);
+  }
+
+  const flagged = [];
+
+  venueAvt.forEach(avt => {
+    const counted = findCountedQtyForAvtItem(avt, countedMap);
+    const severity = scoreSeverity({
+      varianceValue: avt.varianceValue,
+      variance: avt.variance,
+      category: avt.category,
+      weeksActive: 0,
+    });
+
+    if (needsRecount(severity, Math.abs(avt.varianceValue))) {
+      flagged.push({ avt, counted, severity });
+    }
+  });
+
+  flagged.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity));
+  return flagged;
+}
+
+/* ================================================================
+   COUNT 2 CLOSE
+   Compares recount data against fresh AVT (if uploaded).
+   Generates final report with resolved/unresolved items.
+   ================================================================ */
+function closeCount2() {
+  if (!appState.audit) { showToast('No active audit', 'error'); return; }
+
+  showConfirm('Close Count 2 and generate the final report?', () => {
+    appState.audit.count2Data = JSON.parse(JSON.stringify(appState.audit.counts));
+    appState.audit.count2ClosedAt = new Date().toISOString();
+    appState.audit.countPhase = 'final';
+    appState.audit.status = 'submitted';
+
+    // Mark recount items as resolved/unresolved
+    if (appState.audit.recounts) {
+      Object.entries(appState.audit.recounts).forEach(([key, rec]) => {
+        if (rec.recountQty !== null) {
+          rec.status = 'done';
+        }
+      });
+    }
+
+    // Save to history
+    appState.auditHistory.push({
+      ...appState.audit,
+      venueName: appState.currentVenue?.name,
+    });
+
+    document.getElementById('headerAuditBadge').className = 'audit-badge submitted';
+    document.getElementById('headerAuditBadge').textContent = 'Submitted';
+
+    logActivity('Count 2 closed. Final report generated.');
+    saveState();
+    showToast('Audit complete. Final report ready.', 'success');
+    renderVariancePage();
+  });
+}
+
+/* ================================================================
+   RECOUNT PAGE (Count 2 focus list for counters)
+   Shows items flagged from Count 1 with severity and variance info.
+   ================================================================ */
+let recountFilter = 'all';
+
+function setRecountFilter(filter, element) {
+  recountFilter = filter;
+  element.closest('.mode-toggle').querySelectorAll('.mode-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.rf === filter);
+  });
+  renderRecountPage();
+}
+
+function renderRecountPage() {
+  if (!appState.audit?.recounts) {
+    document.getElementById('recountList').innerHTML =
+      '<div class="empty-state"><p>No recount list generated yet. Close Count 1 first from the Variance page.</p></div>';
+    document.getElementById('recountProgress').innerHTML = '';
+    return;
+  }
+
+  const entries = Object.entries(appState.audit.recounts);
+  const doneCount = entries.filter(([, rec]) => rec.status === 'done').length;
+  const totalCount = entries.length;
+
+  // Progress
+  document.getElementById('recountProgress').innerHTML =
+    '<div class="progress-info">' +
+      '<span><strong>' + doneCount + '</strong> of <strong>' + totalCount + '</strong> recounted</span>' +
+      '<span><strong>' + Math.round(totalCount > 0 ? doneCount / totalCount * 100 : 0) + '%</strong></span>' +
+    '</div>' +
+    '<div class="progress-bar"><div class="progress-fill" style="width:' + (totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0) + '%"></div></div>';
+
+  // Filter
+  let filtered = entries;
+  if (recountFilter === 'critical') filtered = entries.filter(([, r]) => r.severity === 'CRITICAL');
+  if (recountFilter === 'high') filtered = entries.filter(([, r]) => r.severity === 'HIGH');
+  if (recountFilter === 'pending') filtered = entries.filter(([, r]) => r.status === 'pending');
+
+  // Sort by severity
+  filtered.sort((a, b) => severityOrder(a[1].severity) - severityOrder(b[1].severity));
+
+  // Render
+  document.getElementById('recountList').innerHTML = filtered.map(([key, rec]) => {
+    const isDone = rec.status === 'done';
+    return '<div class="focus-item ' + (isDone ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
+      'onclick="openRecountEntry(\'' + esc(key).replace(/'/g, "\\'") + '\')" style="cursor:pointer">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">' +
+        '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(key) + '</div>' +
+        '<span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px">' +
+        '<span>Actual: ' + rec.actual.toFixed(1) + '</span>' +
+        '<span>Theo: ' + rec.theo.toFixed(1) + '</span>' +
+        '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' +
+        '<span>Count 1: ' + (rec.count1Qty || 0) + '</span>' +
+        (isDone ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '<span style="color:var(--warning)">Pending</span>') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function openRecountEntry(key) {
+  const rec = appState.audit?.recounts?.[key];
+  if (!rec) return;
+
+  // Reuse the guided entry modal for recount
+  appState.guidedCurrentItem = { name: key, id: key };
+  document.getElementById('guidedItemTitle').childNodes[0].textContent = 'Recount: ' + key + ' ';
+  document.getElementById('guidedItemInfo').innerHTML =
+    '<div style="font-size:12px;color:var(--text-muted)">' +
+      'Severity: <span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
+      ' | Actual: ' + rec.actual.toFixed(1) +
+      ' | Theo: ' + rec.theo.toFixed(1) +
+      ' | Variance: $' + rec.varianceValue.toFixed(2) +
+      '<br>Count 1 result: <strong style="color:var(--text)">' + (rec.count1Qty || 'Not counted') + '</strong>' +
+    '</div>';
+
+  document.getElementById('guidedQty').value = rec.recountQty !== null ? rec.recountQty : '';
+  document.getElementById('guidedEntryModal').classList.remove('hide');
+  document.getElementById('guidedEntryModal').dataset.mode = 'recount';
+  document.getElementById('guidedEntryModal').dataset.masterId = key;
+
+  setTimeout(() => document.getElementById('guidedQty').focus(), 100);
+}
+
+function submitRecount() {
+  if (!appState.audit?.recounts) return;
+
+  // Mark remaining pending items
+  const pending = Object.values(appState.audit.recounts).filter(r => r.status === 'pending');
+  if (pending.length > 0) {
+    showConfirm(pending.length + ' items still pending. Mark recount as complete anyway?', () => {
+      appState.audit.countPhase = 'count2';
+      logActivity('Recount phase completed. ' + pending.length + ' items skipped.');
+      saveState();
+      showToast('Recount complete. Go to Variance to close Count 2.', 'success');
+    });
+    return;
+  }
+
+  appState.audit.countPhase = 'count2';
+  logActivity('All recount items verified.');
+  saveState();
+  showToast('Recount complete. Go to Variance to close Count 2.', 'success');
+}
+
+/* ================================================================
+   CSV EXPORTS — Count 1 and Count 2
+   Matches the format from the inventory workflow app.
+   ================================================================ */
+function exportCountCSV(countNumber) {
+  if (!appState.audit) { showToast('No active audit', 'error'); return; }
+
+  const avtData = appState.avtData || [];
+  const countData = countNumber === 1 ? appState.audit.count1Data : appState.audit.counts;
+  const venueName = appState.currentVenue?.name || 'Unknown';
+
+  // Build counted items list
+  const countedItems = [];
+  if (countData) {
+    Object.entries(countData).forEach(([zone, items]) => {
+      items.forEach(item => countedItems.push({ ...item, zone }));
+    });
+  }
+
+  // Build combined variance rows from AVT
+  let venueAvt = avtData;
+  if (appState.currentVenue) {
+    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id || !a.venueId);
+  }
+
+  // Headers matching workflow app format
+  const headers = [
+    'Store', 'Source', 'Product', 'Category', 'Location',
+    'Actual Qty (Craftable)', 'Theo Qty (Craftable)', 'Qty Variance (Craftable)',
+    'Unit Price', 'Variance ($)', 'Variance %',
+    'Counted Qty (App)', 'Severity', 'Needs Recount',
+    'Recount Qty', 'Status', 'Notes'
+  ];
+
+  const csvRows = [headers.map(h => csvEscape(h)).join(',')];
+
+  venueAvt.forEach(avt => {
+    const countedQty = findCountedQtyForAvtItem(avt, getCountedMap());
+    const severity = scoreSeverity({
+      varianceValue: avt.varianceValue,
+      variance: avt.variance,
+      category: avt.category,
+      weeksActive: 0,
+    });
+    const recount = needsRecount(severity, Math.abs(avt.varianceValue));
+
+    // Check recount data if Count 2
+    let recountQty = '';
+    let status = '';
+    if (countNumber === 2 && appState.audit.recounts) {
+      const rec = appState.audit.recounts[avt.itemName];
+      if (rec) {
+        recountQty = rec.recountQty !== null ? rec.recountQty : '';
+        status = rec.status === 'done' ? 'Recounted' : 'Pending';
+      }
+    }
+
+    csvRows.push([
+      csvEscape(venueName),
+      csvEscape('Count ' + countNumber),
+      csvEscape(avt.itemName),
+      csvEscape(avt.category),
+      csvEscape(avt.store),
+      avt.actual,
+      avt.theo,
+      avt.variance.toFixed(2),
+      '$' + avt.cuPrice.toFixed(2),
+      '$' + avt.varianceValue.toFixed(2),
+      (avt.variancePct || 0).toFixed(1) + '%',
+      countedQty || '',
+      severity,
+      recount ? 'YES' : 'NO',
+      recountQty,
+      status,
+      ''
+    ].join(','));
+  });
+
+  // Summary section
+  csvRows.push('');
+  csvRows.push('"SUMMARY"');
+  csvRows.push('"Venue:","' + venueName + '"');
+  csvRows.push('"Count:","' + countNumber + '"');
+  csvRows.push('"Date:","' + new Date().toLocaleString() + '"');
+  csvRows.push('"Total AVT items:","' + venueAvt.length + '"');
+  csvRows.push('"Items with variance:","' + venueAvt.filter(a => a.variance !== 0).length + '"');
+  csvRows.push('"Total variance value:","$' + Math.abs(venueAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '"');
+  csvRows.push('"Items needing recount:","' + venueAvt.filter(a => needsRecount(scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, category: a.category, weeksActive: 0 }), Math.abs(a.varianceValue))).length + '"');
+
+  // Severity breakdown
+  csvRows.push('');
+  csvRows.push('"SEVERITY BREAKDOWN"');
+  ['CRITICAL', 'HIGH', 'MEDIUM', 'WATCH', 'LOW'].forEach(sev => {
+    const count = venueAvt.filter(a => scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, category: a.category, weeksActive: 0 }) === sev).length;
+    csvRows.push('"' + sev + ':","' + count + '"');
+  });
+
+  const csv = '\uFEFF' + csvRows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'Count' + countNumber + '_' + venueName.replace(/\s/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+  link.click();
+  URL.revokeObjectURL(url);
+
+  showToast('Count ' + countNumber + ' CSV exported', 'success');
+  logActivity('Count ' + countNumber + ' CSV exported for ' + venueName);
+}
+
+/* ================================================================
+   RECOUNT LIST GENERATION (legacy — now uses AVT-based flow)
+   ================================================================ */
+function generateRecountList() {
+  closeCount1();
+}
+
+/* ================================================================
+   SUMMARY PAGE
+   FIX #6: Includes audit history rendering
+   ================================================================ */
+function renderSummaryPage() {
+  if (!appState.audit) {
+    document.getElementById('summaryStats').innerHTML =
+      '<p style="color:var(--text-dim)">No active audit</p>';
+    return;
+  }
+
+  const allItems = getAllCountedItems();
+  const totalQty = allItems.reduce((sum, item) => sum + item.qty, 0);
+  const byMethod = { barcode: 0, photo: 0, manual: 0, guided: 0 };
+  const issueCount = allItems.filter(item => item.issue && item.issue !== 'none').length;
+  allItems.forEach(item => byMethod[item.method] = (byMethod[item.method] || 0) + 1);
+
+  const elapsedSeconds = Math.floor((Date.now() - new Date(appState.audit.startedAt).getTime()) / 1000);
+  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+
+  // Stats
+  document.getElementById('summaryStats').innerHTML =
+    '<div class="stat-row"><span class="stat-label">Venue</span><span class="stat-value">' + esc(appState.currentVenue?.name || '—') + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Status</span><span class="stat-value"><span class="audit-badge ' + appState.audit.status + '">' + appState.audit.status + '</span></span></div>' +
+    '<div class="stat-row"><span class="stat-label">Duration</span><span class="stat-value">' + elapsedMinutes + ' min</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Unique items</span><span class="stat-value accent">' + allItems.length + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Total quantity</span><span class="stat-value accent">' + Math.round(totalQty) + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Guided</span><span class="stat-value">' + byMethod.guided + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Barcode</span><span class="stat-value">' + byMethod.barcode + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Photo</span><span class="stat-value">' + byMethod.photo + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Manual</span><span class="stat-value">' + byMethod.manual + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value ' + (issueCount > 0 ? 'danger' : '') + '">' + issueCount + '</span></div>';
+
+  // Zone breakdown
+  document.getElementById('zoneSummary').innerHTML = Object.entries(appState.audit.counts).map(([zone, items]) => {
+    const qty = items.reduce((sum, item) => sum + item.qty, 0);
+    return '<div class="summary-card" style="margin-bottom:4px;padding:10px 12px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<span style="font-size:13px;font-weight:500">' + esc(zone) + '</span>' +
+        '<div style="display:flex;gap:10px;align-items:center">' +
+          '<span style="font-size:11px;color:var(--text-muted)">' + items.length + ' items</span>' +
+          '<span style="font-family:var(--mono);font-weight:600;color:var(--accent)">' + Math.round(qty) + '</span>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+
+  // Activity log
+  const logEntries = (appState.audit.log || []).slice(-30).reverse();
+  document.getElementById('activityLog').innerHTML = logEntries.map(entry => {
+    const time = new Date(entry.time);
+    return '<div class="log-entry">' +
+      '<span class="log-time">' + time.toLocaleTimeString() + '</span> ' +
+      '<span class="log-user">' + esc(entry.user) + '</span> ' +
+      '<span class="log-text">' + esc(entry.text) + '</span>' +
+    '</div>';
+  }).join('');
+
+  // FIX #6: Audit history
+  renderAuditHistory();
+}
+
+function renderAuditHistory() {
+  const history = (appState.auditHistory || []).slice().reverse();
+
+  if (history.length === 0) {
+    document.getElementById('historyList').innerHTML =
+      '<div class="empty-state"><p>No past audits</p></div>';
+    return;
+  }
+
+  document.getElementById('historyList').innerHTML = history.map(audit => {
+    const allItems = [];
+    Object.values(audit.counts).forEach(zoneItems => allItems.push(...zoneItems));
+    const totalQty = allItems.reduce((sum, item) => sum + item.qty, 0);
+    const date = new Date(audit.startedAt);
+
+    return '<div class="summary-card" style="margin-bottom:6px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+        '<div>' +
+          '<div style="font-weight:600;font-size:14px">' + esc(audit.venueName || 'Venue') + '</div>' +
+          '<div style="font-size:12px;color:var(--text-muted)">' +
+            date.toLocaleDateString() + ' | ' +
+            allItems.length + ' items | ' +
+            Math.round(totalQty) + ' units' +
+          '</div>' +
+        '</div>' +
+        '<span class="audit-badge ' + (audit.status || 'submitted') + '">' + (audit.status || 'submitted') + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+/* ================================================================
+   EXPORT CSV
+   FIX #7: Proper RFC 4180 quote escaping
+   ================================================================ */
+function csvEscape(value) {
+  const str = String(value || '');
+  return '"' + str.replace(/"/g, '""') + '"';
+}
+
+function exportCSV() {
+  if (!appState.audit) return;
+
+  const allItems = getAllCountedItems();
+  let csv = 'Item,Category,Quantity,Zone,Method,SKU,Issue,Timestamp\n';
+
+  allItems.forEach(item => {
+    csv += csvEscape(item.name) + ',' +
+      csvEscape(item.category) + ',' +
+      item.qty + ',' +
+      csvEscape(item.zone) + ',' +
+      csvEscape(item.method) + ',' +
+      csvEscape(item.sku) + ',' +
+      csvEscape(item.issue) + ',' +
+      csvEscape(item.timestamp) + '\n';
+  });
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'audit_' + (appState.currentVenue?.name || 'venue').replace(/\s/g, '_') + '_' + new Date().toISOString().slice(0, 10) + '.csv';
+  link.click();
+  URL.revokeObjectURL(url);
+
+  showToast('CSV exported', 'success');
+}
+
+function submitAudit() {
+  if (!appState.audit) return;
+
+  if (appState.audit.status === 'submitted') {
+    showToast('Audit already submitted', 'error');
+    return;
+  }
+
+  showConfirm('Submit this audit? It will be locked from editing.', () => {
+    appState.audit.status = 'submitted';
+    appState.audit.completedAt = new Date().toISOString();
+    document.getElementById('headerAuditBadge').className = 'audit-badge submitted';
+    document.getElementById('headerAuditBadge').textContent = 'Submitted';
+    logActivity('Audit submitted');
+
+    // Save to history
+    appState.auditHistory.push({
+      ...appState.audit,
+      venueName: appState.currentVenue?.name,
+    });
+
+    saveState();
+    showToast('Audit submitted', 'success');
+    renderSummaryPage();
+  });
+}
+
+/* ================================================================
+   UTILITY FUNCTIONS
+   ================================================================ */
+function getAllCountedItems() {
+  if (!appState.audit) return [];
+  const all = [];
+  Object.entries(appState.audit.counts).forEach(([zone, items]) => {
+    items.forEach(item => all.push({ ...item, zone }));
+  });
+  return all;
+}
+
+function formatQty(qty) {
+  if (qty % 1 === 0) return String(Math.round(qty));
+  return qty.toFixed(2);
+}
+
+function getCategoryLabel(category) {
+  const labels = { wine: 'WIN', spirits: 'SPR', beer: 'BER', food: 'FD', other: 'OTH' };
+  return labels[category] || 'OTH';
+}
+
+function getCategoryColor(category) {
+  const colors = {
+    wine: 'var(--accent)',
+    spirits: 'var(--blue)',
+    beer: 'var(--warning)',
+    food: 'var(--success)',
+    other: 'var(--text-dim)',
+  };
+  return colors[category] || 'var(--text-dim)';
+}
+
+function showToast(message, type) {
+  document.querySelectorAll('.toast').forEach(el => el.remove());
+  const toast = document.createElement('div');
+  toast.className = 'toast ' + (type || '');
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 2500);
+}
+
+let confirmCallback = null;
+
+function showConfirm(message, onConfirm) {
+  document.getElementById('confirmMsg').textContent = message;
+  document.getElementById('confirmDialog').classList.remove('hide');
+  confirmCallback = onConfirm;
+}
+
+function closeConfirm(confirmed) {
+  document.getElementById('confirmDialog').classList.add('hide');
+  if (confirmed && confirmCallback) confirmCallback();
+  confirmCallback = null;
+}
+
+/* ================================================================
+   INITIALIZATION
+   ================================================================ */
+openPhotoDB().catch(() => {});
+loadItemMaster(); // Load 4,592 items from items.json
+
+if (appState.user) {
+  if (appState.currentVenue) {
+    document.getElementById('headerVenue').textContent = appState.currentVenue.name;
+    showPage('count');
+  } else {
+    showPage('venues');
+  }
+} else {
+  showPage('login');
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+</script>
+</body>
+</html>
