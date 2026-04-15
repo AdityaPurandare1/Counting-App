@@ -1435,7 +1435,10 @@ select.form-input {
         <span id="timerDisplay">00:00</span>
         <span style="flex:1"></span>
         <span id="auditStatusLabel" class="audit-badge active">In progress</span>
-        <button onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:11px;padding:3px 10px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:8px">End audit</button>
+        <button onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:10px;padding:2px 8px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:6px">Cancel</button>
+      </div>
+      <div id="closeCount1Bar" class="hide" style="margin-bottom:10px">
+        <button class="submit-btn" onclick="closeCount1()" style="font-size:13px;padding:10px">Close Count 1 → Generate recount list</button>
       </div>
       <div id="recountBanner" class="recount-banner hide" onclick="showPage('recount')"></div>
       <div id="countProgress" class="progress-wrap"></div>
@@ -1743,12 +1746,17 @@ select.form-input {
       <input class="form-input" id="manualNotes" placeholder="Optional">
     </div>
     <div class="form-group">
-      <label>Issue</label>
+      <label>Issue (select if applicable)</label>
       <div class="issue-chips" id="issueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectIssue(this)">None</span>
+        <span class="issue-chip" data-issue="no-sticker" onclick="selectIssue(this)">No sticker</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="no-upc" onclick="selectIssue(this)">No UPC/barcode</span>
+        <span class="issue-chip" data-issue="wrong-location" onclick="selectIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectIssue(this)">Damaged</span>
         <span class="issue-chip" data-issue="misplaced" onclick="selectIssue(this)">Misplaced</span>
         <span class="issue-chip" data-issue="expired" onclick="selectIssue(this)">Expired</span>
+        <span class="issue-chip" data-issue="wrong-vintage" onclick="selectIssue(this)">Wrong vintage</span>
         <span class="issue-chip" data-issue="no-label" onclick="selectIssue(this)">No label</span>
         <span class="issue-chip" data-issue="other" onclick="selectIssue(this)">Other</span>
       </div>
@@ -1812,13 +1820,24 @@ select.form-input {
       <button class="partial-btn active" onclick="setPartial(1)">Full</button>
     </div>
     <div class="form-group">
-      <label>Issue</label>
+      <label>Issue (select if applicable)</label>
       <div class="issue-chips" id="guidedIssueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectGuidedIssue(this)">None</span>
+        <span class="issue-chip" data-issue="no-sticker" onclick="selectGuidedIssue(this)">No sticker</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectGuidedIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="no-upc" onclick="selectGuidedIssue(this)">No UPC/barcode</span>
+        <span class="issue-chip" data-issue="wrong-location" onclick="selectGuidedIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectGuidedIssue(this)">Damaged</span>
         <span class="issue-chip" data-issue="misplaced" onclick="selectGuidedIssue(this)">Misplaced</span>
         <span class="issue-chip" data-issue="expired" onclick="selectGuidedIssue(this)">Expired</span>
+        <span class="issue-chip" data-issue="wrong-vintage" onclick="selectGuidedIssue(this)">Wrong vintage</span>
+        <span class="issue-chip" data-issue="no-label" onclick="selectGuidedIssue(this)">No label</span>
+        <span class="issue-chip" data-issue="other" onclick="selectGuidedIssue(this)">Other</span>
       </div>
+    </div>
+    <div class="form-group">
+      <label>Issue notes (optional)</label>
+      <input class="form-input" id="guidedIssueNotes" placeholder="e.g. sticker fell off, wrong shelf...">
     </div>
     <div style="display:flex;gap:8px">
       <button class="submit-btn secondary" style="flex:1" onclick="closeGuidedEntry()">Skip</button>
@@ -2036,16 +2055,22 @@ function saveState() {
   if (saveTimeout) clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
     try {
+      // Session state (cleared on reset)
       localStorage.setItem('hwood_v3', JSON.stringify({
         user: appState.user,
         currentVenueId: appState.currentVenue?.id,
         currentZone: appState.currentZone,
         audit: appState.audit,
         auditHistory: appState.auditHistory,
-        avtData: appState.avtData,
-        avtUploadedAt: appState.avtUploadedAt,
-        avtStores: appState.avtStores,
       }));
+      // AVT data (survives reset — expensive to re-upload)
+      if (appState.avtData && appState.avtData.length > 0) {
+        localStorage.setItem('hwood_avt', JSON.stringify({
+          avtData: appState.avtData,
+          avtUploadedAt: appState.avtUploadedAt,
+          avtStores: appState.avtStores,
+        }));
+      }
     } catch (error) {
       console.warn('State save failed:', error);
     }
@@ -2055,25 +2080,38 @@ function saveState() {
 function loadState() {
   try {
     const data = JSON.parse(localStorage.getItem('hwood_v3'));
-    if (!data) return;
-    if (data.user) appState.user = data.user;
-    if (data.currentVenueId) appState.currentVenue = appState.venues.find(v => v.id === data.currentVenueId);
-    if (data.currentZone) appState.currentZone = data.currentZone;
-    if (data.audit) appState.audit = data.audit;
-    if (data.auditHistory) appState.auditHistory = data.auditHistory;
-    if (data.avtData) appState.avtData = data.avtData;
-    if (data.avtUploadedAt) appState.avtUploadedAt = data.avtUploadedAt;
-    if (data.avtStores) appState.avtStores = data.avtStores;
+    if (data) {
+      if (data.user) appState.user = data.user;
+      if (data.currentVenueId) appState.currentVenue = appState.venues.find(v => v.id === data.currentVenueId);
+      if (data.currentZone) appState.currentZone = data.currentZone;
+      if (data.audit) appState.audit = data.audit;
+      if (data.auditHistory) appState.auditHistory = data.auditHistory;
+      // Legacy: load AVT from v3 if it was saved there before the split
+      if (data.avtData) appState.avtData = data.avtData;
+      if (data.avtUploadedAt) appState.avtUploadedAt = data.avtUploadedAt;
+      if (data.avtStores) appState.avtStores = data.avtStores;
+    }
   } catch (error) {
     console.warn('State load failed:', error);
   }
+
+  // Load AVT from its own key (takes priority over legacy)
+  try {
+    const avt = JSON.parse(localStorage.getItem('hwood_avt'));
+    if (avt) {
+      if (avt.avtData) appState.avtData = avt.avtData;
+      if (avt.avtUploadedAt) appState.avtUploadedAt = avt.avtUploadedAt;
+      if (avt.avtStores) appState.avtStores = avt.avtStores;
+    }
+  } catch (error) {}
 }
 
 // Auto-reset if ?reset=1 is in URL
 if (window.location.search.includes('reset=1')) {
   localStorage.removeItem('hwood_v3');
   localStorage.removeItem('hwood_upc');
-  // Note: learned UPCs are NOT cleared on reset — they are valuable.
+  // AVT data and learned UPCs survive reset — they are expensive to recreate
+  // To fully clear everything: localStorage.clear()
   // To clear them too, add: localStorage.removeItem('hwood_learned_upc');
   window.location.href = window.location.pathname;
 }
@@ -2396,6 +2434,15 @@ function renderCountPage() {
     if (mode === 'guided') renderGuidedMode();
     else if (mode === 'quick') renderQuickMode();
     else renderFreeList();
+
+    // Show "Close Count 1" button for managers/admins during count1 phase
+    const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
+    const isCount1 = appState.audit.countPhase === 'count1';
+    const hasItems = getAllCountedItems().length > 0;
+    const closeBar = document.getElementById('closeCount1Bar');
+    if (closeBar) {
+      closeBar.classList.toggle('hide', !(isAdmin && isCount1 && hasItems));
+    }
 
   } else {
     // Show pre-audit screen
@@ -2805,7 +2852,8 @@ function submitGuidedEntry() {
     if (index > -1) zoneItems.splice(index, 1);
   });
 
-  addCountEntry(item.name, item.category, qty, 'guided', item.sku, null, appState.guidedIssue, null, null, item.id);
+  const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
+  addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, appState.guidedIssue, null, null, item.id);
   closeGuidedEntry();
   renderCountPage();
 }
@@ -4316,43 +4364,68 @@ function getCountedMap() {
 function closeCount1() {
   if (!appState.audit) { showToast('No active audit', 'error'); return; }
 
-  const avtData = appState.avtData || [];
-  if (avtData.length === 0) {
-    showToast('Upload an AVT report first before closing Count 1', 'error');
+  const allItems = getAllCountedItems();
+  if (allItems.length === 0) {
+    showToast('No items counted yet. Count some items first.', 'error');
     return;
   }
 
-  showConfirm('Close Count 1? This will generate the recount list for Count 2.', () => {
+  const avtData = appState.avtData || [];
+  const hasAvt = avtData.length > 0;
+
+  const msg = hasAvt
+    ? 'Close Count 1? This will compare against the AVT report and generate the recount list.'
+    : 'Close Count 1? No AVT data uploaded — the recount list will include all counted items for verification. Upload an AVT report on the Variance tab for full variance analysis.';
+
+  showConfirm(msg, () => {
     // Save Count 1 data snapshot
     appState.audit.count1Data = JSON.parse(JSON.stringify(appState.audit.counts));
     appState.audit.count1ClosedAt = new Date().toISOString();
     appState.audit.countPhase = 'review';
 
-    // Generate recount list from AVT variance data
-    const recountItems = generateRecountFromAvt();
+    // Generate recount list
     appState.audit.recounts = {};
 
-    recountItems.forEach(item => {
-      const key = item.avt.itemName;
-      appState.audit.recounts[key] = {
-        avtItem: item.avt,
-        severity: item.severity,
-        varianceValue: item.avt.varianceValue,
-        variance: item.avt.variance,
-        actual: item.avt.actual,
-        theo: item.avt.theo,
-        count1Qty: item.counted,
-        recountQty: null,
-        status: 'pending',
-        notes: '',
-      };
-    });
+    if (hasAvt) {
+      // AVT-based recount: flag items with high variance from Craftable data
+      const recountItems = generateRecountFromAvt();
+      recountItems.forEach(item => {
+        appState.audit.recounts[item.avt.itemName] = {
+          avtItem: item.avt,
+          severity: item.severity,
+          varianceValue: item.avt.varianceValue,
+          variance: item.avt.variance,
+          actual: item.avt.actual,
+          theo: item.avt.theo,
+          count1Qty: item.counted,
+          recountQty: null,
+          status: 'pending',
+          notes: '',
+        };
+      });
+      logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items flagged for recount.');
+      showToast('Count 1 closed. ' + recountItems.length + ' items need recount.', 'success');
+    } else {
+      // No AVT: create recount list from ALL counted items so counters can verify
+      allItems.forEach(item => {
+        appState.audit.recounts[item.name] = {
+          avtItem: null,
+          severity: 'MEDIUM',
+          varianceValue: 0,
+          variance: 0,
+          actual: item.qty,
+          theo: 0,
+          count1Qty: item.qty,
+          recountQty: null,
+          status: 'pending',
+          notes: 'No AVT data — verify count',
+        };
+      });
+      logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items listed for verification.');
+      showToast('Count 1 closed. All ' + allItems.length + ' items listed for recount verification.', 'success');
+    }
 
-    logActivity('Count 1 closed. ' + recountItems.length + ' items flagged for recount.');
     saveState();
-    showToast('Count 1 closed. ' + recountItems.length + ' items need recount.', 'success');
-
-    // Navigate to recount page
     showPage('recount');
   });
 }
@@ -4559,16 +4632,38 @@ function exportCountCSV(countNumber) {
     venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id || !a.venueId);
   }
 
-  // Headers matching workflow app format
+  // Headers matching workflow app format — with Issues columns
   const headers = [
-    'Store', 'Source', 'Product', 'Category', 'Location',
+    'Store', 'Source', 'Product', 'Category', 'Location', 'Zone',
     'Actual Qty (Craftable)', 'Theo Qty (Craftable)', 'Qty Variance (Craftable)',
     'Unit Price', 'Variance ($)', 'Variance %',
     'Counted Qty (App)', 'Severity', 'Needs Recount',
-    'Recount Qty', 'Status', 'Notes'
+    'Recount Qty', 'Status', 'Issue Type', 'Issue Notes'
   ];
 
   const csvRows = [headers.map(h => csvEscape(h)).join(',')];
+
+  // Find issues for each item from counted data
+  function findIssuesForItem(itemName) {
+    const issues = [];
+    if (!countData) return { type: '', notes: '' };
+    Object.entries(countData).forEach(([zone, items]) => {
+      items.forEach(item => {
+        if (item.name.toLowerCase() === itemName.toLowerCase() ||
+            (item.name.toLowerCase().includes(itemName.toLowerCase().split(' ')[0]))) {
+          if (item.issue && item.issue !== 'none') {
+            issues.push({ type: item.issue, notes: item.notes || '', zone: zone });
+          }
+        }
+      });
+    });
+    if (issues.length === 0) return { type: '', notes: '', zone: '' };
+    return {
+      type: issues.map(i => i.type).join('; '),
+      notes: issues.map(i => i.notes).filter(Boolean).join('; '),
+      zone: issues.map(i => i.zone).join('; '),
+    };
+  }
 
   venueAvt.forEach(avt => {
     const countedQty = findCountedQtyForAvtItem(avt, getCountedMap());
@@ -4579,6 +4674,7 @@ function exportCountCSV(countNumber) {
       weeksActive: 0,
     });
     const recount = needsRecount(severity, Math.abs(avt.varianceValue));
+    const issues = findIssuesForItem(avt.itemName);
 
     // Check recount data if Count 2
     let recountQty = '';
@@ -4608,9 +4704,40 @@ function exportCountCSV(countNumber) {
       recount ? 'YES' : 'NO',
       recountQty,
       status,
-      ''
+      csvEscape(issues.type),
+      csvEscape(issues.notes)
     ].join(','));
   });
+
+  // Also add counted items that are NOT in AVT (items with issues but no Craftable match)
+  if (countData) {
+    Object.entries(countData).forEach(([zone, items]) => {
+      items.forEach(item => {
+        if (item.issue && item.issue !== 'none') {
+          // Check if this item was already in the AVT rows
+          const inAvt = venueAvt.some(a => a.itemName.toLowerCase() === item.name.toLowerCase());
+          if (!inAvt) {
+            csvRows.push([
+              csvEscape(venueName),
+              csvEscape('Count ' + countNumber + ' (App only)'),
+              csvEscape(item.name),
+              csvEscape(item.category),
+              csvEscape(''),
+              csvEscape(zone),
+              '', '', '', '', '', '',
+              item.qty,
+              'N/A',
+              '',
+              '',
+              '',
+              csvEscape(item.issue),
+              csvEscape(item.notes || '')
+            ].join(','));
+          }
+        }
+      });
+    });
+  }
 
   // Summary section
   csvRows.push('');
@@ -4630,6 +4757,29 @@ function exportCountCSV(countNumber) {
     const count = venueAvt.filter(a => scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, category: a.category, weeksActive: 0 }) === sev).length;
     csvRows.push('"' + sev + ':","' + count + '"');
   });
+
+  // Issues summary for corporate
+  csvRows.push('');
+  csvRows.push('"ISSUES FOR CORPORATE"');
+  csvRows.push('"Issue Type","Count","Items"');
+  const issueSummary = {};
+  if (countData) {
+    Object.entries(countData).forEach(([zone, items]) => {
+      items.forEach(item => {
+        if (item.issue && item.issue !== 'none') {
+          if (!issueSummary[item.issue]) issueSummary[item.issue] = [];
+          issueSummary[item.issue].push(item.name);
+        }
+      });
+    });
+  }
+  if (Object.keys(issueSummary).length > 0) {
+    Object.entries(issueSummary).forEach(([issue, names]) => {
+      csvRows.push(csvEscape(issue) + ',' + names.length + ',' + csvEscape(names.join('; ')));
+    });
+  } else {
+    csvRows.push('"No issues reported"');
+  }
 
   const csv = '\uFEFF' + csvRows.join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
