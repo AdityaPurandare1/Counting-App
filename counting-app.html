@@ -1410,9 +1410,9 @@ select.form-input {
           <span class="stat-label">Items in inventory</span>
           <span class="stat-value accent" id="preAuditItemCount">0</span>
         </div>
-        <div class="stat-row">
+        <div class="stat-row" style="flex-direction:column;align-items:flex-start;gap:4px">
           <span class="stat-label">Zones</span>
-          <span class="stat-value" id="preAuditZoneCount">0</span>
+          <span class="stat-value" id="preAuditZoneCount" style="font-size:13px;font-weight:600;line-height:1.5;word-break:break-word;white-space:normal">0</span>
         </div>
         <div class="stat-row">
           <span class="stat-label">Counted by</span>
@@ -1424,7 +1424,7 @@ select.form-input {
         </div>
       </div>
       <div id="preAuditExisting" class="hide" style="margin-bottom:12px"></div>
-      <button class="submit-btn" onclick="startNewAudit()" id="startAuditBtn">Start new audit</button>
+      <button class="submit-btn" onclick="startNewAudit()" id="startAuditBtn">Start audit</button>
       <button class="submit-btn secondary" style="margin-top:8px" onclick="showPage('venues')">Back to venues</button>
     </div>
 
@@ -1598,6 +1598,11 @@ select.form-input {
     <!-- Activity log -->
     <div class="section-title">Activity log</div>
     <div id="activityLog" style="max-height:200px;overflow-y:auto"></div>
+
+    <!-- Pending UPC Approvals (admin only) -->
+    <div class="section-title" style="margin-top:16px">Pending UPC approvals</div>
+    <div id="pendingApprovalsList"></div>
+
     <div style="display:flex;gap:8px;margin-top:16px">
       <button class="submit-btn secondary" style="flex:1" onclick="exportCSV()">Export raw CSV</button>
       <button class="submit-btn" style="flex:1" onclick="submitAudit()">Submit audit</button>
@@ -1876,6 +1881,11 @@ select.form-input {
   </div>
 </div>
 
+<!-- ========== UPC APPROVAL MODAL ========== -->
+<div class="modal-overlay hide" id="upcApprovalModal" onclick="if(event.target===this)closeUPCApproval()">
+  <div class="modal-sheet" id="upcApprovalContent" onclick="event.stopPropagation()"></div>
+</div>
+
 <canvas id="photoCanvas" style="display:none"></canvas>
 
 <script>
@@ -1901,6 +1911,248 @@ select.form-input {
    ================================================================ */
 const VARIANCE_THRESHOLD = 10; // percent
 const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
+
+/* ================================================================
+   SUPABASE INTEGRATION
+   Reads purchase_items, matches barcodes against UPCs,
+   writes back learned UPCs with role-based permissions.
+   ================================================================ */
+const SUPABASE_URL = 'https://mnraeesscqsaapkaldb.supabase.co';
+const SUPABASE_ANON_KEY = 'REPLACE_WITH_YOUR_ANON_KEY';
+// ⚠️  Replace SUPABASE_ANON_KEY above with your actual anon/public key
+//     from Supabase Dashboard → Settings → API → anon public key
+
+const supabaseRest = {
+  async query(table, params) {
+    const qs = params ? '?' + params : '';
+    try {
+      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + qs, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        }
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      return { data: await resp.json(), error: null };
+    } catch (e) {
+      return { data: null, error: e };
+    }
+  },
+  async update(table, match, body) {
+    try {
+      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
+        method: 'PATCH',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation',
+        },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+      return { data: await resp.json(), error: null };
+    } catch (e) {
+      return { data: null, error: e };
+    }
+  }
+};
+
+// Supabase items cache
+let supabaseItems = [];
+let supabaseLoaded = false;
+
+async function loadSupabaseItems() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') {
+    console.warn('Supabase anon key not configured — using items.json fallback');
+    return false;
+  }
+  try {
+    const { data, error } = await supabaseRest.query('purchase_items', 'select=*&order=name');
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      console.warn('Supabase returned 0 items — falling back to items.json');
+      return false;
+    }
+    supabaseItems = data;
+    supabaseLoaded = true;
+    console.log('Supabase: loaded ' + data.length + ' purchase_items');
+    return true;
+  } catch (e) {
+    console.error('Supabase load failed:', e);
+    return false;
+  }
+}
+
+function mapSupabaseToItemMaster(items) {
+  return items.map((row, i) => ({
+    id: row.id ? String(row.id) : ('SB' + i),
+    name: row.name || row.item_name || 'Unknown Item',
+    brand: row.brand || row.vendor || '',
+    category: guessCategory(row.category || row.item_category || ''),
+    subcategory: row.subcategory || '',
+    upc: row.upc || '',
+    sku: row.upc || row.sku || ('SB' + i),
+    par: row.par_level || row.par || 0,
+    expectedQty: row.expected_qty || 0,
+    vintage: row.vintage || '',
+    size: row.size || row.bottle_size || '',
+    supabaseId: row.id, // keep original PK for writes
+    _raw: row,
+  }));
+}
+
+function guessCategory(cat) {
+  if (!cat) return 'other';
+  const c = cat.toLowerCase();
+  if (c.includes('wine') || c.includes('champagne') || c.includes('sparkling')) return 'wine';
+  if (c.includes('spirit') || c.includes('liquor') || c.includes('vodka') || c.includes('whiskey') || c.includes('tequila') || c.includes('rum') || c.includes('gin') || c.includes('cognac') || c.includes('bourbon')) return 'spirits';
+  if (c.includes('beer') || c.includes('cider') || c.includes('seltzer')) return 'beer';
+  if (c.includes('food') || c.includes('kitchen')) return 'food';
+  return 'other';
+}
+
+/* ================================================================
+   UPC WRITE-BACK TO SUPABASE
+   - Counters/Managers: can only write if UPC column is blank
+   - Admins (corporate): can overwrite any UPC
+   Both go through an approval prompt before writing.
+   ================================================================ */
+let pendingUPCApprovals = [];
+try { pendingUPCApprovals = JSON.parse(localStorage.getItem('hwood_pending_upc_approvals') || '[]'); } catch(e) {}
+
+function savePendingApprovals() {
+  localStorage.setItem('hwood_pending_upc_approvals', JSON.stringify(pendingUPCApprovals));
+}
+
+async function writeUPCToSupabase(supabaseId, upc) {
+  if (!supabaseId || !supabaseLoaded) return false;
+  const { data, error } = await supabaseRest.update(
+    'purchase_items',
+    'id=eq.' + encodeURIComponent(supabaseId),
+    { upc: upc }
+  );
+  if (error) {
+    console.error('UPC write failed:', error);
+    showToast('Failed to save UPC to database', 'error');
+    return false;
+  }
+  return true;
+}
+
+function showUPCApprovalPrompt(barcode, matchedItem) {
+  // matchedItem is from itemMaster
+  const role = appState.user?.role || 'counter';
+  const isAdmin = role === 'corporate';
+  const hasExistingUPC = matchedItem.upc && matchedItem.upc.trim().length > 0;
+
+  // Counters/managers can only write blank UPCs
+  if (!isAdmin && hasExistingUPC) {
+    showToast('UPC already set — only admin can overwrite', 'warn');
+    return;
+  }
+
+  const action = isAdmin ? 'Save' : 'Submit for approval';
+  const modalHTML =
+    '<h3>Link barcode to item <button class="close-x" onclick="closeUPCApproval()">X</button></h3>' +
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(200,255,0,.15);border-radius:var(--radius-sm)">' +
+      '<svg width="14" height="14" viewBox="0 0 14 14" fill="var(--accent)"><rect x="0" y="2" width="2" height="10"/><rect x="4" y="2" width="1" height="10"/><rect x="7" y="2" width="2" height="10"/><rect x="11" y="2" width="1" height="10"/><rect x="13" y="2" width="1" height="10"/></svg>' +
+      '<span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent)">' + esc(barcode) + '</span>' +
+    '</div>' +
+    '<div style="font-size:14px;margin-bottom:6px">Matched item:</div>' +
+    '<div style="font-weight:600;font-size:15px;margin-bottom:4px">' + esc(matchedItem.name) + '</div>' +
+    (hasExistingUPC ? '<div style="font-size:12px;color:var(--warning);margin-bottom:12px">Current UPC: ' + esc(matchedItem.upc) + ' (will be overwritten)</div>' : '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">No UPC currently set</div>') +
+    '<button class="submit-btn" onclick="confirmUPCWrite(\'' + esc(barcode) + '\', \'' + esc(matchedItem.id) + '\')">' + action + '</button>';
+
+  document.getElementById('upcApprovalContent').innerHTML = modalHTML;
+  document.getElementById('upcApprovalModal').classList.remove('hide');
+}
+
+function closeUPCApproval() {
+  document.getElementById('upcApprovalModal').classList.add('hide');
+}
+
+async function confirmUPCWrite(barcode, itemId) {
+  closeUPCApproval();
+  const item = itemMaster.find(i => i.id === itemId);
+  if (!item) return;
+
+  const role = appState.user?.role || 'counter';
+  const isAdmin = role === 'corporate';
+
+  if (isAdmin && item.supabaseId) {
+    // Admin: write directly to Supabase
+    showToast('Saving UPC...', 'success');
+    const ok = await writeUPCToSupabase(item.supabaseId, barcode);
+    if (ok) {
+      item.upc = barcode;
+      item.sku = barcode;
+      showToast('UPC saved for ' + item.name, 'success');
+      logActivity('UPC ' + barcode + ' saved for ' + item.name);
+    }
+  } else {
+    // Counter/Manager: queue for approval
+    pendingUPCApprovals.push({
+      barcode: barcode,
+      itemId: item.id,
+      itemName: item.name,
+      supabaseId: item.supabaseId || null,
+      submittedBy: appState.user?.name || 'Unknown',
+      submittedAt: new Date().toISOString(),
+    });
+    savePendingApprovals();
+    showToast('UPC queued for admin approval', 'success');
+    logActivity('UPC ' + barcode + ' queued for ' + item.name);
+  }
+}
+
+function renderPendingApprovals() {
+  const container = document.getElementById('pendingApprovalsList');
+  if (!container) return;
+  if (pendingUPCApprovals.length === 0) {
+    container.innerHTML = '<p style="font-size:12px;color:var(--text-dim)">No pending UPC approvals</p>';
+    return;
+  }
+  container.innerHTML = pendingUPCApprovals.map((p, i) =>
+    '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--warning-dim);border:1px solid rgba(255,170,0,.2);border-radius:var(--radius-sm);margin-bottom:6px">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.itemName) + '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + esc(p.barcode) + ' · by ' + esc(p.submittedBy) + '</div>' +
+      '</div>' +
+      '<button onclick="approveUPC(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--success-dim);color:var(--success);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Approve">✓</button>' +
+      '<button onclick="rejectUPC(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--danger-dim);color:var(--danger);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Reject">✕</button>' +
+    '</div>'
+  ).join('');
+}
+
+async function approveUPC(index) {
+  const p = pendingUPCApprovals[index];
+  if (!p) return;
+  if (p.supabaseId) {
+    showToast('Saving UPC...', 'success');
+    const ok = await writeUPCToSupabase(p.supabaseId, p.barcode);
+    if (ok) {
+      const item = itemMaster.find(i => i.id === p.itemId);
+      if (item) { item.upc = p.barcode; item.sku = p.barcode; }
+      showToast('UPC approved for ' + p.itemName, 'success');
+      logActivity('UPC ' + p.barcode + ' approved for ' + p.itemName);
+    } else {
+      return; // don't remove on failure
+    }
+  }
+  pendingUPCApprovals.splice(index, 1);
+  savePendingApprovals();
+  renderPendingApprovals();
+}
+
+function rejectUPC(index) {
+  const p = pendingUPCApprovals[index];
+  if (p) logActivity('UPC ' + p.barcode + ' rejected for ' + p.itemName);
+  pendingUPCApprovals.splice(index, 1);
+  savePendingApprovals();
+  renderPendingApprovals();
+  showToast('UPC rejected', 'warn');
+}
 
 /* ================================================================
    FIX #3: HTML ESCAPE UTILITY
@@ -1945,6 +2197,25 @@ let itemMasterLoaded = false;
 const CAT_EXPAND = { 'w': 'wine', 's': 'spirits', 'b': 'beer', 'o': 'other' };
 
 async function loadItemMaster() {
+  // Try Supabase first
+  const supabaseOk = await loadSupabaseItems();
+  
+  if (supabaseOk && supabaseItems.length > 0) {
+    itemMaster = mapSupabaseToItemMaster(supabaseItems);
+    itemMasterLoaded = true;
+    mergeCustomItemsIntoMaster();
+    console.log('Item master loaded from Supabase: ' + itemMaster.length + ' items');
+    showToast(itemMaster.length + ' items loaded from Supabase' + (customItems.length > 0 ? ' (+' + customItems.length + ' custom)' : ''), 'success');
+    
+    const currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage) {
+      const pageId = currentPage.id.replace('page-', '');
+      if (pageId === 'count') renderCountPage();
+    }
+    return;
+  }
+
+  // Fallback: load from items.json
   try {
     const response = await fetch('items.json');
     if (!response.ok) throw new Error('Failed to load items.json');
@@ -1967,7 +2238,7 @@ async function loadItemMaster() {
     // Merge any custom items added by counters in previous audits
     mergeCustomItemsIntoMaster();
     
-    console.log('Item master loaded: ' + itemMaster.length + ' items' + (customItems.length > 0 ? ' (including ' + customItems.length + ' custom)' : ''));
+    console.log('Item master loaded from items.json: ' + itemMaster.length + ' items' + (customItems.length > 0 ? ' (including ' + customItems.length + ' custom)' : ''));
     showToast(itemMaster.length + ' items loaded' + (customItems.length > 0 ? ' (+' + customItems.length + ' custom)' : ''), 'success');
 
     // Re-render current page if needed
@@ -1978,7 +2249,7 @@ async function loadItemMaster() {
     }
   } catch (error) {
     console.error('Failed to load item master:', error);
-    showToast('Could not load inventory data. Check items.json file.', 'error');
+    showToast('Could not load inventory data', 'error');
   }
 }
 
@@ -2595,7 +2866,11 @@ function renderPreAuditScreen() {
 
   document.getElementById('preAuditVenue').textContent = venue.name;
   document.getElementById('preAuditAddr').textContent = venue.address;
-  document.getElementById('preAuditItemCount').textContent = itemMaster.length;
+  
+  const src = supabaseLoaded ? ' (Supabase)' : ' (local)';
+  const upcCount = itemMaster.filter(i => i.upc && i.upc.trim()).length;
+  document.getElementById('preAuditItemCount').innerHTML = itemMaster.length + '<span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:4px">' + esc(src) + '</span>';
+  
   document.getElementById('preAuditZoneCount').textContent = venue.zones.join(', ');
   document.getElementById('preAuditUser').textContent = appState.user?.name || '-';
   document.getElementById('preAuditDate').textContent = new Date().toLocaleDateString('en-US', {
@@ -3652,6 +3927,15 @@ function submitBarcodeEntry() {
   // Learn this UPC for future scans
   if (sku && sku.length >= 6) {
     learnUPC(sku, fullName, brand, category, masterId);
+    
+    // Supabase UPC write-back: if the matched item has no UPC, offer to save it
+    if (masterId && supabaseLoaded) {
+      const masterItem = itemMaster.find(i => i.id === masterId);
+      if (masterItem && masterItem.supabaseId && (!masterItem.upc || masterItem.upc.trim() === '')) {
+        // Auto-prompt to save this UPC back to Supabase
+        setTimeout(() => showUPCApprovalPrompt(sku, masterItem), 500);
+      }
+    }
   }
 
   addCountEntry(
@@ -5073,6 +5357,7 @@ function renderSummaryPage() {
   }
 
   onSummaryVenueChange();
+  renderPendingApprovals();
 }
 
 function onSummaryVenueChange() {
