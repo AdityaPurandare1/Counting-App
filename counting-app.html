@@ -1922,7 +1922,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
    SUPABASE INTEGRATION
    ================================================================ */
 const SUPABASE_URL = 'https://mnraeesscqsaapkaldb.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
+const SUPABASE_ANON_KEY = 'REPLACE_WITH_YOUR_ANON_KEY';
 // ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
 
 const supabaseRest = {
@@ -2080,13 +2080,19 @@ function renderPendingApprovals() {
 async function approveUPCPending(index) {
   var p = pendingUPCApprovals[index];
   if (!p) return;
-  var ok = await writeUPCToSupabase(p.supabaseId, p.barcode);
-  if (ok) {
-    var item = itemMaster.find(function(i) { return i.id === p.itemId; });
-    if (item) { item.upc = p.barcode; item.sku = p.barcode; }
-    showToast('UPC approved: ' + p.itemName, 'success');
-    logActivity('UPC ' + p.barcode + ' approved for ' + p.itemName);
-  } else { return; }
+  try {
+    var ok = await writeUPCToSupabase(p.supabaseId, p.barcode);
+    if (ok) {
+      var item = itemMaster.find(function(i) { return i.id === p.itemId; });
+      if (item) { item.upc = p.barcode; item.sku = p.barcode; }
+      showToast('UPC approved: ' + p.itemName, 'success');
+      logActivity('UPC ' + p.barcode + ' approved for ' + p.itemName);
+    } else { return; }
+  } catch (e) {
+    console.error('UPC approval failed:', e);
+    showToast('Failed to save UPC — try again', 'error');
+    return;
+  }
   pendingUPCApprovals.splice(index, 1);
   savePendingApprovals();
   renderPendingApprovals();
@@ -2636,10 +2642,21 @@ function logActivity(text) {
    Single guard function used by all write operations
    ================================================================ */
 function isAuditLocked() {
-  if (appState.audit && appState.audit.status === 'submitted') {
+  if (!appState.audit) return false;
+  
+  if (appState.audit.status === 'submitted') {
     showToast('Audit is locked after submission', 'error');
     return true;
   }
+  
+  // Lock count editing after Count 1 is closed (during review & count2 phases)
+  // Only recount entries are allowed — those go through submitGuidedEntry recount mode
+  var phase = appState.audit.countPhase;
+  if (phase === 'review' || phase === 'count2' || phase === 'final') {
+    showToast('Count 1 is closed — editing locked until audit completes', 'error');
+    return true;
+  }
+  
   return false;
 }
 
@@ -2834,7 +2851,8 @@ function renderCountPage() {
     document.getElementById('headerAuditBadge').className = 'audit-badge ' + appState.audit.status;
     document.getElementById('headerAuditBadge').textContent = appState.audit.status;
 
-    const isLocked = appState.audit.status === 'submitted';
+    const isLocked = appState.audit.status === 'submitted' || 
+      ['review', 'count2', 'final'].indexOf(appState.audit.countPhase) !== -1;
 
     renderProgress();
     renderRecountBanner();
@@ -2856,6 +2874,31 @@ function renderCountPage() {
     document.querySelectorAll('.scan-btn').forEach(btn => {
       btn.classList.toggle('locked', isLocked);
     });
+
+    // Show lock banner when count 1 is closed
+    var lockBannerEl = document.getElementById('countLockBanner');
+    if (!lockBannerEl) {
+      lockBannerEl = document.createElement('div');
+      lockBannerEl.id = 'countLockBanner';
+      lockBannerEl.style.cssText = 'padding:10px 12px;background:var(--blue-dim);border:1px solid rgba(68,136,255,.2);border-radius:var(--radius-sm);margin-bottom:10px;font-size:13px;color:var(--blue);text-align:center;cursor:pointer;font-weight:500';
+      var countProgress = document.getElementById('countProgress');
+      if (countProgress) countProgress.parentNode.insertBefore(lockBannerEl, countProgress);
+    }
+    if (isLocked && appState.audit.status !== 'submitted') {
+      var phase = appState.audit.countPhase;
+      var bannerText = phase === 'review' ? 'Count 1 closed — complete the recount to finish the audit' : 
+                       phase === 'count2' ? 'Count 2 in progress — complete recounts to finish' : 
+                       'Audit finalized';
+      lockBannerEl.innerHTML = bannerText;
+      lockBannerEl.onclick = function() { showPage('recount'); };
+      lockBannerEl.style.display = 'block';
+    } else if (appState.audit.status === 'submitted') {
+      lockBannerEl.innerHTML = 'Audit submitted ✓';
+      lockBannerEl.onclick = function() { showPage('summary'); };
+      lockBannerEl.style.display = 'block';
+    } else {
+      lockBannerEl.style.display = 'none';
+    }
 
     if (mode === 'guided') renderGuidedMode();
     else if (mode === 'quick') renderQuickMode();
@@ -3316,7 +3359,16 @@ function submitGuidedEntry() {
     logActivity('Recounted ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty);
     saveState();
     closeGuidedEntry();
-    renderRecountPage();
+    
+    // Check if all recounts are now done — auto-close audit
+    var allRecounts = Object.values(appState.audit.recounts);
+    var stillPending = allRecounts.filter(function(r) { return r.status === 'pending'; });
+    if (stillPending.length === 0) {
+      showToast('All recounts done! Closing audit...', 'success');
+      setTimeout(function() { finalizeCount2(); }, 600);
+    } else {
+      renderRecountPage();
+    }
     return;
   }
 
@@ -5027,34 +5079,8 @@ function generateRecountFromAvt() {
 function closeCount2() {
   if (!appState.audit) { showToast('No active audit', 'error'); return; }
 
-  showConfirm('Close Count 2 and generate the final report?', () => {
-    appState.audit.count2Data = JSON.parse(JSON.stringify(appState.audit.counts));
-    appState.audit.count2ClosedAt = new Date().toISOString();
-    appState.audit.countPhase = 'final';
-    appState.audit.status = 'submitted';
-
-    // Mark recount items as resolved/unresolved
-    if (appState.audit.recounts) {
-      Object.entries(appState.audit.recounts).forEach(([key, rec]) => {
-        if (rec.recountQty !== null) {
-          rec.status = 'done';
-        }
-      });
-    }
-
-    // Save to history
-    appState.auditHistory.push({
-      ...appState.audit,
-      venueName: appState.currentVenue?.name,
-    });
-
-    document.getElementById('headerAuditBadge').className = 'audit-badge submitted';
-    document.getElementById('headerAuditBadge').textContent = 'Submitted';
-
-    logActivity('Count 2 closed. Final report generated.');
-    saveState();
-    showToast('Audit complete. Final report ready.', 'success');
-    renderVariancePage();
+  showConfirm('Close Count 2 and generate the final report?', function() {
+    finalizeCount2();
   });
 }
 
@@ -5152,18 +5178,50 @@ function submitRecount() {
   const pending = Object.values(appState.audit.recounts).filter(r => r.status === 'pending');
   if (pending.length > 0) {
     showConfirm(pending.length + ' items still pending. Mark recount as complete anyway?', () => {
-      appState.audit.countPhase = 'count2';
-      logActivity('Recount phase completed. ' + pending.length + ' items skipped.');
-      saveState();
-      showToast('Recount complete. Go to Variance to close Count 2.', 'success');
+      finalizeCount2();
     });
     return;
   }
 
-  appState.audit.countPhase = 'count2';
-  logActivity('All recount items verified.');
+  finalizeCount2();
+}
+
+let _finalizingCount2 = false;
+
+function finalizeCount2() {
+  // Guard against double-fire (auto-close timer + manual button)
+  if (_finalizingCount2) return;
+  if (!appState.audit || appState.audit.status === 'submitted') return;
+  _finalizingCount2 = true;
+
+  // Save Count 2 snapshot
+  appState.audit.count2Data = JSON.parse(JSON.stringify(appState.audit.counts));
+  appState.audit.count2ClosedAt = new Date().toISOString();
+  appState.audit.countPhase = 'final';
+  appState.audit.status = 'submitted';
+
+  // Mark recount items as resolved
+  if (appState.audit.recounts) {
+    Object.entries(appState.audit.recounts).forEach(function([key, rec]) {
+      if (rec.recountQty !== null) rec.status = 'done';
+    });
+  }
+
+  // Save to history
+  appState.auditHistory.push({
+    ...appState.audit,
+    venueName: appState.currentVenue?.name,
+  });
+
+  document.getElementById('headerAuditBadge').className = 'audit-badge submitted';
+  document.getElementById('headerAuditBadge').textContent = 'Submitted';
+
+  logActivity('Recount complete. Audit auto-closed and submitted.');
   saveState();
-  showToast('Recount complete. Go to Variance to close Count 2.', 'success');
+  _finalizingCount2 = false;
+  showToast('Audit complete! Final report ready.', 'success');
+  showPage('summary');
+  renderSummaryPage();
 }
 
 /* ================================================================
