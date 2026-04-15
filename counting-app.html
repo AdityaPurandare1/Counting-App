@@ -1573,10 +1573,29 @@ select.form-input {
 
   <!-- ========== SUMMARY PAGE ========== -->
   <div class="page hide" id="page-summary">
+    <!-- Venue selector for viewing audited data -->
     <div class="section-title">Audit summary</div>
+    <div class="form-group" style="margin-bottom:10px">
+      <label>Venue</label>
+      <select class="form-input" id="summaryVenueSelect" onchange="onSummaryVenueChange()">
+        <option value="current">Current audit</option>
+      </select>
+    </div>
     <div id="summaryStats" class="summary-card"></div>
-    <div class="section-title">By zone</div>
+
+    <!-- Item lookup: search any item and see where it was counted -->
+    <div class="section-title" style="margin-top:16px">Item location lookup</div>
+    <div class="search-bar" style="margin-bottom:8px">
+      <span class="si"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M9 9l3.5 3.5"/></svg></span>
+      <input type="text" placeholder="Search item to see locations and counts..." id="summaryItemSearch" oninput="onSummaryItemSearch(this.value)" autocomplete="off">
+    </div>
+    <div id="summaryItemResults"></div>
+
+    <!-- Zone breakdown -->
+    <div class="section-title" style="margin-top:16px">By zone</div>
     <div id="zoneSummary"></div>
+
+    <!-- Activity log -->
     <div class="section-title">Activity log</div>
     <div id="activityLog" style="max-height:200px;overflow-y:auto"></div>
     <div style="display:flex;gap:8px;margin-top:16px">
@@ -1944,8 +1963,12 @@ async function loadItemMaster() {
     }));
 
     itemMasterLoaded = true;
-    console.log('Item master loaded: ' + itemMaster.length + ' items');
-    showToast(itemMaster.length + ' items loaded from inventory', 'success');
+    
+    // Merge any custom items added by counters in previous audits
+    mergeCustomItemsIntoMaster();
+    
+    console.log('Item master loaded: ' + itemMaster.length + ' items' + (customItems.length > 0 ? ' (including ' + customItems.length + ' custom)' : ''));
+    showToast(itemMaster.length + ' items loaded' + (customItems.length > 0 ? ' (+' + customItems.length + ' custom)' : ''), 'success');
 
     // Re-render current page if needed
     const currentPage = document.querySelector('.page:not(.hide)');
@@ -1969,37 +1992,61 @@ const appState = {
       id: 'v1',
       name: 'Delilah LA',
       address: '7969 Santa Monica Blvd, West Hollywood',
-      zones: ['Main Bar', 'Service Bar', 'Wine Room', 'Fridge 1', 'Fridge 2', 'Storage', 'Back Office']
+      zones: ['Main Bar', 'Back Bar', 'Service Bar', 'Wine Room', 'Main Fridge', 'Back Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
     },
     {
       id: 'v2',
       name: 'Delilah Miami',
       address: '2201 Collins Ave, Miami Beach',
-      zones: ['Main Bar', 'Service Bar', 'Wine Room', 'Pool Bar', 'Fridge', 'Storage']
+      zones: ['Main Bar', 'Service Bar', 'Wine Room', 'Pool Bar', 'Main Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
     },
     {
       id: 'v3',
       name: 'The Nice Guy',
       address: '401 N La Cienega Blvd, Los Angeles',
-      zones: ['Main Bar', 'Back Bar', 'Wine Fridge', 'Cellar', 'Kitchen', 'Storage']
+      zones: ['Main Bar', 'Back Bar', 'Wine Fridge', 'Cellar', 'Main Fridge', 'Kitchen', 'Dry Storage', 'Back Office']
     },
     {
       id: 'v4',
       name: 'The Birdstreet Club',
       address: '8741 Sunset Blvd, West Hollywood',
-      zones: ['Main Bar', 'Lounge Bar', 'Wine Cellar', 'Fridge', 'Storage']
+      zones: ['Main Bar', 'Back Bar', 'Lounge Bar', 'Wine Cellar', 'Main Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
     },
     {
       id: 'v5',
       name: 'Poppy',
       address: '8171 Santa Monica Blvd, West Hollywood',
-      zones: ['Main Bar', 'DJ Booth Bar', 'VIP Bar', 'Fridge', 'Storage']
+      zones: ['Main Bar', 'DJ Booth Bar', 'VIP Bar', 'Main Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
     },
     {
       id: 'v6',
       name: 'Keys',
       address: 'West Hollywood',
-      zones: ['Main Bar', 'Back Bar', 'Fridge', 'Storage']
+      zones: ['Main Bar', 'Back Bar', 'Main Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
+    },
+    {
+      id: 'v7',
+      name: 'Bootsy Bellows',
+      address: '9229 Sunset Blvd, West Hollywood',
+      zones: ['Main Bar', 'Back Bar', 'VIP Bar', 'Main Fridge', 'Dry Storage', 'Back Office']
+    },
+    {
+      id: 'v8',
+      name: 'The Fleur Room',
+      address: '8430 Sunset Blvd, West Hollywood',
+      zones: ['Main Bar', 'Lounge Bar', 'Main Fridge', 'Dry Storage', 'Back Office']
+    },
+    {
+      id: 'v9',
+      name: 'Harriets',
+      address: '1 Hotel West Hollywood',
+      zones: ['Rooftop Bar', 'Pool Bar', 'Main Fridge', 'Dry Storage', 'Back Office']
+    },
+    {
+      id: 'v10',
+      name: '40 Love',
+      address: '115 N La Cienega Blvd, West Hollywood',
+      zones: ['Main Bar', 'Patio Bar', 'Main Fridge', 'Walk-in Cooler', 'Dry Storage', 'Back Office']
     },
   ],
   currentVenue: null,
@@ -2178,6 +2225,88 @@ function lookupLearnedUPC(code) {
 }
 
 /* ================================================================
+   CUSTOM ITEMS LIST
+   Items added by counters during audits that do not exist in the
+   Bevager master (items.json). Stored in localStorage, merged into
+   itemMaster on load so they appear in search, barcode matching,
+   and guided mode for all future audits on this device.
+   
+   Later: synced to Supabase so all devices see them.
+   ================================================================ */
+let customItems = [];
+try { customItems = JSON.parse(localStorage.getItem('hwood_custom_items') || '[]'); } catch (e) {}
+
+function saveCustomItems() {
+  try { localStorage.setItem('hwood_custom_items', JSON.stringify(customItems)); } catch (e) {}
+}
+
+function addCustomItem(name, brand, category, subcategory, upc) {
+  if (!name) return null;
+
+  // Check if already exists in custom items
+  const nameKey = name.toLowerCase().trim();
+  const existing = customItems.find(i => i.name.toLowerCase().trim() === nameKey);
+  if (existing) return existing.id;
+
+  // Check if already in itemMaster
+  const masterExists = itemMaster.find(i => i.name.toLowerCase().trim() === nameKey);
+  if (masterExists) return masterExists.id;
+
+  // Create new custom item
+  const id = 'CUS' + Date.now() + '_' + Math.random().toString(36).slice(2, 5);
+  const item = {
+    id: id,
+    name: name,
+    brand: brand || '',
+    category: category || 'other',
+    subcategory: subcategory || '',
+    upc: (upc || '').replace(/\D/g, ''),
+    sku: (upc || '').replace(/\D/g, '') || id,
+    par: 0,
+    expectedQty: 0,
+    isCustom: true,
+    addedAt: new Date().toISOString(),
+  };
+
+  customItems.push(item);
+  saveCustomItems();
+
+  // Also add to live itemMaster so it's immediately searchable
+  itemMaster.push(item);
+
+  console.log('Custom item added: ' + name + ' (ID: ' + id + ')');
+  return id;
+}
+
+function mergeCustomItemsIntoMaster() {
+  if (customItems.length === 0) return;
+
+  let added = 0;
+  customItems.forEach(ci => {
+    const exists = itemMaster.find(i => i.id === ci.id || i.name.toLowerCase() === ci.name.toLowerCase());
+    if (!exists) {
+      itemMaster.push({
+        id: ci.id,
+        name: ci.name,
+        brand: ci.brand || '',
+        category: ci.category || 'other',
+        subcategory: ci.subcategory || '',
+        upc: ci.upc || '',
+        sku: ci.sku || ci.id,
+        par: 0,
+        expectedQty: 0,
+        isCustom: true,
+      });
+      added++;
+    }
+  });
+
+  if (added > 0) {
+    console.log('Merged ' + added + ' custom items into item master. Total: ' + itemMaster.length);
+  }
+}
+
+/* ================================================================
    TIMER
    ================================================================ */
 let timerInterval = null;
@@ -2238,14 +2367,18 @@ const ACCESS_LIST = [
   { email: 'ceo@hwood.com',           name: 'CEO',              role: 'corporate', venueIds: 'all' },
 
   // Managers — access to assigned venues
-  // v1=Delilah LA, v2=Delilah Miami, v3=The Nice Guy, v4=The Birdstreet Club, v5=Poppy, v6=Keys
+  // v1=Delilah LA, v2=Delilah Miami, v3=The Nice Guy, v4=The Birdstreet Club
+  // v5=Poppy, v6=Keys, v7=Bootsy Bellows, v8=The Fleur Room, v9=Harriets, v10=40 Love
   { email: 'manager1@hwood.com',      name: 'Manager 1',        role: 'manager',   venueIds: ['v1', 'v2', 'v3'] },
   { email: 'manager2@hwood.com',      name: 'Manager 2',        role: 'manager',   venueIds: ['v4', 'v5', 'v6'] },
+  { email: 'manager3@hwood.com',      name: 'Manager 3',        role: 'manager',   venueIds: ['v7', 'v8', 'v9', 'v10'] },
 
   // Counters (3rd party) — access to assigned venues
   { email: 'counter1@team.com',       name: 'Counter 1',        role: 'counter',   venueIds: ['v1', 'v2'] },
   { email: 'counter2@team.com',       name: 'Counter 2',        role: 'counter',   venueIds: ['v3', 'v4'] },
   { email: 'counter3@team.com',       name: 'Counter 3',        role: 'counter',   venueIds: ['v5', 'v6'] },
+  { email: 'counter4@team.com',       name: 'Counter 4',        role: 'counter',   venueIds: ['v7', 'v8'] },
+  { email: 'counter5@team.com',       name: 'Counter 5',        role: 'counter',   venueIds: ['v9', 'v10'] },
 
   // Add more users below this line:
   // { email: 'newuser@example.com', name: 'New User', role: 'counter', venueIds: ['v1'] },
@@ -2541,30 +2674,27 @@ function endAuditEarly() {
   const itemCount = getAllCountedItems().length;
 
   if (itemCount === 0) {
-    // No items counted — just cancel
     showConfirm('Cancel this audit? No items have been counted.', () => {
       appState.audit.status = 'cancelled';
       appState.audit.completedAt = new Date().toISOString();
       logActivity('Audit cancelled (no items)');
+      // Stop timer completely
       if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      document.getElementById('auditTimer').classList.add('hide');
       appState.audit = null;
       saveState();
       showToast('Audit cancelled', 'warn');
       renderCountPage();
     });
   } else {
-    // Items exist — ask what to do
-    showConfirm('End this audit? ' + itemCount + ' items have been counted. Choose Cancel to keep counting, or Confirm to end and save.', () => {
-      appState.audit.status = 'submitted';
-      appState.audit.completedAt = new Date().toISOString();
-      logActivity('Audit ended early (' + itemCount + ' items)');
-      appState.auditHistory.push({
-        ...appState.audit,
-        venueName: appState.currentVenue?.name,
-      });
+    showConfirm('Cancel this audit? ' + itemCount + ' items have been counted and will be discarded. This cannot be undone.', () => {
+      logActivity('Audit cancelled (' + itemCount + ' items discarded)');
+      // Stop timer completely
       if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+      document.getElementById('auditTimer').classList.add('hide');
+      appState.audit = null;
       saveState();
-      showToast('Audit saved and submitted', 'success');
+      showToast('Audit cancelled', 'warn');
       renderCountPage();
     });
   }
@@ -2615,13 +2745,75 @@ function getCountedItemIds() {
 
 function renderZoneTabs() {
   const venue = appState.currentVenue;
-  document.getElementById('zoneTabs').innerHTML = venue.zones.map(zone => {
+  let html = venue.zones.map(zone => {
     const count = (appState.audit.counts[zone] || []).length;
     const isActive = zone === appState.currentZone ? 'active' : '';
     return '<button class="zone-tab ' + isActive + '" onclick="switchZone(this)" data-zone="' + esc(zone) + '">' +
       esc(zone) + '<span class="zcnt">' + count + '</span></button>';
   }).join('');
+
+  // Add zone button (for managers/admin)
+  const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
+  if (isAdmin) {
+    html += '<button class="zone-tab" onclick="addCustomZone()" style="color:var(--accent);border-color:var(--accent);border-style:dashed">+ Zone</button>';
+  }
+
+  document.getElementById('zoneTabs').innerHTML = html;
 }
+
+function addCustomZone() {
+  const name = prompt('Enter zone name (e.g. Back Bar, Main Fridge, VIP):');
+  if (!name || !name.trim()) return;
+
+  const zoneName = name.trim();
+  const venue = appState.currentVenue;
+
+  // Check if zone already exists
+  if (venue.zones.includes(zoneName)) {
+    showToast('Zone "' + zoneName + '" already exists', 'warn');
+    return;
+  }
+
+  // Add to venue zones
+  venue.zones.push(zoneName);
+
+  // Create empty count array for the new zone
+  if (appState.audit && !appState.audit.counts[zoneName]) {
+    appState.audit.counts[zoneName] = [];
+  }
+
+  // Save custom zones to localStorage so they persist
+  let customZones = {};
+  try { customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}'); } catch (e) {}
+  if (!customZones[venue.id]) customZones[venue.id] = [];
+  if (!customZones[venue.id].includes(zoneName)) {
+    customZones[venue.id].push(zoneName);
+    try { localStorage.setItem('hwood_custom_zones', JSON.stringify(customZones)); } catch (e) {}
+  }
+
+  logActivity('Added zone: ' + zoneName);
+  saveState();
+  appState.currentZone = zoneName;
+  showToast('Zone "' + zoneName + '" added', 'success');
+  renderCountPage();
+}
+
+// Merge custom zones into venues on load
+function mergeCustomZones() {
+  try {
+    const customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}');
+    Object.entries(customZones).forEach(([venueId, zones]) => {
+      const venue = appState.venues.find(v => v.id === venueId);
+      if (venue) {
+        zones.forEach(z => {
+          if (!venue.zones.includes(z)) venue.zones.push(z);
+        });
+      }
+    });
+  } catch (e) {}
+}
+
+mergeCustomZones();
 
 function switchZone(element) {
   appState.currentZone = element.dataset.zone;
@@ -3024,7 +3216,7 @@ function quickTap(masterId) {
    FIX #3: All output uses esc()
    ================================================================ */
 function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
-  if (isAuditLocked()) return; // FIX #1
+  if (isAuditLocked()) return;
   if (!appState.audit) return;
 
   if (!appState.audit.counts[appState.currentZone]) {
@@ -3034,11 +3226,29 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   const zoneItems = appState.audit.counts[appState.currentZone];
   const parsedQty = parseFloat(qty) || 1;
 
+  // If no masterId, try to find one by name match, or create a custom item
+  if (!masterId) {
+    const nameKey = name.toLowerCase().trim();
+    const masterMatch = itemMaster.find(i => i.name.toLowerCase().trim() === nameKey);
+    if (masterMatch) {
+      masterId = masterMatch.id;
+    } else {
+      // New item not in master — add to custom items for future audits
+      const brand = name.includes(' — ') ? name.split(' — ')[0] : '';
+      masterId = addCustomItem(name, brand, category, '', sku);
+    }
+  }
+
   // Duplicate detection within same zone
   if (masterId) {
     const duplicateInZone = zoneItems.find(item => item.masterId === masterId);
     if (duplicateInZone) {
       duplicateInZone.qty += parsedQty;
+      // Also update issue if new one is set
+      if (issue && issue !== 'none') {
+        duplicateInZone.issue = issue;
+        if (notes) duplicateInZone.notes = notes;
+      }
       showToast('Updated: ' + name + ' (' + formatQty(duplicateInZone.qty) + ' total)', 'warn');
       logActivity('Updated ' + name + ' to ' + formatQty(duplicateInZone.qty) + ' in ' + appState.currentZone);
       saveState();
@@ -3943,18 +4153,46 @@ function renderViewPage() {
    Add new mappings here when venues are added.
    ================================================================ */
 const STORE_MAP = {
+  // The Birdstreet Club
   'bird street': 'v4',
   'birdstreet': 'v4',
   'the birdstreet club': 'v4',
+  'birdstreet club': 'v4',
+  'bird street club': 'v4',
+  // Delilah LA
   'delilah la': 'v1',
   'delilah - la': 'v1',
   'delilah': 'v1',
+  'delilah los angeles': 'v1',
+  'delilah west hollywood': 'v1',
+  // Delilah Miami
   'delilah miami': 'v2',
   'delilah - miami': 'v2',
+  'delilah mia': 'v2',
+  'delilah miami beach': 'v2',
+  // The Nice Guy
   'the nice guy': 'v3',
   'nice guy': 'v3',
+  'tng': 'v3',
+  // Poppy
   'poppy': 'v5',
+  // Keys
   'keys': 'v6',
+  'the keys': 'v6',
+  // Bootsy Bellows
+  'bootsy bellows': 'v7',
+  'bootsy': 'v7',
+  // The Fleur Room
+  'the fleur room': 'v8',
+  'fleur room': 'v8',
+  'fleur': 'v8',
+  // Harriets
+  'harriets': 'v9',
+  "harriet's": 'v9',
+  'harriets rooftop': 'v9',
+  // 40 Love
+  '40 love': 'v10',
+  'forty love': 'v10',
 };
 
 function mapStoreToVenueId(storeName) {
@@ -4179,7 +4417,7 @@ function renderVariancePage() {
   // Also filter by current venue if an audit is active
   if (appState.audit && appState.currentVenue) {
     const vid = appState.currentVenue.id;
-    filteredAvt = filteredAvt.filter(a => a.venueId === vid || !a.venueId);
+    filteredAvt = filteredAvt.filter(a => a.venueId === vid);
   }
 
   // Cross-reference with count data
@@ -4437,7 +4675,7 @@ function generateRecountFromAvt() {
   // Filter AVT to current venue
   let venueAvt = avtData;
   if (appState.currentVenue) {
-    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id || !a.venueId);
+    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id);
   }
 
   const flagged = [];
@@ -4629,7 +4867,7 @@ function exportCountCSV(countNumber) {
   // Build combined variance rows from AVT
   let venueAvt = avtData;
   if (appState.currentVenue) {
-    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id || !a.venueId);
+    venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id);
   }
 
   // Headers matching workflow app format — with Issues columns
@@ -4693,6 +4931,7 @@ function exportCountCSV(countNumber) {
       csvEscape(avt.itemName),
       csvEscape(avt.category),
       csvEscape(avt.store),
+      csvEscape(issues.zone || ''),
       avt.actual,
       avt.theo,
       avt.variance.toFixed(2),
@@ -4803,64 +5042,161 @@ function generateRecountList() {
 
 /* ================================================================
    SUMMARY PAGE
-   FIX #6: Includes audit history rendering
+   Venue selector + item location drill-down + zone breakdown
    ================================================================ */
+let summaryAuditData = null;
+
 function renderSummaryPage() {
-  if (!appState.audit) {
-    document.getElementById('summaryStats').innerHTML =
-      '<p style="color:var(--text-dim)">No active audit</p>';
+  const select = document.getElementById('summaryVenueSelect');
+  select.innerHTML = '';
+
+  if (appState.audit) {
+    const opt = document.createElement('option');
+    opt.value = 'current';
+    opt.textContent = (appState.currentVenue?.name || 'Current') + ' (active)';
+    select.appendChild(opt);
+  }
+
+  (appState.auditHistory || []).slice().reverse().forEach((audit, i) => {
+    const opt = document.createElement('option');
+    opt.value = 'history_' + i;
+    const date = new Date(audit.startedAt).toLocaleDateString();
+    opt.textContent = (audit.venueName || 'Venue') + ' — ' + date;
+    select.appendChild(opt);
+  });
+
+  if (!select.options.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'No audits available';
+    select.appendChild(opt);
+  }
+
+  onSummaryVenueChange();
+}
+
+function onSummaryVenueChange() {
+  const val = document.getElementById('summaryVenueSelect').value;
+  if (val === 'current' && appState.audit) {
+    summaryAuditData = appState.audit;
+  } else if (val.startsWith('history_')) {
+    const idx = parseInt(val.split('_')[1]);
+    const history = (appState.auditHistory || []).slice().reverse();
+    summaryAuditData = history[idx] || null;
+  } else {
+    summaryAuditData = null;
+  }
+  renderSummaryContent();
+  document.getElementById('summaryItemSearch').value = '';
+  document.getElementById('summaryItemResults').innerHTML = '';
+}
+
+function renderSummaryContent() {
+  if (!summaryAuditData) {
+    document.getElementById('summaryStats').innerHTML = '<p style="color:var(--text-dim)">Select an audit to view</p>';
+    document.getElementById('zoneSummary').innerHTML = '';
+    document.getElementById('activityLog').innerHTML = '';
+    renderAuditHistory();
     return;
   }
 
-  const allItems = getAllCountedItems();
-  const totalQty = allItems.reduce((sum, item) => sum + item.qty, 0);
+  const audit = summaryAuditData;
+  const allItems = [];
+  Object.entries(audit.counts).forEach(([zone, items]) => {
+    items.forEach(item => allItems.push({ ...item, zone }));
+  });
+
+  const totalQty = allItems.reduce((s, i) => s + i.qty, 0);
   const byMethod = { barcode: 0, photo: 0, manual: 0, guided: 0 };
-  const issueCount = allItems.filter(item => item.issue && item.issue !== 'none').length;
-  allItems.forEach(item => byMethod[item.method] = (byMethod[item.method] || 0) + 1);
+  const issueCount = allItems.filter(i => i.issue && i.issue !== 'none').length;
+  allItems.forEach(i => byMethod[i.method] = (byMethod[i.method] || 0) + 1);
 
-  const elapsedSeconds = Math.floor((Date.now() - new Date(appState.audit.startedAt).getTime()) / 1000);
-  const elapsedMinutes = Math.floor(elapsedSeconds / 60);
+  const venueName = audit.venueName || appState.currentVenue?.name || '—';
+  const elapsed = audit.completedAt
+    ? Math.floor((new Date(audit.completedAt).getTime() - new Date(audit.startedAt).getTime()) / 1000)
+    : Math.floor((Date.now() - new Date(audit.startedAt).getTime()) / 1000);
 
-  // Stats
   document.getElementById('summaryStats').innerHTML =
-    '<div class="stat-row"><span class="stat-label">Venue</span><span class="stat-value">' + esc(appState.currentVenue?.name || '—') + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Status</span><span class="stat-value"><span class="audit-badge ' + appState.audit.status + '">' + appState.audit.status + '</span></span></div>' +
-    '<div class="stat-row"><span class="stat-label">Duration</span><span class="stat-value">' + elapsedMinutes + ' min</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Venue</span><span class="stat-value">' + esc(venueName) + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Status</span><span class="stat-value"><span class="audit-badge ' + (audit.status||'active') + '">' + (audit.status||'active') + '</span></span></div>' +
+    '<div class="stat-row"><span class="stat-label">Phase</span><span class="stat-value">' + (audit.countPhase||'count1') + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Duration</span><span class="stat-value">' + Math.floor(elapsed/60) + ' min</span></div>' +
     '<div class="stat-row"><span class="stat-label">Unique items</span><span class="stat-value accent">' + allItems.length + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Total quantity</span><span class="stat-value accent">' + Math.round(totalQty) + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Guided</span><span class="stat-value">' + byMethod.guided + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Barcode</span><span class="stat-value">' + byMethod.barcode + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Photo</span><span class="stat-value">' + byMethod.photo + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Manual</span><span class="stat-value">' + byMethod.manual + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Issues</span><span class="stat-value ' + (issueCount > 0 ? 'danger' : '') + '">' + issueCount + '</span></div>';
+    '<div class="stat-row"><span class="stat-label">Total quantity</span><span class="stat-value accent">' + formatQty(totalQty) + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">By method</span><span class="stat-value" style="font-size:11px">G:' + byMethod.guided + ' B:' + byMethod.barcode + ' P:' + byMethod.photo + ' M:' + byMethod.manual + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Issues flagged</span><span class="stat-value ' + (issueCount>0?'danger':'') + '">' + issueCount + '</span></div>';
 
-  // Zone breakdown
-  document.getElementById('zoneSummary').innerHTML = Object.entries(appState.audit.counts).map(([zone, items]) => {
-    const qty = items.reduce((sum, item) => sum + item.qty, 0);
+  document.getElementById('zoneSummary').innerHTML = Object.entries(audit.counts).map(([zone, items]) => {
+    const qty = items.reduce((s, i) => s + i.qty, 0);
+    const issues = items.filter(i => i.issue && i.issue !== 'none').length;
     return '<div class="summary-card" style="margin-bottom:4px;padding:10px 12px">' +
       '<div style="display:flex;justify-content:space-between;align-items:center">' +
         '<span style="font-size:13px;font-weight:500">' + esc(zone) + '</span>' +
         '<div style="display:flex;gap:10px;align-items:center">' +
+          (issues>0?'<span style="font-size:10px;color:var(--danger)">'+issues+' issues</span>':'') +
           '<span style="font-size:11px;color:var(--text-muted)">' + items.length + ' items</span>' +
-          '<span style="font-family:var(--mono);font-weight:600;color:var(--accent)">' + Math.round(qty) + '</span>' +
+          '<span style="font-family:var(--mono);font-weight:600;color:var(--accent)">' + formatQty(qty) + '</span>' +
         '</div>' +
       '</div>' +
     '</div>';
   }).join('');
 
-  // Activity log
-  const logEntries = (appState.audit.log || []).slice(-30).reverse();
-  document.getElementById('activityLog').innerHTML = logEntries.map(entry => {
-    const time = new Date(entry.time);
-    return '<div class="log-entry">' +
-      '<span class="log-time">' + time.toLocaleTimeString() + '</span> ' +
-      '<span class="log-user">' + esc(entry.user) + '</span> ' +
-      '<span class="log-text">' + esc(entry.text) + '</span>' +
-    '</div>';
-  }).join('');
+  const logEntries = (audit.log || []).slice(-30).reverse();
+  document.getElementById('activityLog').innerHTML = logEntries.length > 0
+    ? logEntries.map(e => '<div class="log-entry"><span class="log-time">' + new Date(e.time).toLocaleTimeString() + '</span> <span class="log-user">' + esc(e.user) + '</span> <span class="log-text">' + esc(e.text) + '</span></div>').join('')
+    : '<p style="color:var(--text-dim);font-size:12px">No activity recorded</p>';
 
-  // FIX #6: Audit history
   renderAuditHistory();
+}
+
+function onSummaryItemSearch(value) {
+  const query = value.toLowerCase().trim();
+  const resultsEl = document.getElementById('summaryItemResults');
+  if (query.length < 2 || !summaryAuditData) { resultsEl.innerHTML = ''; return; }
+
+  const matches = {};
+  Object.entries(summaryAuditData.counts).forEach(([zone, items]) => {
+    items.forEach(item => {
+      if ((item.name + ' ' + (item.sku || '')).toLowerCase().includes(query)) {
+        const key = item.name;
+        if (!matches[key]) matches[key] = { name: item.name, category: item.category, issue: item.issue, locations: [], totalQty: 0 };
+        matches[key].locations.push({ zone, qty: item.qty, method: item.method, issue: item.issue, notes: item.notes });
+        matches[key].totalQty += item.qty;
+        if (item.issue && item.issue !== 'none') matches[key].issue = item.issue;
+      }
+    });
+  });
+
+  const items = Object.values(matches);
+  if (items.length === 0) {
+    resultsEl.innerHTML = '<div style="padding:10px;font-size:13px;color:var(--text-dim);text-align:center">No items matching "' + esc(value) + '" in this audit</div>';
+    return;
+  }
+
+  resultsEl.innerHTML = items.map(item =>
+    '<div class="summary-card" style="margin-bottom:6px;padding:10px 12px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+        '<div class="c-thumb" style="width:32px;height:32px;color:' + getCategoryColor(item.category) + ';font-size:9px">' + getCategoryLabel(item.category) + '</div>' +
+        '<div style="flex:1;min-width:0">' +
+          '<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(item.name) + '</div>' +
+          (item.issue && item.issue !== 'none' ? '<span style="font-size:10px;color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
+        '</div>' +
+        '<div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--accent)">' + formatQty(item.totalQty) + '</div>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:3px">' +
+        item.locations.map(loc =>
+          '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:var(--surface2);border-radius:var(--radius-xs);font-size:12px">' +
+            '<div style="display:flex;align-items:center;gap:6px">' +
+              '<span style="font-weight:500;color:var(--text)">' + esc(loc.zone) + '</span>' +
+              '<span class="method-badge ' + loc.method + '">' + loc.method + '</span>' +
+              (loc.issue && loc.issue !== 'none' ? '<span style="color:var(--warning);font-size:10px">' + esc(loc.issue) + '</span>' : '') +
+            '</div>' +
+            '<span style="font-family:var(--mono);font-weight:600;color:var(--accent)">' + formatQty(loc.qty) + '</span>' +
+          '</div>'
+        ).join('') +
+      '</div>' +
+    '</div>'
+  ).join('');
 }
 
 function renderAuditHistory() {
