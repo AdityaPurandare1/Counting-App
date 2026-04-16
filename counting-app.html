@@ -1376,6 +1376,15 @@ select.form-input {
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="9" width="3" height="5"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11" y="2" width="3" height="12"/></svg>
           Audit Summary
         </button>
+        <button onclick="openAIChat();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--text);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l1.5 3.5 3.5.5-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5l3.5-.5z"/></svg>
+          Ask AI
+        </button>
+        <button onclick="openAPIKeySettings();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--text);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="10" r="3"/><path d="M8 8l5-5M11 5l2 2"/></svg>
+          AI Settings
+          <span id="headerAIKeyDot" style="margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--danger);display:none"></span>
+        </button>
         <div style="border-top:1px solid var(--border);margin:4px 0"></div>
         <button onclick="handleLogout();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--danger);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2H4a2 2 0 00-2 2v8a2 2 0 002 2h2M10 12l4-4-4-4M14 8H6"/></svg>
@@ -1788,6 +1797,13 @@ select.form-input {
       <label>UPC</label>
       <input class="form-input" id="barcodeSku" readonly style="color:var(--text-muted)">
     </div>
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
+      <label style="display:flex;align-items:center;justify-content:space-between">
+        <span>Also count in other locations</span>
+        <button type="button" onclick="addLocationRow('barcodeExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+      </label>
+      <div id="barcodeExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
     <button class="submit-btn" onclick="submitBarcodeEntry()">Add to count</button>
   </div>
 </div>
@@ -1841,7 +1857,76 @@ select.form-input {
         <span class="issue-chip" data-issue="other" onclick="selectIssue(this)">Other</span>
       </div>
     </div>
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
+      <label style="display:flex;align-items:center;justify-content:space-between">
+        <span>Also count in other locations</span>
+        <button type="button" onclick="addLocationRow('manualExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+      </label>
+      <div id="manualExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
+    </div>
     <button class="submit-btn" onclick="submitManualEntry()">Add to count</button>
+  </div>
+</div>
+
+<!-- ========== AI API KEY SETTINGS MODAL ========== -->
+<div class="modal-overlay hide" id="apiKeySettingsModal" onclick="closeAPIKeySettings(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()">
+    <h3>AI Settings <button class="close-x" onclick="closeAPIKeySettings()">X</button></h3>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
+      Two separate keys — OpenAI (GPT-4o mini) for label parsing, Anthropic (Claude) for the Ask AI assistant. Stored only on this device (localStorage).
+    </div>
+    <div class="form-group">
+      <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(for label parsing)</span></label>
+      <input class="form-input" id="openaiKeyInput" type="password" placeholder="sk-proj-... or sk-..." autocomplete="off" spellcheck="false">
+    </div>
+    <div class="form-group">
+      <label>Anthropic API key <span style="color:var(--text-dim);font-weight:400">(for Ask AI chat)</span></label>
+      <input class="form-input" id="apiKeyInput" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="submit-btn" onclick="saveAPIKey()" style="flex:1">Save</button>
+      <button class="submit-btn secondary" onclick="clearAPIKey()" style="background:var(--surface3);color:var(--text-muted)">Clear all</button>
+    </div>
+    <div id="apiKeyStatus" style="font-size:12px;margin-top:10px;text-align:center"></div>
+  </div>
+</div>
+
+<!-- ========== AI CHAT MODAL ========== -->
+<div class="modal-overlay hide" id="aiChatModal" onclick="closeAIChat(event)">
+  <div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:480px;height:85vh;max-height:85vh;display:flex;flex-direction:column;padding:0">
+    <div style="padding:14px 16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l1.5 3.5 3.5.5-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5l3.5-.5z"/></svg>
+      <h3 style="flex:1;font-size:14px;margin:0">Ask AI</h3>
+      <button class="camera-close" onclick="closeAIChat()" style="width:30px;height:30px;font-size:14px">X</button>
+    </div>
+    <div id="aiChatMessages" style="flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px;font-size:13px;line-height:1.5">
+      <div style="background:var(--surface2);padding:10px 12px;border-radius:var(--radius-sm);color:var(--text-muted);font-size:12px">
+        Hi! I can help with:<br>
+        • Parsing wine labels & bottle photos<br>
+        • Finding items in your inventory<br>
+        • Answering questions about the count<br>
+        • Any other help you need
+      </div>
+    </div>
+    <div id="aiImagePreview" style="display:none;padding:8px 16px;border-top:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px">
+        <img id="aiImageThumb" style="width:40px;height:40px;object-fit:cover;border-radius:6px">
+        <span style="flex:1;font-size:12px;color:var(--text-muted)">Image attached</span>
+        <button onclick="clearAIImage()" style="background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:14px;padding:4px">X</button>
+      </div>
+    </div>
+    <div style="padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:8px;align-items:flex-end">
+      <label style="background:var(--surface2);border:1px solid var(--border);width:38px;height:38px;border-radius:var(--radius-sm);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0" title="Attach photo">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="12" height="9" rx="1.5"/><circle cx="8" cy="9" r="2"/><path d="M5 4l1-1.5h4L11 4"/></svg>
+        <input type="file" accept="image/*" capture="environment" style="display:none" onchange="handleAIImagePick(event)">
+      </label>
+      <textarea id="aiChatInput" placeholder="Ask anything…" rows="1"
+        style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-size:13px;padding:9px 11px;border-radius:var(--radius-sm);resize:none;max-height:100px"
+        onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAIMessage();}"></textarea>
+      <button onclick="sendAIMessage()" style="background:var(--accent);color:#000;border:none;width:38px;height:38px;border-radius:var(--radius-sm);cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center" title="Send">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 8l12-5-5 12-2-5z"/></svg>
+      </button>
+    </div>
   </div>
 </div>
 
@@ -1877,6 +1962,13 @@ select.form-input {
     <div class="form-group">
       <label>Vintage / Details</label>
       <input class="form-input" id="photoDetails" placeholder="e.g. 2019, Napa Valley">
+    </div>
+    <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
+      <label style="display:flex;align-items:center;justify-content:space-between">
+        <span>Also count in other locations</span>
+        <button type="button" onclick="addLocationRow('photoExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+      </label>
+      <div id="photoExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
     <button class="submit-btn" onclick="submitPhotoEntry()">Add to count</button>
   </div>
@@ -3725,6 +3817,108 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
 }
 
 /* ================================================================
+   MULTI-LOCATION COUNTING HELPERS
+   Same item can be counted across multiple zones from a single
+   entry. Adds rows of {zone, qty} to entry modals and, on submit,
+   records each as a separate count in the chosen zone.
+   ================================================================ */
+
+/* Temporarily swaps currentZone, calls addCountEntry, restores zone.
+   Keeps addCountEntry untouched — the data model already supports
+   same-item-in-multiple-zones natively. */
+function addCountEntryToZone(zone, name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
+  if (!zone || zone === appState.currentZone) return;
+  const parsedQty = parseFloat(qty);
+  if (!parsedQty || parsedQty <= 0) return;
+  const originalZone = appState.currentZone;
+  try {
+    appState.currentZone = zone;
+    addCountEntry(name, category, parsedQty, method, sku, notes, issue, photoId, details, masterId);
+  } finally {
+    appState.currentZone = originalZone;
+  }
+}
+
+/* Adds a <zone select> + <qty> + <remove> row to the given container. */
+function addLocationRow(containerId) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  if (!appState.currentVenue) {
+    showToast('Pick a venue first', 'warn');
+    return;
+  }
+
+  const zones = (appState.currentVenue.zones || []).filter(function(z) {
+    return z !== appState.currentZone;
+  });
+  if (zones.length === 0) {
+    showToast('No other zones in this venue', 'warn');
+    return;
+  }
+
+  // Zones already chosen in existing rows — disable them so user can't double-pick
+  const alreadyPicked = Array.from(container.querySelectorAll('select.extra-loc-zone'))
+    .map(function(s) { return s.value; });
+
+  const row = document.createElement('div');
+  row.className = 'extra-loc-row';
+  row.style.cssText = 'display:flex;gap:6px;align-items:center';
+
+  const options = zones.map(function(z) {
+    const disabled = alreadyPicked.indexOf(z) !== -1 ? ' disabled' : '';
+    return '<option value="' + esc(z) + '"' + disabled + '>' + esc(z) + '</option>';
+  }).join('');
+
+  row.innerHTML =
+    '<select class="form-input extra-loc-zone" style="flex:1;margin-bottom:0">' + options + '</select>' +
+    '<input class="form-input extra-loc-qty" type="number" min="0" step="0.25" value="1" inputmode="decimal" ' +
+    'style="width:70px;margin-bottom:0;text-align:center;font-family:var(--mono)">' +
+    '<button type="button" class="extra-loc-remove" ' +
+    'style="width:32px;height:38px;border-radius:var(--radius-sm);background:var(--surface3);border:1px solid var(--border);' +
+    'color:var(--text-muted);font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0">×</button>';
+
+  // Attach remove handler
+  row.querySelector('.extra-loc-remove').addEventListener('click', function() {
+    row.remove();
+  });
+
+  container.appendChild(row);
+
+  // Auto-skip already-picked zones to the first available one
+  const sel = row.querySelector('select.extra-loc-zone');
+  for (let i = 0; i < sel.options.length; i++) {
+    if (!sel.options[i].disabled) { sel.selectedIndex = i; break; }
+  }
+  // Focus the qty field for quick entry
+  setTimeout(function() { row.querySelector('.extra-loc-qty').focus(); row.querySelector('.extra-loc-qty').select(); }, 50);
+}
+
+/* Read rows back, validate, invoke callback(zone, qty) for each. */
+function applyExtraLocations(containerId, callback) {
+  const container = document.getElementById(containerId);
+  if (!container) return 0;
+  const rows = container.querySelectorAll('.extra-loc-row');
+  let applied = 0;
+  const seen = {};
+  rows.forEach(function(row) {
+    const zone = row.querySelector('.extra-loc-zone').value;
+    const qty = parseFloat(row.querySelector('.extra-loc-qty').value);
+    if (!zone || !qty || qty <= 0) return;
+    if (seen[zone]) return; // ignore accidental duplicate zone selection
+    seen[zone] = true;
+    callback(zone, qty);
+    applied++;
+  });
+  if (applied > 0) showToast('Also added to ' + applied + ' other ' + (applied === 1 ? 'location' : 'locations'), 'success');
+  return applied;
+}
+
+function clearExtraLocations(containerId) {
+  const container = document.getElementById(containerId);
+  if (container) container.innerHTML = '';
+}
+
+/* ================================================================
    CORE: ADJUST QUANTITY
    FIX #1: Lock check
    ================================================================ */
@@ -4066,6 +4260,7 @@ function closeBarcodeEntry(event) {
   _barcodeLinkedItem = null;
   document.getElementById('barcodeUpcLinkBanner').style.display = 'none';
   document.getElementById('barcodeNameSuggestions').innerHTML = '';
+  clearExtraLocations('barcodeExtraLocations');
 }
 
 function submitBarcodeEntry() {
@@ -4130,6 +4325,11 @@ function submitBarcodeEntry() {
     null,
     masterId
   );
+
+  // Extras: other zones chosen via "+ Location"
+  applyExtraLocations('barcodeExtraLocations', function(zone, extraQty) {
+    addCountEntryToZone(zone, fullName, category, extraQty, 'barcode', sku, null, 'none', null, null, masterId);
+  });
 
   _barcodeLinkedItem = null;
   closeBarcodeEntry();
@@ -4335,7 +4535,7 @@ function preprocessImageForOCR(imageDataUrl) {
   });
 }
 
-async function parsePhotoLabel(imageDataUrl) {
+async function parsePhotoLabelTesseract(imageDataUrl) {
   const statusEl = document.getElementById('parsingStatus');
 
   try {
@@ -4447,6 +4647,7 @@ function capturePhoto() {
 function closePhotoReview(event) {
   if (event && event.target !== event.currentTarget) return;
   document.getElementById('photoReviewModal').classList.add('hide');
+  clearExtraLocations('photoExtraLocations');
 }
 
 async function submitPhotoEntry() {
@@ -4461,19 +4662,16 @@ async function submitPhotoEntry() {
 
   // Get masterId if OCR matched an item
   const masterId = document.getElementById('photoName').dataset.masterId || null;
+  const category = document.getElementById('photoCategory').value;
+  const qty = document.getElementById('photoQty').value;
+  const details = document.getElementById('photoDetails').value.trim();
 
-  addCountEntry(
-    name,
-    document.getElementById('photoCategory').value,
-    document.getElementById('photoQty').value,
-    'photo',
-    null,
-    document.getElementById('photoDetails').value.trim(),
-    'none',
-    photoId,
-    null,
-    masterId
-  );
+  addCountEntry(name, category, qty, 'photo', null, details, 'none', photoId, null, masterId);
+
+  // Extras: other zones chosen via "+ Location"
+  applyExtraLocations('photoExtraLocations', function(zone, extraQty) {
+    addCountEntryToZone(zone, name, category, extraQty, 'photo', null, details, 'none', photoId, null, masterId);
+  });
 
   closePhotoReview();
   renderCountPage();
@@ -4492,6 +4690,7 @@ function openManualEntry() {
   document.getElementById('manualNotes').value = '';
   document.getElementById('manualSuggestions').innerHTML = '';
   document.getElementById('manualName').dataset.masterId = '';
+  clearExtraLocations('manualExtraLocations');
 
   appState.selectedIssue = 'none';
   document.querySelectorAll('#issueChips .issue-chip').forEach(chip => {
@@ -4551,18 +4750,20 @@ function submitManualEntry() {
   const name = document.getElementById('manualName').value.trim();
   if (!name) { showToast('Enter item name', 'error'); return; }
 
-  addCountEntry(
-    name,
-    document.getElementById('manualCategory').value,
-    document.getElementById('manualQty').value,
-    'manual',
-    document.getElementById('manualSku').value.trim(),
-    document.getElementById('manualNotes').value.trim(),
-    appState.selectedIssue,
-    null,
-    null,
-    document.getElementById('manualName').dataset.masterId || null
-  );
+  const category = document.getElementById('manualCategory').value;
+  const qty = document.getElementById('manualQty').value;
+  const sku = document.getElementById('manualSku').value.trim();
+  const notes = document.getElementById('manualNotes').value.trim();
+  const issue = appState.selectedIssue;
+  const masterId = document.getElementById('manualName').dataset.masterId || null;
+
+  // Primary: current zone
+  addCountEntry(name, category, qty, 'manual', sku, notes, issue, null, null, masterId);
+
+  // Extras: other zones chosen via "+ Location"
+  applyExtraLocations('manualExtraLocations', function(zone, extraQty) {
+    addCountEntryToZone(zone, name, category, extraQty, 'manual', sku, notes, issue, null, null, masterId);
+  });
 
   closeManualEntry();
   renderCountPage();
@@ -6106,12 +6307,481 @@ function closeConfirm(confirmed) {
 }
 
 /* ================================================================
+   AI INTEGRATION
+   - Two separate keys: OpenAI (image parsing) + Anthropic (chat)
+   - OpenAI GPT-4o mini → Vision for label/bottle parsing (cheap + fast)
+   - Anthropic Claude → Ask AI chat (better at long context)
+   - Both keys stored per-device in localStorage (user-provided)
+   ================================================================ */
+const AI_MODEL = 'claude-sonnet-4-5-20250929';          // chat model
+const AI_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+const OPENAI_VISION_MODEL = 'gpt-4o-mini';              // vision model
+const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
+
+function getStoredAPIKey() {
+  try { return localStorage.getItem('hwood_anthropic_key') || ''; } catch (e) { return ''; }
+}
+function getStoredOpenAIKey() {
+  try { return localStorage.getItem('hwood_openai_key') || ''; } catch (e) { return ''; }
+}
+
+function hasAPIKey() {
+  var k = getStoredAPIKey();
+  return !!(k && k.trim().length > 10);
+}
+function hasOpenAIKey() {
+  var k = getStoredOpenAIKey();
+  return !!(k && k.trim().length > 10);
+}
+
+function updateAPIKeyIndicator() {
+  var dot = document.getElementById('headerAIKeyDot');
+  if (!dot) return;
+  // Red dot if NEITHER key is set; hidden if at least one is set.
+  dot.style.display = (hasAPIKey() || hasOpenAIKey()) ? 'none' : 'inline-block';
+}
+
+/* ---------- API KEY SETTINGS MODAL ---------- */
+function openAPIKeySettings() {
+  var anthInput = document.getElementById('apiKeyInput');
+  var oaInput = document.getElementById('openaiKeyInput');
+  var status = document.getElementById('apiKeyStatus');
+
+  // Anthropic field — masked placeholder if already saved
+  var anth = getStoredAPIKey();
+  anthInput.value = '';
+  anthInput.placeholder = anth
+    ? 'Saved (****' + anth.slice(-4) + ') — paste a new one to replace'
+    : 'sk-ant-api03-...';
+
+  // OpenAI field
+  var oa = getStoredOpenAIKey();
+  oaInput.value = '';
+  oaInput.placeholder = oa
+    ? 'Saved (****' + oa.slice(-4) + ') — paste a new one to replace'
+    : 'sk-proj-... or sk-...';
+
+  // Status line
+  var haveAnth = !!anth, haveOA = !!oa;
+  if (haveAnth && haveOA) {
+    status.textContent = 'Both keys active on this device.';
+    status.style.color = 'var(--success)';
+  } else if (haveOA) {
+    status.textContent = 'Label parsing active (OpenAI). Chat disabled until Anthropic key is saved.';
+    status.style.color = 'var(--warning)';
+  } else if (haveAnth) {
+    status.textContent = 'Chat active (Anthropic). Label parsing falls back to on-device OCR until OpenAI key is saved.';
+    status.style.color = 'var(--warning)';
+  } else {
+    status.textContent = 'No keys saved — AI features disabled.';
+    status.style.color = 'var(--text-muted)';
+  }
+  document.getElementById('apiKeySettingsModal').classList.remove('hide');
+}
+
+function closeAPIKeySettings(evt) {
+  if (evt && evt.target !== evt.currentTarget) return;
+  document.getElementById('apiKeySettingsModal').classList.add('hide');
+}
+
+function saveAPIKey() {
+  var anthInput = document.getElementById('apiKeyInput');
+  var oaInput = document.getElementById('openaiKeyInput');
+  var status = document.getElementById('apiKeyStatus');
+
+  var anthKey = (anthInput.value || '').trim();
+  var oaKey = (oaInput.value || '').trim();
+
+  if (!anthKey && !oaKey) {
+    status.textContent = 'Paste at least one key, or tap Clear all to remove.';
+    status.style.color = 'var(--warning)';
+    return;
+  }
+
+  var saved = [];
+  var errors = [];
+
+  if (anthKey) {
+    if (!anthKey.startsWith('sk-ant-')) {
+      errors.push("Anthropic key should start with sk-ant-.");
+    } else {
+      try { localStorage.setItem('hwood_anthropic_key', anthKey); saved.push('Anthropic'); }
+      catch (e) { errors.push('Could not save Anthropic key (localStorage blocked).'); }
+    }
+  }
+  if (oaKey) {
+    if (!oaKey.startsWith('sk-')) {
+      errors.push("OpenAI key should start with sk-.");
+    } else {
+      try { localStorage.setItem('hwood_openai_key', oaKey); saved.push('OpenAI'); }
+      catch (e) { errors.push('Could not save OpenAI key (localStorage blocked).'); }
+    }
+  }
+
+  if (errors.length) {
+    status.textContent = errors.join(' ');
+    status.style.color = 'var(--danger)';
+    return;
+  }
+
+  anthInput.value = '';
+  oaInput.value = '';
+  status.textContent = 'Saved ✓ ' + saved.join(' + ');
+  status.style.color = 'var(--success)';
+  updateAPIKeyIndicator();
+  showToast('AI key(s) saved', 'success');
+  setTimeout(closeAPIKeySettings, 900);
+}
+
+function clearAPIKey() {
+  try { localStorage.removeItem('hwood_anthropic_key'); } catch (e) {}
+  try { localStorage.removeItem('hwood_openai_key'); } catch (e) {}
+  var anthInput = document.getElementById('apiKeyInput');
+  var oaInput = document.getElementById('openaiKeyInput');
+  var status = document.getElementById('apiKeyStatus');
+  if (anthInput) { anthInput.value = ''; anthInput.placeholder = 'sk-ant-api03-...'; }
+  if (oaInput) { oaInput.value = ''; oaInput.placeholder = 'sk-proj-... or sk-...'; }
+  status.textContent = 'All keys cleared.';
+  status.style.color = 'var(--text-muted)';
+  updateAPIKeyIndicator();
+  showToast('AI keys cleared', 'success');
+}
+
+/* ---------- LOW-LEVEL ANTHROPIC CALL ---------- */
+async function callAnthropic(messages, system, maxTokens) {
+  var apiKey = getStoredAPIKey();
+  if (!apiKey) throw new Error('No API key — open AI Settings and paste your Anthropic key.');
+
+  var body = {
+    model: AI_MODEL,
+    max_tokens: maxTokens || 1024,
+    messages: messages,
+  };
+  if (system) body.system = system;
+
+  var res = await fetch(AI_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    var errTxt = '';
+    try { var j = await res.json(); errTxt = j.error && j.error.message ? j.error.message : JSON.stringify(j); }
+    catch (e) { errTxt = 'HTTP ' + res.status; }
+    throw new Error(errTxt);
+  }
+
+  var data = await res.json();
+  // Concatenate all text blocks from the response
+  var text = '';
+  if (data && Array.isArray(data.content)) {
+    for (var i = 0; i < data.content.length; i++) {
+      if (data.content[i].type === 'text') text += data.content[i].text;
+    }
+  }
+  return text;
+}
+
+/* ---------- CLAUDE VISION: parse a photographed label ---------- */
+async function parseLabelWithOpenAI(imageDataUrl) {
+  var apiKey = getStoredOpenAIKey();
+  if (!apiKey) throw new Error('No OpenAI key — open AI Settings and paste your OpenAI key.');
+
+  // Build a compact list of known items for matching (limit to avoid token bloat)
+  var catalogLines = [];
+  var max = Math.min(itemMaster.length, 400);
+  for (var i = 0; i < max; i++) {
+    var it = itemMaster[i];
+    var line = (it.id || i) + '|' + (it.name || '') + (it.brand ? ' — ' + it.brand : '') + (it.size ? ' (' + it.size + ')' : '');
+    catalogLines.push(line);
+  }
+  var catalog = catalogLines.join('\n');
+
+  var systemPrompt =
+    'You are a bar/restaurant inventory assistant. Given a photo of a wine or liquor label/bottle, ' +
+    'extract key fields and match against the provided catalog when possible. ' +
+    'Always respond with STRICT JSON only — no prose, no markdown, no backticks. ' +
+    'Schema: {"name": string, "brand": string, "category": "wine"|"spirits"|"beer"|"food"|"other", ' +
+    '"vintage": string, "size": string, "details": string, "matchedId": string|null, "confidence": "high"|"medium"|"low"}. ' +
+    'Use matchedId ONLY if you are confident the photo corresponds to a catalog row (use its leading id before the pipe). ' +
+    'Leave fields as empty strings if not visible. Prefer exact brand + name from the label over the catalog spelling for name/brand, but do return matchedId when you can.';
+
+  // OpenAI Chat Completions accepts the image as a data URL directly under image_url.url
+  var body = {
+    model: OPENAI_VISION_MODEL,
+    max_tokens: 700,
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+    messages: [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Catalog (id|name — brand (size)):\n' + catalog + '\n\nAnalyze the photo and return JSON only.' },
+          { type: 'image_url', image_url: { url: imageDataUrl, detail: 'low' } }
+        ]
+      }
+    ]
+  };
+
+  var res = await fetch(OPENAI_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    var errTxt = '';
+    try { var j = await res.json(); errTxt = j.error && j.error.message ? j.error.message : JSON.stringify(j); }
+    catch (e) { errTxt = 'HTTP ' + res.status; }
+    throw new Error(errTxt);
+  }
+
+  var data = await res.json();
+  var raw = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
+
+  // Strip any accidental code fences and extract first JSON block
+  var cleaned = String(raw).replace(/```json|```/g, '').trim();
+  var start = cleaned.indexOf('{');
+  var end = cleaned.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('AI response was not JSON: ' + raw.slice(0, 120));
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+/* ---------- parsePhotoLabel WRAPPER ---------- */
+/* If an OpenAI key is set → use GPT-4o mini Vision.
+   Otherwise → fall back to the original Tesseract-based parser. */
+async function parsePhotoLabel(imageDataUrl) {
+  var statusEl = document.getElementById('parsingStatus');
+
+  if (!hasOpenAIKey()) {
+    // No key — use the original Tesseract flow exactly as before
+    return parsePhotoLabelTesseract(imageDataUrl);
+  }
+
+  try {
+    statusEl.textContent = 'Analyzing with GPT-4o mini…';
+    statusEl.style.animation = 'pulse 1s infinite';
+    statusEl.style.color = 'var(--text-muted)';
+
+    var parsed = await parseLabelWithOpenAI(imageDataUrl);
+
+    // Populate fields
+    var nameInput = document.getElementById('photoName');
+    var catSelect = document.getElementById('photoCategory');
+    var detailsInput = document.getElementById('photoDetails');
+
+    // Prefer catalog-match if provided
+    var matchedItem = null;
+    if (parsed.matchedId) {
+      matchedItem = itemMaster.find(function(x) { return String(x.id) === String(parsed.matchedId); });
+    }
+
+    if (matchedItem) {
+      nameInput.value = matchedItem.name;
+      catSelect.value = matchedItem.category || parsed.category || 'other';
+      nameInput.dataset.masterId = matchedItem.id;
+      var detailBits = [];
+      if (parsed.vintage) detailBits.push(parsed.vintage);
+      if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
+      if (parsed.details) detailBits.push(parsed.details);
+      detailsInput.value = detailBits.join(' · ');
+
+      statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')';
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--success)';
+    } else {
+      // No catalog match — fill in what AI extracted so user can pick/edit
+      var displayName = parsed.name || '';
+      if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
+        displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
+      }
+      nameInput.value = displayName;
+      delete nameInput.dataset.masterId;
+      if (parsed.category) catSelect.value = parsed.category;
+      var bits2 = [];
+      if (parsed.vintage) bits2.push(parsed.vintage);
+      if (parsed.size) bits2.push(parsed.size);
+      if (parsed.details) bits2.push(parsed.details);
+      detailsInput.value = bits2.join(' · ');
+
+      statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.';
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--warning)';
+
+      // Auto-run a local search with the extracted name to surface close matches
+      if (displayName && typeof onPhotoSearch === 'function') {
+        try { onPhotoSearch(displayName); } catch (e) {}
+      }
+    }
+
+    // Show raw AI summary for reference
+    var existingRaw = document.getElementById('ocrRawText');
+    if (existingRaw) existingRaw.remove();
+    var rawDiv = document.createElement('div');
+    rawDiv.id = 'ocrRawText';
+    rawDiv.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--surface2);padding:8px;border-radius:6px;margin-top:6px;max-height:80px;overflow-y:auto;font-family:var(--mono);line-height:1.4;word-break:break-word';
+    rawDiv.textContent = 'AI: ' + JSON.stringify({
+      name: parsed.name, brand: parsed.brand, vintage: parsed.vintage,
+      size: parsed.size, category: parsed.category
+    });
+    statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
+
+  } catch (err) {
+    console.error('[OpenAI Vision] parse failed, falling back to OCR:', err);
+    statusEl.textContent = 'AI failed (' + (err.message || 'unknown') + ') — using OCR fallback…';
+    statusEl.style.color = 'var(--warning)';
+    // Graceful fallback — never leave user stuck
+    try { await parsePhotoLabelTesseract(imageDataUrl); }
+    catch (e2) {
+      statusEl.textContent = 'Parsing failed. Enter details manually.';
+      statusEl.style.color = 'var(--danger)';
+    }
+  }
+}
+
+/* ---------- ASK AI CHAT ---------- */
+var aiChatHistory = [];   // [{role:'user'|'assistant', content: <string or blocks>}]
+var aiPendingImage = null; // {dataUrl, mediaType, base64}
+
+function openAIChat() {
+  document.getElementById('aiChatModal').classList.remove('hide');
+  var input = document.getElementById('aiChatInput');
+  setTimeout(function() { try { input.focus(); } catch (e) {} }, 150);
+}
+
+function closeAIChat(evt) {
+  if (evt && evt.target !== evt.currentTarget) return;
+  document.getElementById('aiChatModal').classList.add('hide');
+}
+
+function handleAIImagePick(evt) {
+  var file = evt.target.files && evt.target.files[0];
+  if (!file) return;
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    var dataUrl = e.target.result;
+    var parts = dataUrl.split(',');
+    var header = parts[0] || '';
+    var base64 = parts[1] || '';
+    var mediaType = 'image/jpeg';
+    var mm = /data:(image\/[a-zA-Z+.-]+);base64/.exec(header);
+    if (mm) mediaType = mm[1];
+    aiPendingImage = { dataUrl: dataUrl, mediaType: mediaType, base64: base64 };
+    document.getElementById('aiImageThumb').src = dataUrl;
+    document.getElementById('aiImagePreview').style.display = 'block';
+  };
+  reader.readAsDataURL(file);
+  // Clear the input so the same file can be re-picked later
+  evt.target.value = '';
+}
+
+function clearAIImage() {
+  aiPendingImage = null;
+  document.getElementById('aiImagePreview').style.display = 'none';
+  document.getElementById('aiImageThumb').src = '';
+}
+
+function appendChatBubble(role, html) {
+  var wrap = document.getElementById('aiChatMessages');
+  var bubble = document.createElement('div');
+  var isUser = role === 'user';
+  bubble.style.cssText =
+    'max-width:85%;padding:9px 12px;border-radius:12px;word-break:break-word;white-space:pre-wrap;' +
+    (isUser
+      ? 'align-self:flex-end;background:var(--accent-dim);border:1px solid rgba(200,255,0,.2);color:var(--text)'
+      : 'align-self:flex-start;background:var(--surface2);border:1px solid var(--border);color:var(--text)');
+  bubble.innerHTML = html;
+  wrap.appendChild(bubble);
+  wrap.scrollTop = wrap.scrollHeight;
+  return bubble;
+}
+
+async function sendAIMessage() {
+  var input = document.getElementById('aiChatInput');
+  var text = (input.value || '').trim();
+  var imgAttached = !!aiPendingImage;
+
+  if (!text && !imgAttached) return;
+
+  if (!hasAPIKey()) {
+    appendChatBubble('assistant',
+      '<span style="color:var(--warning)">I need an Anthropic API key to answer. Open the header menu → AI Settings and paste your key.</span>');
+    return;
+  }
+
+  // Build the user bubble (with image if attached)
+  var userHtml = esc(text || '(image)');
+  if (imgAttached) {
+    userHtml =
+      '<img src="' + aiPendingImage.dataUrl + '" style="max-width:200px;border-radius:8px;margin-bottom:6px;display:block">' +
+      userHtml;
+  }
+  appendChatBubble('user', userHtml);
+
+  // Build the API content — image first, then text (or text only)
+  var content;
+  if (imgAttached) {
+    content = [
+      { type: 'image', source: { type: 'base64', media_type: aiPendingImage.mediaType, data: aiPendingImage.base64 } },
+      { type: 'text', text: text || 'What is this? If it is a wine/liquor bottle, identify it and extract vintage, size, and any other inventory-relevant details.' }
+    ];
+  } else {
+    content = text;
+  }
+
+  // Record in history (store the full content structure for subsequent turns)
+  aiChatHistory.push({ role: 'user', content: content });
+
+  // Clear UI for next message
+  input.value = '';
+  clearAIImage();
+
+  // Typing indicator
+  var thinking = appendChatBubble('assistant', '<span style="color:var(--text-muted)">Thinking…</span>');
+
+  // Build compact venue/count context for the system prompt
+  var venueName = (appState.currentVenue && appState.currentVenue.name) || 'none';
+  var zoneName = appState.currentZone || 'none';
+  var auditMode = appState.audit ? 'active' : 'idle';
+  var itemsCount = itemMaster ? itemMaster.length : 0;
+  var system =
+    'You are the in-app assistant for kΩunt, a bar/restaurant inventory counting PWA (H.Wood Group). ' +
+    'Be concise, practical, and mobile-friendly. Answer the user directly — no preamble. ' +
+    'Current venue: ' + venueName + '. Zone: ' + zoneName + '. Audit: ' + auditMode + '. Catalog size: ' + itemsCount + ' items. ' +
+    'When the user sends a bottle/label photo, identify it and suggest inventory-relevant fields (name, brand, vintage, size, category). ' +
+    'If asked to find an item, remind them to use the in-app search — you cannot directly modify the count.';
+
+  try {
+    var reply = await callAnthropic(aiChatHistory, system, 1024);
+    aiChatHistory.push({ role: 'assistant', content: reply });
+    // Replace typing indicator with real response
+    thinking.innerHTML = esc(reply).replace(/\n/g, '<br>');
+  } catch (err) {
+    console.error('[AI chat] failed:', err);
+    thinking.innerHTML = '<span style="color:var(--danger)">Failed: ' + esc(err.message || 'unknown error') + '</span>';
+    // Drop the failed turn from history so retrying doesn't keep a dangling user message
+    aiChatHistory.pop();
+  }
+}
+
+/* ================================================================
    INITIALIZATION
    ================================================================ */
 openPhotoDB().catch(() => {});
 loadItemMaster();
 syncIssuesToLog();
 updateIssueCountBadge();
+updateAPIKeyIndicator();
 
 if (appState.user) {
   if (appState.currentVenue) {
