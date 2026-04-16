@@ -1444,6 +1444,9 @@ select.form-input {
       <button class="submit-btn secondary" style="margin-top:8px" onclick="showPage('venues')">Back to venues</button>
     </div>
 
+    <!-- LOCK OVERLAY: shown when audit is locked (submitted, review, count2, final) -->
+    <div id="auditLockedOverlay" class="hide" style="padding:16px"></div>
+
     <!-- ACTIVE AUDIT CONTENT: shown when audit is in progress -->
     <div id="activeAuditContent" class="hide">
       <div id="auditTimer" class="timer-bar hide">
@@ -2892,15 +2895,70 @@ function renderCountPage() {
     (appState.audit.status === 'active' || appState.audit.status === 'submitted');
 
   if (hasActiveAudit) {
-    // Show the active audit content
+    const isLocked = appState.audit.status === 'submitted' || 
+      ['review', 'count2', 'final'].indexOf(appState.audit.countPhase) !== -1;
+
+    if (isLocked) {
+      // ── LOCKED VIEW: show read-only summary instead of editing UI ──
+      document.getElementById('preAuditScreen').classList.add('hide');
+      document.getElementById('activeAuditContent').classList.add('hide');
+      document.getElementById('auditLockedOverlay').classList.remove('hide');
+      document.getElementById('headerAuditBadge').style.display = '';
+      document.getElementById('headerAuditBadge').className = 'audit-badge ' + appState.audit.status;
+      document.getElementById('headerAuditBadge').textContent = appState.audit.status === 'submitted' ? 'Submitted' : appState.audit.countPhase;
+
+      // Stop timer if running
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+
+      var phase = appState.audit.countPhase;
+      var isSubmitted = appState.audit.status === 'submitted';
+      var allItems = getAllCountedItems();
+      var totalQty = allItems.reduce(function(s, i) { return s + i.qty; }, 0);
+      var issueCount = allItems.filter(function(i) { return i.issue && i.issue !== 'none'; }).length;
+      var zoneCount = Object.keys(appState.audit.counts).length;
+
+      var statusColor = isSubmitted ? 'var(--success)' : 'var(--blue)';
+      var statusIcon = isSubmitted ? '✓' : '⏳';
+      var statusText = isSubmitted ? 'Audit submitted and locked' :
+                       phase === 'review' ? 'Count 1 complete — recount in progress' :
+                       phase === 'count2' ? 'Count 2 in progress' :
+                       'Audit finalized';
+
+      var actionBtn = '';
+      if (!isSubmitted && (phase === 'review' || phase === 'count2')) {
+        actionBtn = '<button class="submit-btn" style="margin-top:12px" onclick="showPage(\'recount\')">Go to Recount</button>';
+      } else if (isSubmitted) {
+        actionBtn = '<button class="submit-btn secondary" style="margin-top:12px" onclick="showPage(\'summary\')">View Summary</button>' +
+                    '<button class="submit-btn secondary" style="margin-top:8px" onclick="showPage(\'issues\')">View Issues (' + issueCount + ')</button>';
+      }
+
+      document.getElementById('auditLockedOverlay').innerHTML =
+        '<div style="text-align:center;padding:20px 0 10px">' +
+          '<div style="width:56px;height:56px;border-radius:50%;background:' + statusColor + '22;color:' + statusColor + ';margin:0 auto 12px;display:flex;align-items:center;justify-content:center;font-size:24px">' + statusIcon + '</div>' +
+          '<div style="font-size:16px;font-weight:600;color:' + statusColor + ';margin-bottom:4px">' + statusText + '</div>' +
+          '<div style="font-size:12px;color:var(--text-muted)">' + esc(appState.currentVenue ? appState.currentVenue.name : '') + '</div>' +
+        '</div>' +
+        '<div class="summary-card" style="margin-top:16px">' +
+          '<div class="stat-row"><span class="stat-label">Items counted</span><span class="stat-value accent">' + allItems.length + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Total quantity</span><span class="stat-value">' + formatQty(totalQty) + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Zones</span><span class="stat-value">' + zoneCount + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Issues flagged</span><span class="stat-value ' + (issueCount > 0 ? 'danger' : '') + '">' + issueCount + '</span></div>' +
+          '<div class="stat-row"><span class="stat-label">Phase</span><span class="stat-value">' + (phase || 'count1') + '</span></div>' +
+        '</div>' +
+        actionBtn +
+        (isSubmitted ? '<button class="submit-btn secondary" style="margin-top:8px" onclick="startFreshAfterSubmit()">Start new audit for this venue</button>' : '');
+
+      updateHeaderCount();
+      return;
+    }
+
+    // ── ACTIVE (unlocked) AUDIT: show full editing UI ──
+    document.getElementById('auditLockedOverlay').classList.add('hide');
     document.getElementById('preAuditScreen').classList.add('hide');
     document.getElementById('activeAuditContent').classList.remove('hide');
     document.getElementById('headerAuditBadge').style.display = '';
     document.getElementById('headerAuditBadge').className = 'audit-badge ' + appState.audit.status;
     document.getElementById('headerAuditBadge').textContent = appState.audit.status;
-
-    const isLocked = appState.audit.status === 'submitted' || 
-      ['review', 'count2', 'final'].indexOf(appState.audit.countPhase) !== -1;
 
     renderProgress();
     renderRecountBanner();
@@ -2918,35 +2976,10 @@ function renderCountPage() {
     document.getElementById('freeContent').classList.toggle('hide', mode !== 'free');
     document.getElementById('quickContent').classList.toggle('hide', mode !== 'quick');
 
-    // Disable scan buttons when locked
+    // Disable scan buttons during active count (safety net — should not be locked here)
     document.querySelectorAll('.scan-btn').forEach(btn => {
-      btn.classList.toggle('locked', isLocked);
+      btn.classList.remove('locked');
     });
-
-    // Show lock banner when count 1 is closed
-    var lockBannerEl = document.getElementById('countLockBanner');
-    if (!lockBannerEl) {
-      lockBannerEl = document.createElement('div');
-      lockBannerEl.id = 'countLockBanner';
-      lockBannerEl.style.cssText = 'padding:10px 12px;background:var(--blue-dim);border:1px solid rgba(68,136,255,.2);border-radius:var(--radius-sm);margin-bottom:10px;font-size:13px;color:var(--blue);text-align:center;cursor:pointer;font-weight:500';
-      var countProgress = document.getElementById('countProgress');
-      if (countProgress) countProgress.parentNode.insertBefore(lockBannerEl, countProgress);
-    }
-    if (isLocked && appState.audit.status !== 'submitted') {
-      var phase = appState.audit.countPhase;
-      var bannerText = phase === 'review' ? 'Count 1 closed — complete the recount to finish the audit' : 
-                       phase === 'count2' ? 'Count 2 in progress — complete recounts to finish' : 
-                       'Audit finalized';
-      lockBannerEl.innerHTML = bannerText;
-      lockBannerEl.onclick = function() { showPage('recount'); };
-      lockBannerEl.style.display = 'block';
-    } else if (appState.audit.status === 'submitted') {
-      lockBannerEl.innerHTML = 'Audit submitted ✓';
-      lockBannerEl.onclick = function() { showPage('summary'); };
-      lockBannerEl.style.display = 'block';
-    } else {
-      lockBannerEl.style.display = 'none';
-    }
 
     if (mode === 'guided') renderGuidedMode();
     else if (mode === 'quick') renderQuickMode();
@@ -2965,6 +2998,7 @@ function renderCountPage() {
     // Show pre-audit screen
     document.getElementById('preAuditScreen').classList.remove('hide');
     document.getElementById('activeAuditContent').classList.add('hide');
+    document.getElementById('auditLockedOverlay').classList.add('hide');
     document.getElementById('headerAuditBadge').style.display = 'none';
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
     document.getElementById('auditTimer').classList.add('hide');
@@ -3051,6 +3085,16 @@ function createAndStartAudit(venue) {
   saveState();
   showToast('Audit started for ' + venue.name, 'success');
   renderCountPage();
+}
+
+function startFreshAfterSubmit() {
+  if (!appState.audit || appState.audit.status !== 'submitted') return;
+  showConfirm('Start a new audit for ' + (appState.currentVenue ? appState.currentVenue.name : 'this venue') + '? The submitted audit is saved in history.', function() {
+    appState.audit = null;
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    saveState();
+    renderCountPage(); // will show pre-audit screen
+  });
 }
 
 function endAuditEarly() {
