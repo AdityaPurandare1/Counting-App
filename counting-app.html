@@ -2285,7 +2285,10 @@ html, body {
     <div id="activityLog" style="max-height:200px;overflow-y:auto"></div>
 
     <!-- Pending UPC Approvals (visible to admins) -->
-    <div class="section-title" style="margin-top:16px">Pending UPC approvals</div>
+    <div class="section-title" style="margin-top:16px;display:flex;align-items:center;gap:8px">
+      <span>Pending UPC approvals</span>
+      <span id="pendingApprovalsBadge" style="display:none;background:var(--warning-dim);color:var(--warning);font-family:var(--mono);font-size:11px;font-weight:700;padding:2px 8px;border-radius:9999px;letter-spacing:.04em">0</span>
+    </div>
     <div id="pendingApprovalsList"></div>
 
     <div style="display:flex;gap:8px;margin-top:16px">
@@ -2764,6 +2767,37 @@ const supabaseRest = {
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
       return { data: await resp.json(), error: null };
     } catch (e) { return { data: null, error: e }; }
+  },
+  async insert(table, body) {
+    try {
+      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': 'return=representation',
+        },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+      return { data: await resp.json(), error: null };
+    } catch (e) { return { data: null, error: e }; }
+  },
+  async rpc(functionName, args) {
+    try {
+      const resp = await fetch(SUPABASE_URL + '/rest/v1/rpc/' + functionName, {
+        method: 'POST',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(args || {}),
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+      return { data: await resp.json(), error: null };
+    } catch (e) { return { data: null, error: e }; }
   }
 };
 
@@ -2828,12 +2862,11 @@ async function writeUPCToSupabase(supabaseId, upc) {
   return true;
 }
 
-let pendingUPCApprovals = [];
-try { pendingUPCApprovals = JSON.parse(localStorage.getItem('hwood_pending_upc_approvals') || '[]'); } catch(e) {}
-function savePendingApprovals() { localStorage.setItem('hwood_pending_upc_approvals', JSON.stringify(pendingUPCApprovals)); }
+let pendingUPCApprovals = []; // legacy — kept for migration reference only, no longer written to
+function savePendingApprovals() { /* no-op — legacy shim */ }
 
 async function linkUPCToItem(barcode, item) {
-  // item = itemMaster entry with .supabaseId
+  // item = itemMaster entry; item.supabaseId is the purchase_items uuid
   const role = appState.user?.role || 'counter';
   const isAdmin = role === 'corporate';
   const hasExistingUPC = item.upc && item.upc.trim().length > 0;
@@ -2843,46 +2876,88 @@ async function linkUPCToItem(barcode, item) {
     return;
   }
 
-  if (isAdmin && item.supabaseId) {
-    // Write directly
-    const ok = await writeUPCToSupabase(item.supabaseId, barcode);
-    if (ok) {
-      item.upc = barcode;
-      item.sku = barcode;
-      showToast('UPC ' + barcode + ' → ' + item.name + ' saved ✓', 'success');
-      logActivity('UPC ' + barcode + ' linked to ' + item.name);
-    }
-  } else if (item.supabaseId) {
-    // Queue for approval
-    pendingUPCApprovals.push({
+  // Build the upc_mappings row
+  const payload = {
+    barcode_raw: barcode,
+    barcode_normalized: normalizeBarcode(barcode),
+    purchase_item_id: item.supabaseId || null,
+    item_name: item.name,
+    item_brand: item.brand || null,
+    item_category: item.category || null,
+    submitted_by_email: (appState.user && appState.user.email) || 'unknown',
+    submitted_by_name: (appState.user && appState.user.name) || 'Unknown',
+    // Corporate users auto-approve on submit (audit trail preserved)
+    status: isAdmin ? 'approved' : 'pending',
+    // If auto-approving, record the approver
+    reviewed_by_email: isAdmin ? ((appState.user && appState.user.email) || 'unknown') : null,
+    reviewed_by_name: isAdmin ? ((appState.user && appState.user.name) || 'Unknown') : null,
+    reviewed_at: isAdmin ? new Date().toISOString() : null,
+  };
+
+  const { data, error } = await supabaseRest.insert('upc_mappings', payload);
+
+  if (error) {
+    // Queue for later retry (offline, network flake, etc.)
+    enqueueUpcWrite(payload);
+    showToast('Offline — UPC queued, will sync when online', 'warn');
+    logActivity('UPC ' + barcode + ' queued (offline) for ' + item.name);
+    return;
+  }
+
+  // Success paths
+  if (isAdmin) {
+    showToast('UPC ' + barcode + ' → ' + item.name + ' saved ✓', 'success');
+    logActivity('UPC ' + barcode + ' auto-approved for ' + item.name);
+    // Add to in-memory cache immediately so subsequent scans match
+    upcMappingsCache[normalizeBarcode(barcode)] = {
+      title: item.name,
+      brand: item.brand || '',
+      category: item.category || 'other',
+      masterId: item.supabaseId ? String(item.supabaseId) : null,
       barcode: barcode,
-      itemId: item.id,
-      itemName: item.name,
-      supabaseId: item.supabaseId,
-      submittedBy: appState.user?.name || 'Unknown',
-      submittedAt: new Date().toISOString(),
-    });
-    savePendingApprovals();
+      approvedAt: new Date().toISOString(),
+    };
+  } else {
     showToast('UPC queued for admin approval', 'success');
     logActivity('UPC ' + barcode + ' queued for ' + item.name);
-  } else {
-    // No supabaseId (items.json fallback) — just learn locally
-    showToast('UPC learned locally (no Supabase link)', 'success');
+    // Refresh the pending count so any admin on this device sees the new badge count
+    loadPendingApprovalsCount();
   }
 }
 
-function renderPendingApprovals() {
+/* In-memory snapshot of the pending list last fetched from Supabase.
+   Indexed access (by position) is used by the approve/reject buttons. */
+let pendingMappingsList = [];
+
+async function renderPendingApprovals() {
   const container = document.getElementById('pendingApprovalsList');
   if (!container) return;
-  if (pendingUPCApprovals.length === 0) {
+
+  // Fetch latest pending from Supabase
+  const { data, error } = await supabaseRest.query(
+    'upc_mappings',
+    "select=*&status=eq.pending&order=submitted_at.desc"
+  );
+
+  if (error) {
+    container.innerHTML = '<p style="font-size:12px;color:var(--danger)">Could not load pending approvals (offline?)</p>';
+    return;
+  }
+
+  pendingMappingsList = data || [];
+  pendingApprovalsCount = pendingMappingsList.length;
+  updatePendingApprovalsBadge();
+
+  if (pendingMappingsList.length === 0) {
     container.innerHTML = '<p style="font-size:12px;color:var(--text-dim)">No pending UPC approvals</p>';
     return;
   }
-  container.innerHTML = pendingUPCApprovals.map(function(p, i) {
-    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--warning-dim);border:1px solid rgba(255,170,0,.2);border-radius:var(--radius-sm);margin-bottom:6px">' +
+
+  container.innerHTML = pendingMappingsList.map(function(p, i) {
+    return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--warning-dim);border:1px solid rgba(178,112,63,.2);border-radius:var(--radius-sm);margin-bottom:6px">' +
       '<div style="flex:1;min-width:0">' +
-        '<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.itemName) + '</div>' +
-        '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + esc(p.barcode) + ' · by ' + esc(p.submittedBy) + '</div>' +
+        '<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.item_name) + '</div>' +
+        '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + esc(p.barcode_raw) + ' · by ' + esc(p.submitted_by_name) + '</div>' +
       '</div>' +
       '<button onclick="approveUPCPending(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--success-dim);color:var(--success);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Approve">✓</button>' +
       '<button onclick="rejectUPCPending(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--danger-dim);color:var(--danger);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Reject">✕</button>' +
@@ -2891,33 +2966,79 @@ function renderPendingApprovals() {
 }
 
 async function approveUPCPending(index) {
-  var p = pendingUPCApprovals[index];
+  const p = pendingMappingsList[index];
   if (!p) return;
-  try {
-    var ok = await writeUPCToSupabase(p.supabaseId, p.barcode);
-    if (ok) {
-      var item = itemMaster.find(function(i) { return i.id === p.itemId; });
-      if (item) { item.upc = p.barcode; item.sku = p.barcode; }
-      showToast('UPC approved: ' + p.itemName, 'success');
-      logActivity('UPC ' + p.barcode + ' approved for ' + p.itemName);
-    } else { return; }
-  } catch (e) {
-    console.error('UPC approval failed:', e);
-    showToast('Failed to save UPC — try again', 'error');
+
+  const role = appState.user?.role || 'counter';
+  if (role !== 'corporate' && role !== 'manager') {
+    showToast('Only admin or manager can approve UPCs', 'error');
     return;
   }
-  pendingUPCApprovals.splice(index, 1);
-  savePendingApprovals();
+
+  const { data, error } = await supabaseRest.rpc('approve_upc_mapping', {
+    p_mapping_id: p.id,
+    p_admin_email: (appState.user && appState.user.email) || 'unknown',
+    p_admin_name: (appState.user && appState.user.name) || 'Unknown',
+  });
+
+  if (error || !data || data.ok === false) {
+    const msg = (data && data.error) || (error && error.message) || 'approval failed';
+    showToast('Failed to approve: ' + msg, 'error');
+    return;
+  }
+
+  showToast('UPC approved: ' + p.item_name, 'success');
+  logActivity('UPC ' + p.barcode_raw + ' approved for ' + p.item_name);
+
+  // Locally insert into approved cache (fast) instead of refetching everything.
+  // The 5-min timer will re-sync eventually anyway if anything drifts.
+  const key = p.barcode_normalized || normalizeBarcode(p.barcode_raw);
+  if (key) {
+    upcMappingsCache[key] = {
+      title: p.item_name,
+      brand: p.item_brand || '',
+      category: p.item_category || 'other',
+      masterId: p.purchase_item_id ? String(p.purchase_item_id) : null,
+      barcode: p.barcode_raw,
+      approvedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem(UPC_CACHE_STORAGE_KEY, JSON.stringify({
+        cache: upcMappingsCache, loadedAt: upcMappingsCacheLoadedAt
+      }));
+    } catch (e) {}
+  }
+
+  // Refresh pending list
   renderPendingApprovals();
 }
 
-function rejectUPCPending(index) {
-  var p = pendingUPCApprovals[index];
-  if (p) logActivity('UPC ' + p.barcode + ' rejected for ' + p.itemName);
-  pendingUPCApprovals.splice(index, 1);
-  savePendingApprovals();
-  renderPendingApprovals();
+async function rejectUPCPending(index) {
+  const p = pendingMappingsList[index];
+  if (!p) return;
+
+  const role = appState.user?.role || 'counter';
+  if (role !== 'corporate' && role !== 'manager') {
+    showToast('Only admin or manager can reject UPCs', 'error');
+    return;
+  }
+
+  const { data, error } = await supabaseRest.rpc('reject_upc_mapping', {
+    p_mapping_id: p.id,
+    p_admin_email: (appState.user && appState.user.email) || 'unknown',
+    p_admin_name: (appState.user && appState.user.name) || 'Unknown',
+    p_reason: null,
+  });
+
+  if (error || !data || data.ok === false) {
+    const msg = (data && data.error) || (error && error.message) || 'rejection failed';
+    showToast('Failed to reject: ' + msg, 'error');
+    return;
+  }
+
+  logActivity('UPC ' + p.barcode_raw + ' rejected for ' + p.item_name);
   showToast('UPC rejected', 'warn');
+  renderPendingApprovals();
 }
 
 function closeUPCApproval() {
@@ -3305,46 +3426,318 @@ if (appState.user && !appState.user.venueIds) {
    item, we save that mapping so it auto-matches next time.
    Later: synced to Supabase so all users benefit.
    ================================================================ */
+
+/* ================================================================
+   UPC MAPPINGS — Supabase-backed store
+   Replaces localStorage queues (pendingUPCApprovals, learnedUPCs).
+
+   Architecture:
+   - Approved mappings: cached in memory, refreshed every 5 min
+   - New submissions: written through to Supabase with offline queue
+   - Offline queue: localStorage-backed, flushes when connection returns
+   - Legacy localStorage data: migrated on first load, then cleared
+   ================================================================ */
+
+// In-memory cache of approved mappings (barcode_normalized -> mapping object)
+let upcMappingsCache = {};
+let upcMappingsCacheLoadedAt = 0;
+const UPC_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// Persist last-known cache to localStorage so it survives reloads (read-through)
+const UPC_CACHE_STORAGE_KEY = 'hwood_upc_mappings_cache';
+try {
+  const cached = localStorage.getItem(UPC_CACHE_STORAGE_KEY);
+  if (cached) {
+    const parsed = JSON.parse(cached);
+    upcMappingsCache = parsed.cache || {};
+    upcMappingsCacheLoadedAt = parsed.loadedAt || 0;
+  }
+} catch (e) {}
+
+// Write-through queue — insertions that failed due to offline/error
+const WRITE_QUEUE_STORAGE_KEY = 'hwood_upc_write_queue';
+let upcWriteQueue = [];
+try { upcWriteQueue = JSON.parse(localStorage.getItem(WRITE_QUEUE_STORAGE_KEY) || '[]'); } catch (e) {}
+function saveUpcWriteQueue() {
+  try { localStorage.setItem(WRITE_QUEUE_STORAGE_KEY, JSON.stringify(upcWriteQueue)); } catch (e) {}
+}
+
+// Count of pending approvals (for Summary badge)
+let pendingApprovalsCount = 0;
+
+/* Normalize a barcode for matching: digits only, drop leading zeros */
+function normalizeBarcode(code) {
+  if (!code) return '';
+  const digits = String(code).replace(/\D/g, '');
+  return digits.replace(/^0+/, '');
+}
+
+/* Load approved mappings from Supabase into the in-memory cache. */
+async function loadApprovedUpcMappings(force) {
+  const now = Date.now();
+  if (!force && (now - upcMappingsCacheLoadedAt) < UPC_CACHE_TTL_MS) {
+    return; // cache still fresh
+  }
+  const { data, error } = await supabaseRest.query(
+    'upc_mappings',
+    "select=*&status=eq.approved"
+  );
+  if (error || !data) {
+    console.warn('UPC mappings load failed — using cached copy:', error);
+    return;
+  }
+  const next = {};
+  for (const row of data) {
+    const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
+    if (!key) continue;
+    next[key] = {
+      title: row.item_name,
+      brand: row.item_brand || '',
+      category: row.item_category || 'other',
+      masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
+      barcode: row.barcode_raw,
+      approvedAt: row.reviewed_at,
+    };
+  }
+  upcMappingsCache = next;
+  upcMappingsCacheLoadedAt = now;
+  try {
+    localStorage.setItem(UPC_CACHE_STORAGE_KEY, JSON.stringify({
+      cache: upcMappingsCache, loadedAt: upcMappingsCacheLoadedAt
+    }));
+  } catch (e) {}
+  console.log('UPC mappings cache refreshed: ' + Object.keys(upcMappingsCache).length + ' entries');
+}
+
+/* Refresh the pending-approvals count (for Summary badge). */
+async function loadPendingApprovalsCount() {
+  const { data, error } = await supabaseRest.query(
+    'upc_mappings',
+    "select=id&status=eq.pending"
+  );
+  if (error) return;
+  pendingApprovalsCount = (data || []).length;
+  updatePendingApprovalsBadge();
+}
+
+/* Update the badge UI wherever it appears. */
+function updatePendingApprovalsBadge() {
+  const badge = document.getElementById('pendingApprovalsBadge');
+  if (badge) {
+    if (pendingApprovalsCount > 0) {
+      badge.textContent = pendingApprovalsCount;
+      badge.style.display = 'inline-flex';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+}
+
+/* Enqueue a write for offline retry. */
+function enqueueUpcWrite(payload) {
+  upcWriteQueue.push(payload);
+  saveUpcWriteQueue();
+}
+
+/* Attempt to flush the write queue to Supabase.
+   Permanent-failure entries (constraint violations, bad data) are dropped
+   instead of retried forever. Transient failures (offline, 5xx) stay queued. */
+async function flushUpcWriteQueue() {
+  if (upcWriteQueue.length === 0) return;
+  if (!navigator.onLine) return; // skip if definitely offline
+  const queue = upcWriteQueue.slice();
+  const remaining = [];
+  let flushed = 0;
+  let dropped = 0;
+  for (const payload of queue) {
+    const { data, error } = await supabaseRest.insert('upc_mappings', payload);
+    if (error) {
+      // Classify the error: is it worth retrying, or is it a permanent failure?
+      const msg = (error && error.message) ? String(error.message) : '';
+      const isPermanent =
+        msg.includes('HTTP 4') ||          // any 4xx (client error, won't fix itself)
+        msg.includes('duplicate key') ||    // unique violation
+        msg.includes('violates') ||         // check/FK violation
+        msg.includes('invalid input');      // bad type etc.
+      if (isPermanent) {
+        dropped++;
+        console.warn('Dropping non-retryable queued UPC write:', msg, payload);
+      } else {
+        remaining.push(payload); // transient — keep for next attempt
+      }
+    } else {
+      flushed++;
+    }
+  }
+  upcWriteQueue = remaining;
+  saveUpcWriteQueue();
+  if (flushed > 0) {
+    showToast(flushed + ' queued UPC mapping' + (flushed === 1 ? '' : 's') + ' synced', 'success');
+    loadPendingApprovalsCount();
+  }
+  if (dropped > 0) {
+    console.warn('Dropped ' + dropped + ' non-retryable UPC write(s) — likely already submitted by another device');
+  }
+}
+
+/* One-time migration: push any legacy localStorage queues into the new system.
+   Runs in the background after startup. Safe to interrupt — flag only set on full success.
+   Inserts rows one-at-a-time so a single bad row doesn't block the rest. */
+async function migrateLegacyUpcStores() {
+  const MIGRATED_FLAG = 'hwood_upc_migrated_v1';
+  if (localStorage.getItem(MIGRATED_FLAG)) return;
+
+  // Collect legacy rows from both old stores
+  const toMigrate = [];
+
+  // Only UUIDs are valid for purchase_item_id FK. Anything else becomes null.
+  const isValidUuid = (v) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+
+  try {
+    const legacyPending = JSON.parse(localStorage.getItem('hwood_pending_upc_approvals') || '[]');
+    for (const p of legacyPending) {
+      if (!p || !p.barcode || !p.itemName) continue;
+      toMigrate.push({
+        barcode_raw: p.barcode,
+        barcode_normalized: normalizeBarcode(p.barcode),
+        purchase_item_id: isValidUuid(p.supabaseId) ? p.supabaseId : null,
+        item_name: p.itemName,
+        submitted_by_email: (appState.user && appState.user.email) || 'legacy@migration',
+        submitted_by_name: p.submittedBy || 'Legacy Migration',
+        status: 'pending',
+      });
+    }
+  } catch (e) {}
+
+  try {
+    const legacyLearned = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}');
+    for (const [code, v] of Object.entries(legacyLearned)) {
+      if (!code || !v || !v.title) continue;
+      toMigrate.push({
+        barcode_raw: code,
+        barcode_normalized: normalizeBarcode(code),
+        purchase_item_id: isValidUuid(v.masterId) ? v.masterId : null,
+        item_name: v.title,
+        item_brand: v.brand || null,
+        item_category: v.category || null,
+        submitted_by_email: (appState.user && appState.user.email) || 'legacy@migration',
+        submitted_by_name: 'Legacy Migration',
+        status: 'pending',
+      });
+    }
+  } catch (e) {}
+
+  if (toMigrate.length === 0) {
+    localStorage.setItem(MIGRATED_FLAG, '1');
+    return;
+  }
+
+  // Insert one at a time so one bad row doesn't fail the whole batch
+  let inserted = 0;
+  let skipped = 0;
+  for (const payload of toMigrate) {
+    const { error } = await supabaseRest.insert('upc_mappings', payload);
+    if (error) {
+      const msg = (error && error.message) ? String(error.message) : '';
+      // Duplicates and FK violations are expected (another device beat us to it, or bad legacy data)
+      if (msg.includes('duplicate key') || msg.includes('violates') || msg.includes('HTTP 4')) {
+        skipped++;
+      } else {
+        // Transient failure — abort migration, try again next app load
+        console.warn('Legacy migration interrupted (transient failure):', error);
+        return;
+      }
+    } else {
+      inserted++;
+    }
+  }
+
+  // Clear legacy keys + set flag (only after full pass completes)
+  try {
+    localStorage.removeItem('hwood_pending_upc_approvals');
+    localStorage.removeItem('hwood_learned_upc');
+    localStorage.setItem(MIGRATED_FLAG, '1');
+    if (inserted > 0) {
+      showToast('Migrated ' + inserted + ' UPC mapping' + (inserted === 1 ? '' : 's') + ' to Supabase', 'success');
+      logActivity('Migrated ' + inserted + ' legacy UPC mapping(s); ' + skipped + ' skipped as duplicates');
+    }
+  } catch (e) {}
+}
+
+/* Kick off background sync: run on app start + every 5 min + on connection restore.
+   Migration is delayed until after login (so the user email is known). */
+function initUpcMappingsSync() {
+  loadApprovedUpcMappings(true);
+  loadPendingApprovalsCount();
+  flushUpcWriteQueue();
+  // Migration runs lazily on first login — see runMigrationIfLoggedIn()
+  runMigrationIfLoggedIn();
+
+  // Periodic refresh (every 5 min)
+  setInterval(() => {
+    loadApprovedUpcMappings();
+    loadPendingApprovalsCount();
+    runMigrationIfLoggedIn();
+  }, UPC_CACHE_TTL_MS);
+
+  // Flush queue when connection comes back
+  window.addEventListener('online', () => {
+    flushUpcWriteQueue();
+    loadApprovedUpcMappings(true);
+    runMigrationIfLoggedIn();
+  });
+}
+
+/* Runs migration only if someone is actually logged in, so we can tag
+   the migrated rows with their email. If not logged in, retries later. */
+function runMigrationIfLoggedIn() {
+  if (appState && appState.user && appState.user.email) {
+    migrateLegacyUpcStores();
+  }
+}
+
+
+/* ================================================================
+   Legacy external-API lookup cache (unchanged behavior).
+   This is still per-device because it caches UPCitemdb results,
+   not teachings — safe to stay local.
+   ================================================================ */
 let upcCache = {};
 try { upcCache = JSON.parse(localStorage.getItem('hwood_upc') || '{}'); } catch (e) {}
-
-let learnedUPCs = {};
-try { learnedUPCs = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}'); } catch (e) {}
-
 function saveUpcCache() {
   try { localStorage.setItem('hwood_upc', JSON.stringify(upcCache)); } catch (e) {}
 }
 
-function saveLearnedUPCs() {
-  try { localStorage.setItem('hwood_learned_upc', JSON.stringify(learnedUPCs)); } catch (e) {}
-}
-
+/* ================================================================
+   Legacy function shims — kept for backwards-compat with existing
+   call sites. learnUPC() is now a no-op (the insert happens inside
+   linkUPCToItem). lookupLearnedUPC() reads from the Supabase-backed
+   cache, with legacy-shape return for compatibility.
+   ================================================================ */
 function learnUPC(code, itemName, brand, category, masterId) {
-  const cleanCode = code.replace(/\D/g, '');
-  if (!cleanCode || cleanCode.length < 6) return;
-
-  learnedUPCs[cleanCode] = {
-    title: itemName,
-    brand: brand || '',
-    category: category || 'other',
-    masterId: masterId || null,
-    learnedAt: new Date().toISOString(),
-  };
-  saveLearnedUPCs();
-  logActivity('Learned UPC ' + cleanCode + ' = ' + itemName);
+  // No-op: the real persistence happens in linkUPCToItem() which
+  // writes to upc_mappings. Leaving this as a shim means existing
+  // call sites still compile but the localStorage side effect is gone.
 }
 
 function lookupLearnedUPC(code) {
-  const cleanCode = code.replace(/\D/g, '');
-  // Try exact match
-  if (learnedUPCs[cleanCode]) return learnedUPCs[cleanCode];
-  // Try without leading zeros
-  const noZeros = cleanCode.replace(/^0+/, '');
-  for (const [key, val] of Object.entries(learnedUPCs)) {
-    if (key.replace(/^0+/, '') === noZeros) return val;
-  }
+  const key = normalizeBarcode(code);
+  if (!key) return null;
+  if (upcMappingsCache[key]) return upcMappingsCache[key];
+  // Legacy key format (kept around briefly — empty after migration runs)
+  try {
+    var legacy = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}');
+    if (legacy[key]) return legacy[key];
+    var noZeros = key.replace(/^0+/, '');
+    for (var k in legacy) {
+      if (k.replace(/^0+/, '') === noZeros) return legacy[k];
+    }
+  } catch (e) {}
   return null;
 }
+
+function saveLearnedUPCs() { /* no-op — writes happen via Supabase */ }
+
 
 /* ================================================================
    CUSTOM ITEMS LIST
@@ -3553,6 +3946,12 @@ function handleLogin() {
 
   saveState();
   showToast('Signed in as ' + appState.user.name + ' (' + appState.user.role + ')', 'success');
+
+  // Kick off UPC migration + fresh sync now that we know who's logged in
+  runMigrationIfLoggedIn();
+  loadApprovedUpcMappings(true);
+  loadPendingApprovalsCount();
+
   showPage('venues');
 }
 
@@ -7671,6 +8070,7 @@ loadItemMaster();
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
+initUpcMappingsSync();
 
 if (appState.user) {
   if (appState.currentVenue) {
