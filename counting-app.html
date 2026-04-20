@@ -15,38 +15,100 @@
 
 <style>
 /* ============================================================
-   CSS VARIABLES
+   KΩUNT — REDESIGNED UI (v2)
+   Warm cream + deep navy + coral accent
+   Big, confident touch targets for bar/back-of-house use
    ============================================================ */
+
+/* ---------- CSS VARIABLES ---------- */
 :root {
-  --bg: #0a0a0a;
-  --surface: #141414;
-  --surface2: #1c1c1c;
-  --surface3: #242424;
-  --border: #2a2a2a;
-  --text: #e8e4dd;
-  --text-muted: #8a8680;
-  --text-dim: #5a5854;
-  --accent: #c8ff00;
-  --accent-dim: rgba(200, 255, 0, 0.12);
-  --danger: #ff4444;
-  --danger-dim: rgba(255, 68, 68, 0.12);
-  --success: #00d68f;
-  --success-dim: rgba(0, 214, 143, 0.12);
-  --warning: #ffaa00;
-  --warning-dim: rgba(255, 170, 0, 0.12);
-  --blue: #4488ff;
-  --blue-dim: rgba(68, 136, 255, 0.12);
+  /* ══════ WOODY PALETTE ══════ */
+  /* Surfaces — warm cream / off-white foundation */
+  --bg: #ECE6DF;
+  --canvas: #ECE6DF;
+  --surface: #FFFFFF;
+  --surface2: #F5F1EC;
+  --surface3: #E7E0D6;
+  --off-100: #FFF9F5;
+  --off-200: #F5F1EC;
+  --off-300: #E7E0D6;
+  --border: #D9D2C5;
+  --border-strong: #B5AB97;
+
+  /* Text — ink-forward, generous contrast */
+  --text: #0D0A08;
+  --ink: #0D0A08;
+  --fg-primary: #0D0A08;
+  --fg-secondary: #4F4B4B;
+  --fg-muted: #8A8380;
+  --text-muted: #4F4B4B;
+  --text-dim: #8A8380;
+
+  /* Brand — Woody uses ink as primary CTA, gold as highlight */
+  --accent: #0D0A08;
+  --accent-hover: #26201C;
+  --accent-dim: rgba(13, 10, 8, 0.08);
+  --accent-soft: #F5EBD0;
+  --primary: #0D0A08;
+  --primary-dim: rgba(13, 10, 8, 0.06);
+
+  /* Dark scale */
+  --dark-700: #3D342F;
+  --dark-800: #1E1612;
+  --dark-900: #0D0A08;
+
+  /* Gold — highlight/status */
+  --gold-100: #F5EBD0;
+  --gold-300: #C9A24C;
+  --gold-400: #8B6F1E;
+
+  /* Raspberry — critical / danger */
+  --raspberry-100: #F7DEE4;
+  --raspberry-200: #E8A8B6;
+  --raspberry-300: #C13A57;
+  --raspberry-400: #7C1E31;
+
+  /* Teal — positive / in-progress */
+  --teal-100: #DCEAE6;
+  --teal-300: #3F7D73;
+
+  /* Copper — caution */
+  --copper-100: #F5E0CE;
+  --copper-300: #B2703F;
+  --copper-400: #7A4818;
+
+  /* Amethyst — inform / scheduled */
+  --amethyst-100: #EBE2F2;
+  --amethyst-200: #C9B6DC;
+  --amethyst-300: #8B6FA8;
+  --amethyst-400: #4E3A6B;
+
+  /* Semantic aliases (Phase A uses these) */
+  --danger: #C13A57;
+  --danger-dim: rgba(193, 58, 87, 0.10);
+  --success: #3F7D73;
+  --success-dim: rgba(63, 125, 115, 0.10);
+  --warning: #B2703F;
+  --warning-dim: rgba(178, 112, 63, 0.10);
+  --blue: #8B6FA8;
+  --blue-dim: rgba(139, 111, 168, 0.10);
+
+  /* Shape — tighter radii to match Woody's squared feel */
   --radius: 12px;
   --radius-sm: 8px;
   --radius-xs: 6px;
-  --font: 'DM Sans', sans-serif;
-  --mono: 'JetBrains Mono', monospace;
+  --shadow-sm: 0 1px 2px rgba(13, 10, 8, 0.05);
+  --shadow: 0 2px 6px rgba(13, 10, 8, 0.06), 0 1px 2px rgba(13, 10, 8, 0.04);
+  --shadow-lg: 0 12px 32px rgba(13, 10, 8, 0.14), 0 4px 8px rgba(13, 10, 8, 0.06);
+
+  /* Typography */
+  --font: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-top: env(safe-area-inset-top, 0px);
 }
 
-/* ============================================================
-   RESET AND BASE
-   ============================================================ */
+/* ---------- RESET ---------- */
 * {
   margin: 0;
   padding: 0;
@@ -59,13 +121,14 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 15px;
+  font-size: 16px;
+  line-height: 1.45;
   overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* ============================================================
-   UTILITIES
-   ============================================================ */
+/* ---------- UTILITIES ---------- */
 .hide { display: none !important; }
 .fade-in { animation: fadeIn 0.25s ease; }
 
@@ -84,155 +147,188 @@ html, body {
   100% { top: 80%; }
 }
 
-/* ============================================================
-   APP SHELL
-   ============================================================ */
+@keyframes tapPulse {
+  0% { transform: scale(1); }
+  40% { transform: scale(0.94); }
+  100% { transform: scale(1); }
+}
+
+@keyframes bumpUp {
+  0% { transform: translateY(0) scale(1); }
+  40% { transform: translateY(-4px) scale(1.08); }
+  100% { transform: translateY(0) scale(1); }
+}
+
+.bump { animation: bumpUp 0.28s cubic-bezier(.3,1.4,.5,1); }
+
+/* ---------- APP SHELL ---------- */
 #app {
-  max-width: 480px;
+  max-width: 520px;
   margin: 0 auto;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   position: relative;
+  background: var(--bg);
 }
 
-/* ============================================================
-   HEADER
-   ============================================================ */
+/* ---------- HEADER ---------- */
 .header {
-  padding: 10px 16px;
+  padding: 12px 16px;
+  padding-top: calc(12px + var(--safe-top));
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--border);
   background: var(--bg);
+  border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
   z-index: 100;
+  gap: 10px;
 }
 
 .header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
 }
 
 .logo {
   font-family: var(--mono);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--accent);
-  letter-spacing: 2px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--primary);
+  letter-spacing: 2.5px;
   text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.logo::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: var(--accent);
+  border-radius: 50%;
+  margin-right: 8px;
+  vertical-align: middle;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .venue-badge {
-  font-size: 12px;
-  color: var(--text-muted);
-  background: var(--surface2);
-  padding: 3px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--border);
-  max-width: 140px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary);
+  background: var(--surface);
+  padding: 7px 14px;
+  border-radius: 24px;
+  border: 1.5px solid var(--border);
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  box-shadow: var(--shadow-sm);
 }
 
 .header-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .count-badge {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--accent);
-  background: var(--accent-dim);
-  padding: 3px 10px;
-  border-radius: 20px;
-  font-weight: 500;
+  background: var(--accent-soft);
+  padding: 7px 12px;
+  border-radius: 24px;
+  border: 1.5px solid var(--accent);
 }
 
 .icon-btn {
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border);
+  width: 44px;
+  height: 44px;
+  border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--surface);
-  color: var(--text-muted);
+  color: var(--primary);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: all 0.15s;
+  box-shadow: var(--shadow-sm);
 }
 
 .icon-btn:active {
-  background: var(--surface3);
-  transform: scale(0.95);
+  background: var(--surface2);
+  transform: scale(0.93);
 }
 
 .icon-btn svg {
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
 }
 
-/* ============================================================
-   PAGES
-   ============================================================ */
+/* ---------- PAGES ---------- */
 .page {
   flex: 1;
-  padding: 16px;
-  padding-bottom: calc(80px + var(--safe-bottom));
+  padding: 18px 16px;
+  padding-bottom: calc(100px + var(--safe-bottom));
   overflow-y: auto;
 }
 
-/* ============================================================
-   PROGRESS BAR
-   ============================================================ */
+/* ---------- PROGRESS BAR ---------- */
 .progress-wrap {
-  margin-bottom: 14px;
+  margin-bottom: 16px;
 }
 
 .progress-info {
   display: flex;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
-  margin-bottom: 4px;
+  margin-bottom: 8px;
+  font-weight: 500;
 }
 
 .progress-info strong {
-  color: var(--text);
+  color: var(--primary);
   font-family: var(--mono);
+  font-weight: 600;
 }
 
 .progress-bar {
-  height: 6px;
+  height: 10px;
   background: var(--surface3);
-  border-radius: 3px;
+  border-radius: 6px;
   overflow: hidden;
+  border: 1px solid var(--border);
 }
 
 .progress-fill {
   height: 100%;
-  background: var(--accent);
-  border-radius: 3px;
-  transition: width 0.3s;
+  background: linear-gradient(90deg, var(--accent) 0%, #ff7a4d 100%);
+  border-radius: 6px;
+  transition: width 0.4s cubic-bezier(.4,0,.2,1);
   min-width: 0;
 }
 
-/* ============================================================
-   ZONE TABS
-   ============================================================ */
+/* ---------- ZONE TABS ---------- */
 .zone-tabs {
   display: flex;
-  gap: 6px;
-  padding: 0 0 10px;
+  gap: 8px;
+  padding: 0 0 14px;
   overflow-x: auto;
   scrollbar-width: none;
+  margin: 0 -16px;
+  padding-left: 16px;
+  padding-right: 16px;
 }
 
 .zone-tabs::-webkit-scrollbar {
@@ -241,137 +337,220 @@ html, body {
 
 .zone-tab {
   flex-shrink: 0;
-  padding: 5px 12px;
-  border-radius: 20px;
-  border: 1px solid var(--border);
+  padding: 10px 18px;
+  border-radius: 24px;
+  border: 1.5px solid var(--border);
   background: var(--surface);
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 500;
+  color: var(--primary);
+  font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.15s;
   white-space: nowrap;
   font-family: var(--font);
+  box-shadow: var(--shadow-sm);
+  min-height: 42px;
 }
 
 .zone-tab.active {
-  background: var(--accent);
-  color: #0a0a0a;
-  border-color: var(--accent);
+  background: var(--primary);
+  color: var(--bg);
+  border-color: var(--primary);
+  box-shadow: var(--shadow);
 }
 
 .zone-tab .zcnt {
   font-family: var(--mono);
-  font-size: 10px;
-  margin-left: 4px;
+  font-size: 12px;
+  margin-left: 6px;
   opacity: 0.7;
+  font-weight: 500;
 }
 
-/* ============================================================
-   SCAN ACTION BUTTONS
-   ============================================================ */
+/* ---------- SCAN ACTION BUTTONS ---------- */
 .scan-actions {
   display: grid;
   grid-template-columns: 1fr 1fr 1fr;
-  gap: 6px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 16px;
 }
 
 .scan-btn {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  padding: 10px 6px;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px 8px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  color: var(--text);
+  color: var(--primary);
   cursor: pointer;
   transition: all 0.15s;
   font-family: var(--font);
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
+  min-height: 96px;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  overflow: hidden;
 }
 
 .scan-btn:active {
-  background: var(--surface3);
-  transform: scale(0.97);
+  background: var(--surface2);
+  transform: scale(0.96);
+  box-shadow: var(--shadow-sm);
 }
 
 .scan-btn.locked {
-  opacity: 0.35;
+  opacity: 0.4;
   pointer-events: none;
 }
 
 .scan-icon {
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-xs);
+  border-radius: 12px;
 }
 
-.scan-btn.barcode .scan-icon { background: var(--accent-dim); color: var(--accent); }
-.scan-btn.photo .scan-icon { background: var(--blue-dim); color: var(--blue); }
-.scan-btn.manual .scan-icon { background: var(--surface3); color: var(--text-muted); }
+.scan-icon svg {
+  width: 24px !important;
+  height: 24px !important;
+}
 
-/* ============================================================
-   MODE TOGGLE (Guided / Free / Quick)
-   ============================================================ */
+.scan-btn.barcode {
+  background: var(--primary);
+  color: var(--bg);
+  border-color: var(--primary);
+}
+.scan-btn.barcode .scan-icon {
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--bg);
+}
+.scan-btn.barcode:active {
+  background: var(--ink);
+}
+
+.scan-btn.photo .scan-icon {
+  background: var(--blue-dim);
+  color: var(--blue);
+}
+
+.scan-btn.manual .scan-icon {
+  background: var(--surface3);
+  color: var(--primary);
+}
+
+/* ---------- MODE TOGGLE ---------- */
 .mode-toggle {
   display: flex;
   gap: 4px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: var(--surface2);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
-  padding: 3px;
-  margin-bottom: 12px;
+  padding: 4px;
+  margin-bottom: 14px;
 }
 
 .mode-btn {
   flex: 1;
-  padding: 6px;
+  padding: 11px 8px;
   text-align: center;
-  font-size: 12px;
-  font-weight: 500;
-  border-radius: var(--radius-xs);
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 10px;
   cursor: pointer;
   color: var(--text-muted);
   transition: all 0.15s;
   background: none;
   border: none;
   font-family: var(--font);
+  min-height: 40px;
 }
 
 .mode-btn.active {
-  background: var(--surface3);
-  color: var(--text);
+  background: var(--surface);
+  color: var(--primary);
+  box-shadow: var(--shadow-sm);
 }
 
-/* ============================================================
-   SEARCH BAR
-   ============================================================ */
+/* ---------- STICKY CURRENT ITEM CARD ---------- */
+.current-item-card {
+  position: sticky;
+  top: 68px;
+  z-index: 50;
+  background: var(--primary);
+  color: var(--bg);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-lg);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.current-item-card .ci-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.current-item-card .ci-name {
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+
+.current-item-card .ci-meta {
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.current-item-card .ci-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.current-item-card .ci-info .ci-name,
+.current-item-card .ci-info .ci-meta {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- SEARCH BAR ---------- */
 .search-bar {
   position: relative;
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 
 .search-bar input {
   width: 100%;
-  padding: 9px 12px 9px 36px;
+  padding: 14px 16px 14px 46px;
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 13px;
+  font-size: 16px;
   font-family: var(--font);
+  font-weight: 500;
   outline: none;
+  box-shadow: var(--shadow-sm);
+  min-height: 48px;
 }
 
 .search-bar input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-dim);
 }
 
 .search-bar input::placeholder {
@@ -380,76 +559,85 @@ html, body {
 
 .search-bar .si {
   position: absolute;
-  left: 11px;
+  left: 16px;
   top: 50%;
   transform: translateY(-50%);
-  color: var(--text-dim);
+  color: var(--text-muted);
   display: flex;
 }
 
 .search-bar .si svg {
-  width: 14px;
-  height: 14px;
+  width: 18px;
+  height: 18px;
 }
 
-/* ============================================================
-   LIST HEADER
-   ============================================================ */
+/* ---------- LIST HEADER ---------- */
 .list-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
+  padding: 0 4px;
 }
 
 .list-header h3 {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.8px;
 }
 
 .list-header .total {
   font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text-dim);
+  font-size: 13px;
+  color: var(--primary);
+  font-weight: 600;
 }
 
-/* ============================================================
-   COUNT ITEM ROW
-   ============================================================ */
+/* ---------- COUNT ITEM ROW ---------- */
 .c-item {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  margin-bottom: 6px;
+  padding: 14px 14px;
+  margin-bottom: 10px;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 14px;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.15s;
+}
+
+.c-item:active {
+  transform: scale(0.99);
 }
 
 .c-item.counted {
-  border-left: 3px solid var(--success);
+  border-left: 4px solid var(--success);
+  background: linear-gradient(90deg, var(--success-dim) 0%, var(--surface) 24%);
 }
 
 .c-item.flagged {
-  border-left: 3px solid var(--danger);
+  border-left: 4px solid var(--danger);
+  background: linear-gradient(90deg, var(--danger-dim) 0%, var(--surface) 24%);
 }
 
 .c-thumb {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-xs);
-  background: var(--surface3);
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
   flex-shrink: 0;
   overflow: hidden;
+  text-transform: uppercase;
 }
 
 .c-thumb img {
@@ -464,100 +652,123 @@ html, body {
 }
 
 .c-name {
-  font-weight: 600;
-  font-size: 13px;
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.25;
 }
 
 .c-meta {
   color: var(--text-muted);
-  font-size: 11px;
-  margin-top: 1px;
+  font-size: 13px;
+  margin-top: 3px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
+  font-weight: 500;
 }
 
 .method-badge {
-  font-size: 9px;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 600;
+  font-size: 10px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
 }
 
-.method-badge.barcode { background: var(--accent-dim); color: var(--accent); }
+.method-badge.barcode { background: var(--primary-dim); color: var(--primary); }
 .method-badge.photo { background: var(--blue-dim); color: var(--blue); }
 .method-badge.manual { background: var(--surface3); color: var(--text-muted); }
 .method-badge.guided { background: var(--success-dim); color: var(--success); }
 
+/* ---------- QTY CONTROLS (BIG!) ---------- */
 .c-qty {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  gap: 6px;
 }
 
 .qty-btn {
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  border-radius: var(--radius-xs);
+  width: 48px;
+  height: 48px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  color: var(--primary);
+  border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  font-size: 15px;
-  font-weight: 600;
-  transition: all 0.1s;
+  font-size: 22px;
+  font-weight: 700;
+  transition: all 0.12s;
   font-family: var(--font);
+  box-shadow: var(--shadow-sm);
+  line-height: 1;
 }
 
 .qty-btn:active {
-  background: var(--surface3);
+  background: var(--primary);
+  color: var(--bg);
   transform: scale(0.9);
+  box-shadow: none;
+}
+
+.qty-btn.plus {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.qty-btn.plus:active {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .qty-val {
   font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 600;
-  min-width: 32px;
+  font-size: 24px;
+  font-weight: 700;
+  min-width: 44px;
   text-align: center;
-  color: var(--accent);
+  color: var(--primary);
+  letter-spacing: -0.5px;
 }
 
-/* ============================================================
-   VENUE CARDS
-   ============================================================ */
+/* ---------- VENUE CARDS ---------- */
 .venue-select-page h1 {
-  font-size: 20px;
-  font-weight: 600;
-  margin-bottom: 3px;
+  font-size: 28px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  color: var(--primary);
+  letter-spacing: -0.5px;
 }
 
 .venue-select-page .subtitle {
   color: var(--text-muted);
-  font-size: 13px;
-  margin-bottom: 20px;
+  font-size: 15px;
+  margin-bottom: 24px;
+  font-weight: 500;
 }
 
 .venue-card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
-  margin-bottom: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
   cursor: pointer;
   transition: all 0.15s;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  gap: 14px;
+  box-shadow: var(--shadow-sm);
+  min-height: 72px;
 }
 
 .venue-card:active {
@@ -565,33 +776,65 @@ html, body {
   transform: scale(0.98);
 }
 
-.venue-name {
-  font-weight: 600;
+.venue-card .v-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.venue-card .v-chev {
+  color: var(--text-dim);
+  font-size: 20px;
+  flex-shrink: 0;
+  font-weight: 400;
+  line-height: 1;
+}
+
+.venue-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--off-200);
+  color: var(--dark-900);
+  font-family: var(--font);
+  font-weight: 700;
   font-size: 14px;
+  letter-spacing: 0.02em;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.venue-name {
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--fg-primary);
+  letter-spacing: -0.005em;
 }
 
 .venue-addr {
-  color: var(--text-muted);
+  color: var(--fg-muted);
   font-size: 12px;
-  margin-top: 1px;
+  margin-top: 3px;
+  font-weight: 500;
+  line-height: 1.35;
 }
 
-/* ============================================================
-   BOTTOM NAV
-   ============================================================ */
+/* ---------- BOTTOM NAV ---------- */
 .bottom-nav {
   position: fixed;
   bottom: 0;
   left: 50%;
   transform: translateX(-50%);
   width: 100%;
-  max-width: 480px;
-  background: var(--bg);
+  max-width: 520px;
+  background: var(--surface);
   border-top: 1px solid var(--border);
   display: flex;
-  padding: 6px 12px;
-  padding-bottom: calc(6px + var(--safe-bottom));
+  padding: 10px 8px;
+  padding-bottom: calc(10px + var(--safe-bottom));
   z-index: 100;
+  box-shadow: 0 -4px 16px rgba(26, 35, 50, 0.06);
 }
 
 .nav-item {
@@ -599,30 +842,40 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding: 4px;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
   cursor: pointer;
   color: var(--text-dim);
-  font-size: 10px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
   transition: color 0.15s;
   background: none;
   border: none;
   font-family: var(--font);
+  min-height: 56px;
+  border-radius: 10px;
+}
+
+.nav-item:active {
+  background: var(--surface2);
 }
 
 .nav-item.active {
   color: var(--accent);
 }
 
-.nav-item svg {
-  width: 18px;
-  height: 18px;
+.nav-item.active svg {
+  transform: scale(1.1);
 }
 
-/* ============================================================
-   CAMERA MODAL
-   ============================================================ */
+.nav-item svg {
+  width: 24px;
+  height: 24px;
+  transition: transform 0.15s;
+}
+
+/* ---------- CAMERA MODAL ---------- */
 .camera-modal {
   position: fixed;
   inset: 0;
@@ -636,29 +889,36 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 16px;
+  padding: 14px 16px;
+  padding-top: calc(14px + var(--safe-top));
   color: #fff;
-  background: rgba(0, 0, 0, 0.8);
+  background: rgba(0, 0, 0, 0.85);
   z-index: 1;
 }
 
 .camera-header h3 {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 700;
 }
 
 .camera-close {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.15);
   border: none;
   color: #fff;
-  font-size: 16px;
+  font-size: 18px;
+  font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.camera-close:active {
+  background: rgba(255, 255, 255, 0.25);
+  transform: scale(0.93);
 }
 
 .camera-viewfinder {
@@ -683,81 +943,170 @@ html, body {
 }
 
 .scan-frame {
-  width: 240px;
-  height: 140px;
-  border: 2px solid rgba(200, 255, 0, 0.6);
-  border-radius: 10px;
+  width: 280px;
+  height: 160px;
+  border: none;
+  border-radius: 14px;
   position: relative;
+  box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45);
 }
 
+/* Gold corner brackets (Woody scanner style) */
+.scan-frame::before,
 .scan-frame::after {
   content: '';
   position: absolute;
+  pointer-events: none;
+}
+.scan-frame::before {
+  inset: -3px;
+  border-radius: 14px;
+  background:
+    linear-gradient(to right, var(--gold-300) 0, var(--gold-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--gold-300) calc(100% - 32px), var(--gold-300) 100%) top / 100% 3px no-repeat,
+    linear-gradient(to right, var(--gold-300) 0, var(--gold-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--gold-300) calc(100% - 32px), var(--gold-300) 100%) bottom / 100% 3px no-repeat,
+    linear-gradient(to bottom, var(--gold-300) 0, var(--gold-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--gold-300) calc(100% - 32px), var(--gold-300) 100%) left / 3px 100% no-repeat,
+    linear-gradient(to bottom, var(--gold-300) 0, var(--gold-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--gold-300) calc(100% - 32px), var(--gold-300) 100%) right / 3px 100% no-repeat;
+  transition: background 0.15s ease;
+}
+
+/* Laser line */
+.scan-frame::after {
   left: 10%;
   right: 10%;
+  top: 50%;
   height: 2px;
-  background: var(--accent);
+  background: var(--gold-300);
+  box-shadow: 0 0 12px var(--gold-300);
   animation: scanLine 1.5s ease-in-out infinite alternate;
-  box-shadow: 0 0 10px var(--accent);
+}
+
+/* ---------- PHASE A: SCAN TARGETING STATES ---------- */
+/* Targeting — barcode detected, accumulating frames (copper) */
+.scan-frame.targeting {
+  box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45),
+              inset 0 0 28px rgba(178, 112, 63, 0.18);
+  transition: all 0.12s ease;
+}
+.scan-frame.targeting::before {
+  background:
+    linear-gradient(to right, var(--copper-300) 0, var(--copper-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--copper-300) calc(100% - 32px), var(--copper-300) 100%) top / 100% 3px no-repeat,
+    linear-gradient(to right, var(--copper-300) 0, var(--copper-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--copper-300) calc(100% - 32px), var(--copper-300) 100%) bottom / 100% 3px no-repeat,
+    linear-gradient(to bottom, var(--copper-300) 0, var(--copper-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--copper-300) calc(100% - 32px), var(--copper-300) 100%) left / 3px 100% no-repeat,
+    linear-gradient(to bottom, var(--copper-300) 0, var(--copper-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--copper-300) calc(100% - 32px), var(--copper-300) 100%) right / 3px 100% no-repeat;
+}
+.scan-frame.targeting::after {
+  background: var(--copper-300);
+  box-shadow: 0 0 12px var(--copper-300);
+  animation: none;
+  opacity: 0.95;
+}
+
+/* Locked — 4 frames confirmed (teal) */
+.scan-frame.locked {
+  box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45),
+              inset 0 0 36px rgba(63, 125, 115, 0.22);
+}
+.scan-frame.locked::before {
+  background:
+    linear-gradient(to right, var(--teal-300) 0, var(--teal-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--teal-300) calc(100% - 32px), var(--teal-300) 100%) top / 100% 3px no-repeat,
+    linear-gradient(to right, var(--teal-300) 0, var(--teal-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--teal-300) calc(100% - 32px), var(--teal-300) 100%) bottom / 100% 3px no-repeat,
+    linear-gradient(to bottom, var(--teal-300) 0, var(--teal-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--teal-300) calc(100% - 32px), var(--teal-300) 100%) left / 3px 100% no-repeat,
+    linear-gradient(to bottom, var(--teal-300) 0, var(--teal-300) 32px, transparent 32px, transparent calc(100% - 32px), var(--teal-300) calc(100% - 32px), var(--teal-300) 100%) right / 3px 100% no-repeat;
+}
+.scan-frame.locked::after {
+  background: var(--teal-300);
+  box-shadow: 0 0 16px var(--teal-300);
+  animation: none;
+}
+.scan-progress {
+  position: absolute;
+  bottom: -26px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 7px;
+  pointer-events: none;
+}
+.scan-progress .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  transition: all 0.15s ease;
+}
+.scan-progress .dot.filled {
+  background: var(--warning);
+  border-color: var(--warning);
+  box-shadow: 0 0 7px var(--warning);
+}
+.scan-progress .dot.done {
+  background: var(--success);
+  border-color: var(--success);
+  box-shadow: 0 0 9px var(--success);
 }
 
 .camera-controls {
-  padding: 16px;
-  padding-bottom: calc(16px + var(--safe-bottom));
-  background: rgba(0, 0, 0, 0.8);
+  padding: 20px;
+  padding-bottom: calc(20px + var(--safe-bottom));
+  background: rgba(0, 0, 0, 0.85);
   display: flex;
   justify-content: center;
+  align-items: center;
+  gap: 24px;
 }
 
 .capture-btn {
-  width: 60px;
-  height: 60px;
+  width: 76px;
+  height: 76px;
   border-radius: 50%;
   background: var(--accent);
-  border: 4px solid rgba(200, 255, 0, 0.3);
+  border: 5px solid #fff;
   cursor: pointer;
-  transition: all 0.15s;
+  box-shadow: 0 0 0 3px var(--accent);
 }
 
 .capture-btn:active {
-  transform: scale(0.9);
+  transform: scale(0.92);
 }
 
 .scan-status {
-  color: rgba(255, 255, 255, 0.8);
-  font-size: 12px;
-  text-align: center;
-  padding: 6px;
-  background: rgba(0, 0, 0, 0.6);
   position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: 120px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  padding: 10px 18px;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 500;
+  backdrop-filter: blur(8px);
 }
 
-/* ============================================================
-   MODAL / BOTTOM SHEET
-   ============================================================ */
+/* ---------- MODAL ---------- */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  z-index: 200;
+  background: rgba(13, 20, 32, 0.6);
+  z-index: 300;
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  backdrop-filter: blur(4px);
 }
 
 .modal-sheet {
+  background: var(--bg);
   width: 100%;
-  max-width: 480px;
-  background: var(--surface);
-  border-radius: var(--radius) var(--radius) 0 0;
-  padding: 16px;
-  padding-bottom: calc(16px + var(--safe-bottom));
-  max-height: 85vh;
+  max-width: 520px;
+  max-height: 90vh;
+  border-radius: 24px 24px 0 0;
+  padding: 20px 18px;
+  padding-bottom: calc(20px + var(--safe-bottom));
   overflow-y: auto;
-  animation: slideUp 0.2s ease;
+  animation: slideUp 0.25s cubic-bezier(.3,1.1,.5,1);
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.2);
 }
 
 @keyframes slideUp {
@@ -766,145 +1115,162 @@ html, body {
 }
 
 .modal-sheet h3 {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 14px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--primary);
+  margin-bottom: 18px;
   display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
 }
 
 .close-x {
-  background: none;
-  border: none;
+  width: 40px;
+  height: 40px;
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
   color: var(--text-muted);
-  font-size: 18px;
+  font-size: 15px;
+  font-weight: 600;
   cursor: pointer;
-  padding: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
-/* ============================================================
-   FORM ELEMENTS
-   ============================================================ */
+.close-x:active {
+  background: var(--surface2);
+  transform: scale(0.93);
+}
+
+/* ---------- FORM ---------- */
 .form-group {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .form-group label {
   display: block;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text-muted);
+  margin-bottom: 6px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 4px;
+  letter-spacing: 0.4px;
 }
 
 .form-input {
   width: 100%;
-  padding: 9px 12px;
-  background: var(--surface2);
-  border: 1px solid var(--border);
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 14px;
+  font-size: 16px;
   font-family: var(--font);
+  font-weight: 500;
   outline: none;
-  transition: border-color 0.15s;
+  box-shadow: var(--shadow-sm);
+  min-height: 50px;
 }
 
 .form-input:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-dim);
 }
 
 .form-input::placeholder {
   color: var(--text-dim);
 }
 
-select.form-input {
-  appearance: none;
-  cursor: pointer;
-}
-
 .form-row {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
 .submit-btn {
   width: 100%;
-  padding: 12px;
+  padding: 16px;
   background: var(--accent);
-  color: #0a0a0a;
   border: none;
   border-radius: var(--radius-sm);
-  font-size: 14px;
-  font-weight: 600;
+  color: #fff;
   font-family: var(--font);
+  font-size: 16px;
+  font-weight: 700;
   cursor: pointer;
   transition: all 0.15s;
-  margin-top: 6px;
+  min-height: 56px;
+  box-shadow: var(--shadow);
+  letter-spacing: 0.2px;
 }
 
 .submit-btn:active {
+  background: var(--accent-hover);
   transform: scale(0.98);
-  opacity: 0.9;
+  box-shadow: var(--shadow-sm);
 }
 
 .submit-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .submit-btn.secondary {
-  background: var(--surface3);
-  color: var(--text);
+  background: var(--surface);
+  color: var(--primary);
+  border: 1.5px solid var(--border);
 }
 
-/* ============================================================
-   ISSUE CHIPS
-   ============================================================ */
+.submit-btn.secondary:active {
+  background: var(--surface2);
+}
+
+/* ---------- ISSUE CHIPS ---------- */
 .issue-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: 8px;
 }
 
 .issue-chip {
-  padding: 4px 10px;
-  border-radius: 20px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
+  padding: 9px 14px;
+  border: 1.5px solid var(--border);
+  background: var(--surface);
+  border-radius: 22px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text-muted);
-  font-size: 12px;
   cursor: pointer;
   transition: all 0.15s;
-  font-family: var(--font);
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
 }
 
 .issue-chip.selected {
-  background: var(--warning-dim);
-  color: var(--warning);
-  border-color: rgba(255, 170, 0, 0.3);
+  background: var(--primary);
+  color: var(--bg);
+  border-color: var(--primary);
 }
 
-/* ============================================================
-   SUMMARY CARD / STATS
-   ============================================================ */
+/* ---------- SUMMARY CARD ---------- */
 .summary-card {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px;
-  margin-bottom: 8px;
+  padding: 18px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow-sm);
 }
 
 .stat-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 6px 0;
+  padding: 10px 0;
+  min-height: 42px;
 }
 
 .stat-row + .stat-row {
@@ -912,14 +1278,16 @@ select.form-input {
 }
 
 .stat-label {
+  font-size: 14px;
   color: var(--text-muted);
-  font-size: 13px;
+  font-weight: 500;
 }
 
 .stat-value {
   font-family: var(--mono);
-  font-weight: 600;
-  font-size: 15px;
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--primary);
 }
 
 .stat-value.accent { color: var(--accent); }
@@ -928,397 +1296,609 @@ select.form-input {
 .stat-value.warning { color: var(--warning); }
 
 .section-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin: 16px 0 8px;
+  letter-spacing: 0.8px;
+  margin: 20px 0 10px;
 }
 
-/* ============================================================
-   QUICK COUNT GRID
-   ============================================================ */
+/* ---------- QUICK COUNT GRID ---------- */
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-bottom: 14px;
 }
 
 .quick-tile {
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 10px 6px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 12px;
   text-align: center;
   cursor: pointer;
   transition: all 0.12s;
   position: relative;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  box-shadow: var(--shadow-sm);
 }
 
 .quick-tile:active {
-  transform: scale(0.95);
+  transform: scale(0.96);
   background: var(--surface2);
 }
 
 .quick-tile.locked {
-  opacity: 0.35;
+  opacity: 0.4;
   pointer-events: none;
 }
 
 .quick-tile .qt-name {
-  font-size: 11px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 1.2;
 }
 
 .quick-tile .qt-count {
   font-family: var(--mono);
-  font-size: 18px;
+  font-size: 28px;
   font-weight: 700;
   color: var(--accent);
-  margin-top: 2px;
+  margin-top: 6px;
+  letter-spacing: -1px;
+  line-height: 1;
 }
 
 .quick-tile .qt-cat {
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-dim);
   text-transform: uppercase;
-  margin-top: 1px;
+  margin-top: 4px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .quick-tile.has-count {
-  border-color: rgba(200, 255, 0, 0.2);
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
-/* ============================================================
-   VARIANCE ROW
-   ============================================================ */
+/* ---------- VARIANCE ROW ---------- */
 .var-row {
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: 4px;
+  gap: 12px;
+  box-shadow: var(--shadow-sm);
 }
 
-.var-row.over { border-left: 3px solid var(--success); }
-.var-row.under { border-left: 3px solid var(--danger); }
-.var-row.ok { border-left: 3px solid var(--text-dim); }
+.var-row.over { border-left: 4px solid var(--success); }
+.var-row.under { border-left: 4px solid var(--danger); }
+.var-row.ok { border-left: 4px solid var(--border-strong); }
 
 .var-info { flex: 1; min-width: 0; }
-.var-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.var-detail { font-size: 11px; color: var(--text-muted); }
-.var-diff { font-family: var(--mono); font-size: 14px; font-weight: 700; min-width: 50px; text-align: right; }
-
-/* ============================================================
-   AUDIT BADGE
-   ============================================================ */
-.audit-badge {
-  font-size: 10px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-
-.audit-badge.active { background: var(--accent-dim); color: var(--accent); }
-.audit-badge.submitted { background: var(--blue-dim); color: var(--blue); }
-
-/* ============================================================
-   TIMER BAR
-   ============================================================ */
-.timer-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  margin-bottom: 12px;
-  font-family: var(--mono);
-  font-size: 13px;
-  color: var(--text-muted);
-}
-
-.timer-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--success);
-  animation: pulse 1.5s infinite;
-}
-
-/* ============================================================
-   RECOUNT BANNER
-   ============================================================ */
-.recount-banner {
-  padding: 8px 12px;
-  background: var(--warning-dim);
-  border: 1px solid rgba(255, 170, 0, 0.2);
-  border-radius: var(--radius-sm);
-  margin-bottom: 10px;
-  font-size: 13px;
-  color: var(--warning);
-  cursor: pointer;
-  text-align: center;
-  font-weight: 500;
-}
-
-/* ============================================================
-   TOAST
-   ============================================================ */
-.toast {
-  position: fixed;
-  top: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--surface3);
-  color: var(--text);
-  padding: 8px 18px;
-  border-radius: 20px;
-  font-size: 13px;
-  font-weight: 500;
-  z-index: 300;
-  animation: fadeIn 0.2s ease;
-  border: 1px solid var(--border);
+.var-name {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary);
   white-space: nowrap;
-  max-width: 90vw;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-
-.toast.success { background: var(--success-dim); color: var(--success); border-color: rgba(0, 214, 143, 0.3); }
-.toast.error { background: var(--danger-dim); color: var(--danger); border-color: rgba(255, 68, 68, 0.3); }
-.toast.warn { background: var(--warning-dim); color: var(--warning); border-color: rgba(255, 170, 0, 0.3); }
-
-/* ============================================================
-   CONFIRM DIALOG
-   ============================================================ */
-.confirm-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  z-index: 250;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.var-detail { font-size: 13px; color: var(--text-muted); font-weight: 500; margin-top: 2px; }
+.var-diff {
+  font-family: var(--mono);
+  font-size: 18px;
+  font-weight: 700;
+  min-width: 60px;
+  text-align: right;
+  color: var(--primary);
 }
 
-.confirm-box {
+/* ---------- AUDIT BADGE ---------- */
+.audit-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  display: inline-block;
+}
+
+.audit-badge.active { background: var(--success-dim); color: var(--success); }
+.audit-badge.submitted { background: var(--blue-dim); color: var(--blue); }
+
+/* ---------- TIMER ---------- */
+.timer-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 20px;
-  width: 300px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.timer-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: pulse 1.5s infinite;
+  flex-shrink: 0;
+}
+
+/* ---------- RECOUNT BANNER ---------- */
+.recount-banner {
+  background: var(--warning-dim);
+  border: 1.5px solid var(--warning);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  color: var(--warning);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: var(--shadow-sm);
+}
+
+.recount-banner:active {
+  transform: scale(0.99);
+}
+
+/* ---------- TOAST ---------- */
+.toast {
+  position: fixed;
+  bottom: calc(100px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--primary);
+  color: var(--bg);
+  border: 1.5px solid var(--primary);
+  padding: 12px 20px;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 600;
+  z-index: 1000;
+  box-shadow: var(--shadow-lg);
+  animation: fadeIn 0.2s ease;
+  max-width: 90%;
   text-align: center;
 }
 
-.confirm-box p {
-  font-size: 14px;
+.toast.success {
+  background: var(--success);
+  color: #fff;
+  border-color: var(--success);
+}
+.toast.error {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+.toast.warn {
+  background: var(--warning);
+  color: #fff;
+  border-color: var(--warning);
+}
+
+/* ---------- PHASE A: DUPLICATE WARNING BANNER ---------- */
+.dupe-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--warning-dim);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-sm);
   margin-bottom: 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--warning);
+}
+.dupe-warning svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--warning);
+}
+.dupe-warning strong {
+  color: var(--warning);
+  font-weight: 600;
+}
+.dupe-warning .dupe-detail {
+  color: var(--text);
+  display: block;
+  margin-top: 4px;
+  font-weight: 400;
+}
+
+/* ---------- CONFIRM ---------- */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 20, 32, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 400;
+  padding: 20px;
+}
+
+.confirm-box {
+  background: var(--bg);
+  border-radius: var(--radius);
+  padding: 24px;
+  max-width: 360px;
+  width: 100%;
+  box-shadow: var(--shadow-lg);
+}
+
+.confirm-box p {
+  font-size: 16px;
+  color: var(--text);
+  font-weight: 500;
+  margin-bottom: 20px;
   line-height: 1.5;
 }
 
 .confirm-btns {
   display: flex;
-  gap: 8px;
+  gap: 10px;
 }
 
 .confirm-btns button {
   flex: 1;
-  padding: 10px;
+  padding: 14px;
   border-radius: var(--radius-sm);
   font-family: var(--font);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
   cursor: pointer;
-  border: 1px solid var(--border);
+  border: none;
+  min-height: 50px;
 }
 
 .confirm-btns .c-cancel {
   background: var(--surface2);
-  color: var(--text);
+  color: var(--primary);
+  border: 1.5px solid var(--border);
 }
 
 .confirm-btns .c-confirm {
   background: var(--danger);
   color: #fff;
-  border-color: var(--danger);
 }
 
-/* ============================================================
-   EMPTY STATE
-   ============================================================ */
+/* ---------- EMPTY STATE ---------- */
 .empty-state {
   text-align: center;
-  padding: 30px 20px;
-  color: var(--text-dim);
+  padding: 50px 20px;
+  color: var(--text-muted);
 }
 
 .empty-state svg {
-  margin-bottom: 10px;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 14px;
   opacity: 0.4;
 }
 
 .empty-state p {
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 15px;
+  font-weight: 500;
 }
 
-/* ============================================================
-   ACTIVITY LOG
-   ============================================================ */
+/* ---------- LOG ENTRY ---------- */
 .log-entry {
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  box-shadow: var(--shadow-sm);
 }
 
 .log-entry .log-time {
-  color: var(--text-dim);
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  font-weight: 500;
 }
 
 .log-entry .log-user {
-  color: var(--blue);
-  font-weight: 500;
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 700;
+  margin-left: 6px;
 }
 
 .log-entry .log-text {
-  color: var(--text-muted);
+  font-size: 14px;
+  color: var(--text);
+  font-weight: 500;
 }
 
-/* ============================================================
-   PAR LEVEL ALERT
-   ============================================================ */
+/* ---------- PAR ALERT ---------- */
 .par-alert {
   background: var(--warning-dim);
-  border: 1px solid rgba(255, 170, 0, 0.2);
+  border: 1.5px solid var(--warning);
   border-radius: var(--radius-sm);
-  padding: 8px 12px;
-  margin-bottom: 6px;
-  font-size: 12px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
   color: var(--warning);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  font-size: 14px;
+  font-weight: 600;
 }
 
-/* ============================================================
-   PARTIAL BOTTLE BUTTONS
-   ============================================================ */
+/* ---------- PARTIAL BUTTON ---------- */
 .partial-btn {
-  padding: 2px 8px;
-  font-size: 11px;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  background: var(--surface2);
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
   color: var(--text-muted);
   cursor: pointer;
-  font-family: var(--mono);
-  font-weight: 500;
-  transition: all 0.1s;
+  font-family: var(--font);
+  min-height: 40px;
 }
 
 .partial-btn.active {
-  background: var(--accent-dim);
-  color: var(--accent);
-  border-color: rgba(200, 255, 0, 0.3);
+  background: var(--dark-900);
+  color: var(--off-100);
+  border-color: var(--dark-900);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
 }
 
-/* AVT Upload area */
-.upload-zone {
-  border: 2px dashed var(--border);
+/* ---------- WOODY GUIDED HERO CARD ---------- */
+.hidden-title {
+  position: absolute;
+  left: -10000px;
+  top: auto;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+.modal-sheet .close-x {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 10;
+}
+.guided-hero {
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 24px;
-  text-align: center;
+  box-shadow: var(--shadow-sm);
+  padding: 18px 18px 16px;
+  margin-bottom: 14px;
+}
+.gh-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.gh-eyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+}
+.gh-mode-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 9999px;
+  background: var(--gold-100);
+  color: var(--gold-400);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.gh-title {
+  font-family: var(--font);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--fg-primary);
+  line-height: 1.2;
+  margin-bottom: 4px;
+  word-break: break-word;
+}
+.gh-meta {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-bottom: 14px;
+  line-height: 1.4;
+}
+.gh-stepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.gh-step {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--fg-primary);
+  font-size: 22px;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s;
-  margin-bottom: 12px;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  transition: all 0.12s;
+}
+.gh-step:active { transform: scale(0.94); }
+.gh-step.gh-plus {
+  background: var(--dark-900);
+  color: var(--off-100);
+  border-color: var(--dark-900);
+}
+.gh-qty {
+  flex: 1;
+  height: 48px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--off-200);
+  font-family: var(--mono);
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--fg-primary);
+  text-align: center;
+  outline: none;
+  padding: 0 10px;
+  -moz-appearance: textfield;
+}
+.gh-qty::-webkit-inner-spin-button,
+.gh-qty::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.gh-qty:focus {
+  border-color: var(--dark-900);
+  background: var(--surface);
+}
+.gh-partials {
+  display: flex;
+  gap: 6px;
+}
+.gh-partials .partial-btn {
+  flex: 1;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: 0.02em;
+}
+
+/* ---------- UPLOAD ZONE ---------- */
+.upload-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 28px 16px;
+  text-align: center;
+  background: var(--surface);
+  cursor: pointer;
+  transition: all 0.15s;
 }
 
 .upload-zone:active {
+  background: var(--surface2);
   border-color: var(--accent);
-  background: var(--accent-dim);
 }
 
 .upload-zone .uz-label {
-  font-size: 14px;
-  font-weight: 500;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--primary);
   margin-bottom: 4px;
 }
 
 .upload-zone .uz-hint {
-  font-size: 12px;
-  color: var(--text-dim);
+  font-size: 13px;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
-/* Count phase indicator */
+/* ---------- COUNT PHASE ---------- */
 .count-phase {
   display: flex;
-  gap: 4px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 14px;
+  background: var(--surface);
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  border: 1.5px solid var(--border);
 }
 
 .count-phase .phase {
   flex: 1;
-  padding: 8px;
+  padding: 10px 6px;
   text-align: center;
-  border-radius: var(--radius-sm);
+  border-radius: 9px;
   font-size: 12px;
-  font-weight: 600;
-  border: 1px solid var(--border);
-  background: var(--surface);
+  font-weight: 700;
   color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  background: transparent;
+  transition: all 0.15s;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .count-phase .phase.active {
-  border-color: var(--accent);
-  background: var(--accent-dim);
-  color: var(--accent);
+  background: var(--primary);
+  color: var(--bg);
 }
 
 .count-phase .phase.done {
-  border-color: var(--success);
   background: var(--success-dim);
   color: var(--success);
 }
 
-/* Severity badges */
+/* ---------- SEV BADGE ---------- */
 .sev-badge {
   font-size: 10px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 600;
+  font-weight: 700;
+  padding: 3px 7px;
+  border-radius: 5px;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
   display: inline-block;
 }
 
 .sev-badge.critical { background: var(--danger-dim); color: var(--danger); }
-.sev-badge.high { background: rgba(255, 138, 101, 0.12); color: #ff8a65; }
+.sev-badge.high { background: rgba(234, 88, 12, 0.12); color: #c2410c; }
 .sev-badge.medium { background: var(--warning-dim); color: var(--warning); }
 .sev-badge.watch { background: var(--blue-dim); color: var(--blue); }
 .sev-badge.low { background: var(--success-dim); color: var(--success); }
 
-/* Recount focus item */
+/* ---------- RECOUNT FOCUS ITEM ---------- */
 .focus-item {
   background: var(--surface);
-  border: 1px solid var(--border);
+  border: 1.5px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  margin-bottom: 6px;
-  border-left: 3px solid var(--danger);
+  padding: 14px;
+  margin-bottom: 10px;
+  border-left: 4px solid var(--danger);
+  box-shadow: var(--shadow-sm);
 }
 
 .focus-item.medium {
@@ -1330,24 +1910,101 @@ select.form-input {
   opacity: 0.6;
 }
 
-/* Admin-only section */
+/* ---------- ADMIN SECTION ---------- */
 .admin-section {
-  border: 1px solid rgba(200, 255, 0, 0.15);
+  border: 1.5px solid var(--accent);
   border-radius: var(--radius);
-  padding: 14px;
-  margin-bottom: 12px;
-  background: rgba(200, 255, 0, 0.03);
+  padding: 18px;
+  margin-bottom: 14px;
+  background: var(--accent-soft);
 }
 
 .admin-label {
-  font-size: 10px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
   color: var(--accent);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 8px;
+  letter-spacing: 0.8px;
+  margin-bottom: 10px;
+}
+
+/* ---------- HEADER MENU (dropdown) ---------- */
+#headerMenu {
+  position: absolute;
+  top: calc(56px + var(--safe-top));
+  right: 12px;
+  background: var(--surface);
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px;
+  min-width: 200px;
+  z-index: 150;
+  box-shadow: var(--shadow-lg);
+}
+
+#headerMenu button {
+  width: 100%;
+  text-align: left;
+  padding: 14px 14px !important;
+  background: none;
+  border: none;
+  color: var(--primary) !important;
+  font-family: var(--font);
+  font-size: 15px !important;
+  font-weight: 600 !important;
+  cursor: pointer;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+}
+
+#headerMenu button:active {
+  background: var(--surface2);
+}
+
+#headerMenu button svg {
+  width: 18px !important;
+  height: 18px !important;
+}
+
+/* ---------- SCROLLBAR ---------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+}
+
+/* ---------- ZONE TABS COUNT STYLING ---------- */
+.zone-tab.active .zcnt {
+  opacity: 0.9;
+}
+
+/* ---------- BOTTOM NAV SPACING FIX ---------- */
+.nav-item > span:last-child {
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* ---------- LARGE SCREEN FALLBACK ---------- */
+@media (min-width: 640px) {
+  #app {
+    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
 }
 </style>
+
 </head>
 
 <body>
@@ -1730,7 +2387,7 @@ select.form-input {
   </div>
   <div class="camera-viewfinder">
     <div id="barcodeViewfinder"></div>
-    <div class="scan-overlay"><div class="scan-frame"></div></div>
+    <div class="scan-overlay"><div class="scan-frame" id="scanFrame"><div class="scan-progress" id="scanProgress"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div></div>
     <div class="scan-status" id="barcodeStatus">Point camera at barcode</div>
   </div>
 </div>
@@ -1753,7 +2410,7 @@ select.form-input {
 <div class="modal-overlay hide" id="barcodeEntryModal" onclick="closeBarcodeEntry(event)">
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>Scanned item <button class="close-x" onclick="closeBarcodeEntry()">X</button></h3>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(200,255,0,.15);border-radius:var(--radius-sm)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.15);border-radius:var(--radius-sm)">
       <svg width="14" height="14" viewBox="0 0 14 14" fill="var(--accent)">
         <rect x="0" y="2" width="2" height="10"/><rect x="4" y="2" width="1" height="10"/>
         <rect x="7" y="2" width="2" height="10"/><rect x="11" y="2" width="1" height="10"/>
@@ -1762,8 +2419,9 @@ select.form-input {
       <span style="font-family:var(--mono);font-size:13px;font-weight:500;color:var(--accent)" id="barcodeUpc"></span>
     </div>
     <div id="barcodeLookupStatus" style="font-size:12px;margin-bottom:12px">Searching...</div>
+    <div id="barcodeDupeWarning"></div>
     <img id="barcodeProductImg" style="display:none;width:70px;height:70px;object-fit:contain;border-radius:var(--radius-sm);background:var(--surface2);margin-bottom:12px;padding:4px">
-    <div id="barcodeUpcLinkBanner" style="display:none;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(200,255,0,.15);border-radius:var(--radius-sm);margin-bottom:12px;font-size:12px;gap:6px;align-items:center">
+    <div id="barcodeUpcLinkBanner" style="display:none;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.15);border-radius:var(--radius-sm);margin-bottom:12px;font-size:12px;gap:6px;align-items:center">
       <span style="color:var(--accent);flex-shrink:0">☑</span>
       <span id="barcodeUpcLinkText" style="flex:1;color:var(--accent);line-height:1.3"></span>
       <button onclick="unlinkBarcodeItem()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:2px 4px">✕</button>
@@ -1800,7 +2458,7 @@ select.form-input {
     <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
       <label style="display:flex;align-items:center;justify-content:space-between">
         <span>Also count in other locations</span>
-        <button type="button" onclick="addLocationRow('barcodeExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+        <button type="button" onclick="addLocationRow('barcodeExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
       </label>
       <div id="barcodeExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
@@ -1812,6 +2470,7 @@ select.form-input {
 <div class="modal-overlay hide" id="manualModal" onclick="closeManualEntry(event)">
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>Add item <button class="close-x" onclick="closeManualEntry()">X</button></h3>
+    <div id="manualDupeWarning"></div>
     <div class="form-group">
       <label>Item name</label>
       <input class="form-input" id="manualName" placeholder="Search inventory or type name..." autocomplete="off" oninput="onManualSearch(this.value)">
@@ -1860,7 +2519,7 @@ select.form-input {
     <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
       <label style="display:flex;align-items:center;justify-content:space-between">
         <span>Also count in other locations</span>
-        <button type="button" onclick="addLocationRow('manualExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+        <button type="button" onclick="addLocationRow('manualExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
       </label>
       <div id="manualExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
@@ -1934,6 +2593,7 @@ select.form-input {
 <div class="modal-overlay hide" id="photoReviewModal" onclick="closePhotoReview(event)">
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>Review capture <button class="close-x" onclick="closePhotoReview()">X</button></h3>
+    <div id="photoDupeWarning"></div>
     <div style="border-radius:var(--radius);overflow:hidden;margin-bottom:12px">
       <img id="photoPreviewImg" style="width:100%;display:block">
     </div>
@@ -1966,7 +2626,7 @@ select.form-input {
     <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
       <label style="display:flex;align-items:center;justify-content:space-between">
         <span>Also count in other locations</span>
-        <button type="button" onclick="addLocationRow('photoExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(200,255,0,.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
+        <button type="button" onclick="addLocationRow('photoExtraLocations')" style="background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.25);color:var(--accent);font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer;font-family:var(--font);font-weight:600">+ Location</button>
       </label>
       <div id="photoExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
@@ -1977,19 +2637,30 @@ select.form-input {
 <!-- ========== GUIDED ENTRY MODAL ========== -->
 <div class="modal-overlay hide" id="guidedEntryModal" onclick="closeGuidedEntry(event)">
   <div class="modal-sheet" onclick="event.stopPropagation()">
-    <h3 id="guidedItemTitle">Count item <button class="close-x" onclick="closeGuidedEntry()">X</button></h3>
-    <div id="guidedItemInfo" style="margin-bottom:12px"></div>
-    <div class="form-group">
-      <label>Quantity</label>
-      <input class="form-input" id="guidedQty" type="number" min="0" step="0.25" inputmode="decimal"
-             placeholder="Enter count" style="font-size:20px;text-align:center;font-family:var(--mono)">
-    </div>
-    <div id="guidedPartialBtns" style="display:flex;gap:6px;justify-content:center;margin-bottom:12px">
-      <button class="partial-btn" onclick="setPartial(0)">Empty</button>
-      <button class="partial-btn" onclick="setPartial(0.25)">1/4</button>
-      <button class="partial-btn" onclick="setPartial(0.5)">1/2</button>
-      <button class="partial-btn" onclick="setPartial(0.75)">3/4</button>
-      <button class="partial-btn active" onclick="setPartial(1)">Full</button>
+    <h3 id="guidedItemTitle" class="hidden-title">Count item <button class="close-x" onclick="closeGuidedEntry()">X</button></h3>
+    <div id="guidedDupeWarning"></div>
+
+    <!-- Woody hero card: eyebrow + title + meta + stepper -->
+    <div class="guided-hero">
+      <div class="gh-head">
+        <span class="gh-eyebrow" id="guidedHeroEyebrow">Now counting</span>
+        <span class="gh-mode-pill">● Guided</span>
+      </div>
+      <div class="gh-title" id="guidedHeroTitle"></div>
+      <div class="gh-meta" id="guidedHeroMeta"></div>
+
+      <div class="gh-stepper">
+        <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">−</button>
+        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.25" inputmode="decimal" placeholder="0">
+        <button class="gh-step gh-plus" onclick="adjustGuidedQty(1)" type="button">+</button>
+      </div>
+
+      <div id="guidedPartialBtns" class="gh-partials">
+        <button class="partial-btn" onclick="setPartial(0.25)" type="button">25%</button>
+        <button class="partial-btn" onclick="setPartial(0.5)" type="button">50%</button>
+        <button class="partial-btn" onclick="setPartial(0.75)" type="button">75%</button>
+        <button class="partial-btn active" onclick="setPartial(1)" type="button">Full</button>
+      </div>
     </div>
     <div class="form-group">
       <label>Issue (select if applicable)</label>
@@ -2324,6 +2995,11 @@ function selectBarcodeItem(itemId) {
 
   // Update lookup status
   document.getElementById('barcodeLookupStatus').innerHTML = '<span style="color:var(--success)">✓ Matched to inventory item</span>';
+
+  // Refresh duplicate warning now that we know the exact masterId
+  var scannedUpcForDupe = document.getElementById('barcodeSku').value;
+  document.getElementById('barcodeDupeWarning').innerHTML =
+    renderDupeWarning(item.id, scannedUpcForDupe);
 }
 
 function unlinkBarcodeItem() {
@@ -2331,6 +3007,10 @@ function unlinkBarcodeItem() {
   document.getElementById('barcodeUpcLinkBanner').style.display = 'none';
   document.getElementById('barcodeLookupStatus').textContent = 'Not linked — enter details manually';
   document.getElementById('barcodeLookupStatus').style.color = 'var(--text-muted)';
+  // Fall back to UPC-only dupe check
+  var scannedUpc = document.getElementById('barcodeSku').value;
+  document.getElementById('barcodeDupeWarning').innerHTML =
+    renderDupeWarning(null, scannedUpc);
 }
 
 /* ================================================================
@@ -2343,7 +3023,8 @@ function esc(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 /* ================================================================
@@ -2415,7 +3096,7 @@ async function loadItemMaster() {
     console.log('Item master from items.json: ' + itemMaster.length + ' items');
     showToast(itemMaster.length + ' items loaded', 'success');
 
-    var currentPage = document.querySelector('.page:not(.hide)');
+    currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-count') renderCountPage();
   } catch (error) {
     console.error('Failed to load item master:', error);
@@ -2938,15 +3619,25 @@ function renderVenues() {
     return;
   }
 
-  document.getElementById('venueList').innerHTML = venues.map(venue =>
-    '<div class="venue-card" onclick="selectVenue(\'' + venue.id + '\')">' +
-      '<div>' +
-        '<div class="venue-name">' + esc(venue.name) + '</div>' +
-        '<div class="venue-addr">' + esc(venue.address) + '</div>' +
-      '</div>' +
-      '<span style="color:var(--text-dim)">></span>' +
-    '</div>'
-  ).join('');
+  document.getElementById('venueList').innerHTML = venues.map(venue => {
+    // Build initials from venue name (e.g. "Delilah Miami" -> "DM", "Keys" -> "K")
+    const initials = venue.name
+      .split(/\s+/)
+      .map(w => w[0] || '')
+      .join('')
+      .slice(0, 2)
+      .toUpperCase();
+    return (
+      '<div class="venue-card" onclick="selectVenue(\'' + esc(venue.id) + '\')">' +
+        '<div class="venue-avatar">' + esc(initials) + '</div>' +
+        '<div class="v-body">' +
+          '<div class="venue-name">' + esc(venue.name) + '</div>' +
+          '<div class="venue-addr">' + esc(venue.address) + '</div>' +
+        '</div>' +
+        '<span class="v-chev">›</span>' +
+      '</div>'
+    );
+  }).join('');
 }
 
 function handleLogout() {
@@ -3484,12 +4175,27 @@ function openGuidedEntry(masterId) {
   const existing = findCountEntry(masterId);
 
   document.getElementById('guidedItemTitle').childNodes[0].textContent = item.name + ' ';
-  document.getElementById('guidedItemInfo').innerHTML =
-    '<div style="font-size:12px;color:var(--text-muted)">' +
-      esc(item.brand) + ' | ' + esc(item.sku) +
-      ' | Expected: <strong style="color:var(--text)">' + item.expectedQty + '</strong>' +
-    '</div>';
+  // Populate hero card
+  const heroTitle = document.getElementById('guidedHeroTitle');
+  const heroMeta = document.getElementById('guidedHeroMeta');
+  if (heroTitle) heroTitle.textContent = item.name;
+  if (heroMeta) {
+    const parts = [];
+    if (item.brand) parts.push(esc(item.brand));
+    if (item.category) parts.push(esc(getCategoryLabel(item.category)));
+    if (item.sku) parts.push('UPC ' + esc(item.sku));
+    if (item.expectedQty != null) parts.push('PAR ' + item.expectedQty);
+    heroMeta.innerHTML = parts.join(' · ');
+  }
+  // Keep the legacy guidedItemInfo slot for back-compat (used by other flows)
+  const legacyInfo = document.getElementById('guidedItemInfo');
+  if (legacyInfo) legacyInfo.innerHTML = '';
   document.getElementById('guidedQty').value = existing ? existing.qty : '';
+
+  // Cross-zone dupe warning only — current zone is already pre-filled above
+  document.getElementById('guidedDupeWarning').innerHTML =
+    renderDupeWarning(item.id, item.sku, { suppressCurrentZone: true });
+
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'count';
 
@@ -3499,6 +4205,14 @@ function openGuidedEntry(masterId) {
   });
 
   setTimeout(() => document.getElementById('guidedQty').focus(), 100);
+}
+
+function adjustGuidedQty(delta) {
+  const input = document.getElementById('guidedQty');
+  const current = parseFloat(input.value) || 0;
+  const next = Math.max(0, current + delta);
+  input.value = next % 1 === 0 ? String(next) : next.toFixed(2);
+  input.focus();
 }
 
 function setPartial(value) {
@@ -3745,6 +4459,92 @@ function quickTap(masterId) {
    FIX #1: Lock check at entry point
    FIX #3: All output uses esc()
    ================================================================ */
+/* ================================================================
+   DUPLICATE DETECTION (Phase A, Feature #3)
+   Checks if an item has already been counted in the current zone or
+   elsewhere in the audit. Returns structured info for UI banners.
+   Does NOT block — the banner is informational so counters can
+   notice accidental rescans before committing.
+   ================================================================ */
+function checkExistingCount(masterId, sku) {
+  if (!appState.audit || !appState.currentZone) return null;
+
+  const result = {
+    inCurrentZone: null,     // { qty, lastAt } or null
+    inOtherZones: [],        // [{ zone, qty }]
+    totalAcrossZones: 0,
+  };
+
+  // Match by masterId first (most reliable), fall back to SKU/UPC
+  const matches = (item) => {
+    if (masterId && item.masterId === masterId) return true;
+    if (sku && item.sku && item.sku === sku) return true;
+    return false;
+  };
+
+  for (const [zoneName, items] of Object.entries(appState.audit.counts || {})) {
+    let zoneQty = 0;
+    let lastAt = 0;
+    for (const item of items) {
+      if (matches(item)) {
+        zoneQty += Number(item.qty) || 0;
+        const t = item.timestamp ? new Date(item.timestamp).getTime() : 0;
+        if (t > lastAt) lastAt = t;
+      }
+    }
+    if (zoneQty > 0) {
+      result.totalAcrossZones += zoneQty;
+      if (zoneName === appState.currentZone) {
+        result.inCurrentZone = { qty: zoneQty, lastAt: lastAt };
+      } else {
+        result.inOtherZones.push({ zone: zoneName, qty: zoneQty });
+      }
+    }
+  }
+
+  if (!result.inCurrentZone && result.inOtherZones.length === 0) return null;
+  return result;
+}
+
+/* Build the HTML for the duplicate warning banner. Returns '' if no dupe.
+   opts.suppressCurrentZone: true = only warn about OTHER zones (used by Guided
+   mode, which already pre-fills the current zone's qty — showing it again is noise). */
+function renderDupeWarning(masterId, sku, opts) {
+  opts = opts || {};
+  const dupe = checkExistingCount(masterId, sku);
+  if (!dupe) return '';
+
+  const parts = [];
+
+  if (dupe.inCurrentZone && !opts.suppressCurrentZone) {
+    const mins = dupe.inCurrentZone.lastAt
+      ? Math.round((Date.now() - dupe.inCurrentZone.lastAt) / 60000)
+      : null;
+    const when = mins === null ? '' : (mins < 1 ? ' (just now)' : ' (' + mins + ' min ago)');
+    parts.push(
+      '<strong>Already counted ' + formatQty(dupe.inCurrentZone.qty) +
+      ' here' + when + '.</strong>' +
+      '<span class="dupe-detail">Submitting will add to this count, not replace it.</span>'
+    );
+  }
+
+  if (dupe.inOtherZones.length > 0) {
+    const zoneList = dupe.inOtherZones
+      .map(z => esc(z.zone) + ' (' + formatQty(z.qty) + ')')
+      .join(', ');
+    parts.push(
+      '<span class="dupe-detail" style="color:var(--text-muted)">' +
+      'Also counted in: ' + zoneList + '</span>'
+    );
+  }
+
+  if (parts.length === 0) return '';
+
+  const icon = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 1.5l6.5 11.5H1.5z"/><path d="M8 6v3.5M8 11.5v.5"/></svg>';
+
+  return '<div class="dupe-warning">' + icon + '<div>' + parts.join('') + '</div></div>';
+}
+
 function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
   if (isAuditLocked()) return;
   if (!appState.audit) return;
@@ -3962,24 +4762,94 @@ let lastScanTime = 0;
 let nativeBarcodeStream = null;
 let nativeScanInterval = null;
 
+// Phase A: 4-frame confirmation before firing
+const SCAN_FRAMES_REQUIRED = 4;
+let scanCandidateCode = '';
+let scanCandidateCount = 0;
+let scanLastSeenAt = 0;
+
+function resetScanConfirmation() {
+  scanCandidateCode = '';
+  scanCandidateCount = 0;
+  scanLastSeenAt = 0;
+  updateScanUI(0, null);
+}
+
+function updateScanUI(progress, code) {
+  const frame = document.getElementById('scanFrame');
+  const dots = document.querySelectorAll('#scanProgress .dot');
+  const status = document.getElementById('barcodeStatus');
+  if (!frame || !dots.length) return;
+
+  // Reset classes
+  frame.classList.remove('targeting', 'locked');
+
+  if (progress === 0) {
+    dots.forEach(d => d.classList.remove('filled', 'done'));
+    if (status) status.textContent = 'Point camera at barcode';
+  } else if (progress >= SCAN_FRAMES_REQUIRED) {
+    frame.classList.add('locked');
+    dots.forEach(d => { d.classList.remove('filled'); d.classList.add('done'); });
+    if (status) status.textContent = 'Locked: ' + code;
+  } else {
+    frame.classList.add('targeting');
+    dots.forEach((d, i) => {
+      d.classList.remove('done');
+      if (i < progress) d.classList.add('filled');
+      else d.classList.remove('filled');
+    });
+    if (status) status.textContent = 'Hold steady... (' + progress + '/' + SCAN_FRAMES_REQUIRED + ')';
+  }
+}
+
+/* Handle a single detection from either native or Quagga.
+   Returns true if this detection completed a 4-frame lock (caller should fire). */
+function processDetection(code) {
+  if (!code || code.length <= 3) return false;
+  const now = Date.now();
+
+  // Debounce: same code just fired within 3s — ignore
+  if (code === lastScannedCode && now - lastScanTime < 3000) return false;
+
+  // If we lost the target for >600ms, reset the candidate
+  if (scanCandidateCode && now - scanLastSeenAt > 600) {
+    scanCandidateCode = '';
+    scanCandidateCount = 0;
+  }
+
+  if (code === scanCandidateCode) {
+    scanCandidateCount++;
+  } else {
+    scanCandidateCode = code;
+    scanCandidateCount = 1;
+  }
+  scanLastSeenAt = now;
+
+  updateScanUI(Math.min(scanCandidateCount, SCAN_FRAMES_REQUIRED), code);
+
+  if (scanCandidateCount >= SCAN_FRAMES_REQUIRED) {
+    lastScannedCode = code;
+    lastScanTime = now;
+    return true;
+  }
+  return false;
+}
+
 const hasNativeBarcode = 'BarcodeDetector' in window;
 
 function onBarcodeDetected(result) {
   if (!barcodeActive) return;
 
   const code = result.codeResult.code;
-  const now = Date.now();
+  if (!processDetection(code)) return;
 
-  if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
-    lastScannedCode = code;
-    lastScanTime = now;
-    barcodeActive = false;
-
-    if (navigator.vibrate) navigator.vibrate(100);
+  barcodeActive = false;
+  if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
+  setTimeout(() => {
     Quagga.stop();
     closeBarcodeScanner();
     handleBarcodeResult(code);
-  }
+  }, 120); // tiny delay so user sees the green "locked" state
 }
 
 function openBarcodeScanner() {
@@ -3989,6 +4859,7 @@ function openBarcodeScanner() {
   document.getElementById('barcodeStatus').textContent = 'Initializing...';
   barcodeActive = true;
   lastScannedCode = '';
+  resetScanConfirmation();
 
   if (hasNativeBarcode) {
     openNativeBarcodeScanner();
@@ -4028,18 +4899,26 @@ async function openNativeBarcodeScanner() {
         const barcodes = await detector.detect(video);
         if (barcodes.length > 0) {
           const code = barcodes[0].rawValue;
-          const now = Date.now();
-          if (code && code.length > 3 && (code !== lastScannedCode || now - lastScanTime > 3000)) {
-            lastScannedCode = code;
-            lastScanTime = now;
+          if (processDetection(code)) {
             barcodeActive = false;
-            if (navigator.vibrate) navigator.vibrate(100);
-            closeBarcodeScanner();
-            handleBarcodeResult(code);
+            if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
+            // Brief delay so user sees the green "locked" state before modal closes
+            setTimeout(() => {
+              closeBarcodeScanner();
+              handleBarcodeResult(code);
+            }, 120);
+          }
+        } else {
+          // No barcode in frame — decay the candidate count if we've lost sight
+          const now = Date.now();
+          if (scanCandidateCode && now - scanLastSeenAt > 600) {
+            scanCandidateCode = '';
+            scanCandidateCount = 0;
+            updateScanUI(0, null);
           }
         }
       } catch (e) {}
-    }, 200);
+    }, 150);
 
   } catch (error) {
     document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
@@ -4225,6 +5104,7 @@ function openBarcodeEntryModal(code, product) {
   document.getElementById('barcodeProductImg').style.display = 'none';
   document.getElementById('barcodeNameSuggestions').innerHTML = '';
   document.getElementById('barcodeUpcLinkBanner').style.display = 'none';
+  document.getElementById('barcodeDupeWarning').innerHTML = '';
   _barcodeLinkedItem = null;
 
   if (product) {
@@ -4252,6 +5132,9 @@ function updateBarcodeEntryModal(code, product) {
       document.getElementById('barcodeProductImg').style.display = 'block';
     }
   }
+  // Refresh duplicate warning based on best-known identity
+  document.getElementById('barcodeDupeWarning').innerHTML =
+    renderDupeWarning(product && product.masterId, code);
 }
 
 function closeBarcodeEntry(event) {
@@ -4493,6 +5376,8 @@ function selectPhotoItem(id) {
   document.getElementById('parsingStatus').textContent = 'Selected: ' + item.name;
   document.getElementById('parsingStatus').style.color = 'var(--success)';
   document.getElementById('parsingStatus').style.animation = 'none';
+  document.getElementById('photoDupeWarning').innerHTML =
+    renderDupeWarning(item.id, item.sku);
 }
 
 /* Preprocess image for better OCR — increase contrast, convert to grayscale */
@@ -4635,6 +5520,7 @@ function capturePhoto() {
   document.getElementById('photoName').dataset.masterId = '';
   document.getElementById('photoDetails').value = '';
   document.getElementById('photoQty').value = '1';
+  document.getElementById('photoDupeWarning').innerHTML = '';
 
   // Remove previous OCR raw text if present
   const existingRaw = document.getElementById('ocrRawText');
@@ -4690,6 +5576,7 @@ function openManualEntry() {
   document.getElementById('manualNotes').value = '';
   document.getElementById('manualSuggestions').innerHTML = '';
   document.getElementById('manualName').dataset.masterId = '';
+  document.getElementById('manualDupeWarning').innerHTML = '';
   clearExtraLocations('manualExtraLocations');
 
   appState.selectedIssue = 'none';
@@ -4735,6 +5622,8 @@ function selectMasterItem(id) {
   document.getElementById('manualSku').value = item.sku;
   document.getElementById('manualSuggestions').innerHTML = '';
   document.getElementById('manualName').dataset.masterId = item.id;
+  document.getElementById('manualDupeWarning').innerHTML =
+    renderDupeWarning(item.id, item.sku);
 }
 
 function selectIssue(element) {
@@ -6698,7 +7587,7 @@ function appendChatBubble(role, html) {
   bubble.style.cssText =
     'max-width:85%;padding:9px 12px;border-radius:12px;word-break:break-word;white-space:pre-wrap;' +
     (isUser
-      ? 'align-self:flex-end;background:var(--accent-dim);border:1px solid rgba(200,255,0,.2);color:var(--text)'
+      ? 'align-self:flex-end;background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.02);color:var(--text)'
       : 'align-self:flex-start;background:var(--surface2);border:1px solid var(--border);color:var(--text)');
   bubble.innerHTML = html;
   wrap.appendChild(bubble);
