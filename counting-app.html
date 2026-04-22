@@ -4053,10 +4053,19 @@ function handleLogout() {
 }
 
 function selectVenue(id) {
-  appState.currentVenue = appState.venues.find(v => v.id === id);
-  appState.currentZone = appState.currentVenue.zones[0];
+  const venue = appState.venues.find(v => v.id === id);
+  if (!venue) {
+    showToast('Venue not found — pick another', 'error');
+    appState.currentVenue = null;
+    appState.currentZone = null;
+    saveState();
+    renderVenues();
+    return;
+  }
+  appState.currentVenue = venue;
+  appState.currentZone = (venue.zones && venue.zones[0]) || null;
 
-  document.getElementById('headerVenue').textContent = appState.currentVenue.name;
+  document.getElementById('headerVenue').textContent = venue.name;
   saveState();
   showPage('count');
 }
@@ -4947,6 +4956,10 @@ function renderDupeWarning(masterId, sku, opts) {
 function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
   if (isAuditLocked()) return;
   if (!appState.audit) return;
+  if (!appState.currentZone) {
+    showToast('Pick a zone before counting', 'warn');
+    return;
+  }
 
   if (!appState.audit.counts[appState.currentZone]) {
     appState.audit.counts[appState.currentZone] = [];
@@ -6356,9 +6369,13 @@ function renderVariancePage() {
 
   // Update AVT status if data exists
   if (avtData.length > 0 && document.getElementById('avtStatus').textContent.includes('No AVT')) {
+    const uploadedAt = appState.avtUploadedAt ? new Date(appState.avtUploadedAt) : null;
+    const uploadedLabel = (uploadedAt && !isNaN(uploadedAt.getTime()))
+      ? '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + uploadedAt.toLocaleString() + '</span>'
+      : '';
     document.getElementById('avtStatus').innerHTML =
       '<span style="color:var(--success)">' + avtData.length + ' items loaded.</span>' +
-      '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date(appState.avtUploadedAt).toLocaleString() + '</span>';
+      uploadedLabel;
   }
 
   // Filter by store if selected
@@ -6429,26 +6446,32 @@ function renderVariancePage() {
   if (appState.varianceFilter === 'critical') filtered = rows.filter(r => r.severity === 'CRITICAL' || r.severity === 'HIGH');
   filtered.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity) || b.absVarianceValue - a.absVarianceValue);
 
-  // Render list
+  // Render list — cap at 200 rows for perf, but tell the user how many are hidden
+  const VARIANCE_ROW_CAP = 200;
+  const rowsHtml = filtered.slice(0, VARIANCE_ROW_CAP).map(r =>
+    '<div class="var-row ' + (r.diff > 0 ? 'over' : r.diff < 0 ? 'under' : 'ok') + '">' +
+      '<div class="var-info">' +
+        '<div class="var-name">' + esc(r.avt.itemName) + '</div>' +
+        '<div class="var-detail">' +
+          'Actual: ' + r.avt.actual.toFixed(1) + ' | Theo: ' + r.avt.theo.toFixed(1) +
+          ' | Var: ' + (r.avt.variance >= 0 ? '+' : '') + r.avt.variance.toFixed(2) +
+          ' | $' + (r.avt.varianceValue >= 0 ? '+' : '') + r.avt.varianceValue.toFixed(2) +
+          (r.counted > 0 ? ' | Counted: ' + formatQty(r.counted) : '') +
+        '</div>' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">' +
+        '<span class="sev-badge ' + r.severity.toLowerCase() + '">' + r.severity + '</span>' +
+        (r.recount ? '<span style="font-size:9px;color:var(--danger);font-weight:600">RECOUNT</span>' : '') +
+      '</div>' +
+    '</div>'
+  ).join('');
+  const truncatedNote = filtered.length > VARIANCE_ROW_CAP
+    ? '<div style="padding:10px;text-align:center;color:var(--warning);font-size:12px">' +
+      '+ ' + (filtered.length - VARIANCE_ROW_CAP) + ' more rows hidden — refine the filter to narrow the list</div>'
+    : '';
   document.getElementById('varianceList').innerHTML = filtered.length === 0
     ? '<div class="empty-state"><p>No items match this filter.' + (avtData.length === 0 ? ' Upload an AVT report first.' : '') + '</p></div>'
-    : filtered.slice(0, 200).map(r =>
-      '<div class="var-row ' + (r.diff > 0 ? 'over' : r.diff < 0 ? 'under' : 'ok') + '">' +
-        '<div class="var-info">' +
-          '<div class="var-name">' + esc(r.avt.itemName) + '</div>' +
-          '<div class="var-detail">' +
-            'Actual: ' + r.avt.actual.toFixed(1) + ' | Theo: ' + r.avt.theo.toFixed(1) +
-            ' | Var: ' + (r.avt.variance >= 0 ? '+' : '') + r.avt.variance.toFixed(2) +
-            ' | $' + (r.avt.varianceValue >= 0 ? '+' : '') + r.avt.varianceValue.toFixed(2) +
-            (r.counted > 0 ? ' | Counted: ' + formatQty(r.counted) : '') +
-          '</div>' +
-        '</div>' +
-        '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">' +
-          '<span class="sev-badge ' + r.severity.toLowerCase() + '">' + r.severity + '</span>' +
-          (r.recount ? '<span style="font-size:9px;color:var(--danger);font-weight:600">RECOUNT</span>' : '') +
-        '</div>' +
-      '</div>'
-    ).join('');
+    : rowsHtml + truncatedNote;
 
   // Update action buttons based on audit phase
   updateVarianceActions();
