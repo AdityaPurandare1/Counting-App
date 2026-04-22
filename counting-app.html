@@ -6735,14 +6735,20 @@ function openRecountEntry(key) {
   // Reuse the guided entry modal for recount
   appState.guidedCurrentItem = { name: key, id: key };
   document.getElementById('guidedItemTitle').childNodes[0].textContent = 'Recount: ' + key + ' ';
-  document.getElementById('guidedItemInfo').innerHTML =
-    '<div style="font-size:12px;color:var(--text-muted)">' +
-      'Severity: <span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
-      ' | Actual: ' + rec.actual.toFixed(1) +
-      ' | Theo: ' + rec.theo.toFixed(1) +
-      ' | Variance: $' + rec.varianceValue.toFixed(2) +
-      '<br>Count 1 result: <strong style="color:var(--text)">' + (rec.count1Qty || 'Not counted') + '</strong>' +
-    '</div>';
+
+  const heroTitle = document.getElementById('guidedHeroTitle');
+  const heroMeta = document.getElementById('guidedHeroMeta');
+  if (heroTitle) heroTitle.textContent = key;
+  if (heroMeta) {
+    heroMeta.innerHTML =
+      'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
+      ' · Actual ' + rec.actual.toFixed(1) +
+      ' · Theo ' + rec.theo.toFixed(1) +
+      ' · Variance $' + rec.varianceValue.toFixed(2) +
+      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty || 'Not counted')) + '</strong>';
+  }
+  const dupe = document.getElementById('guidedDupeWarning');
+  if (dupe) dupe.innerHTML = '';
 
   document.getElementById('guidedQty').value = rec.recountQty !== null ? rec.recountQty : '';
   document.getElementById('guidedEntryModal').classList.remove('hide');
