@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -2968,6 +2968,77 @@ async function loadSupabaseItems() {
     console.log('Supabase: loaded ' + all.length + ' purchase_items (paginated)');
     return true;
   } catch (e) { console.error('Supabase load failed:', e); return false; }
+}
+
+/* ================================================================
+   AVT from Supabase (v1.5)
+   The desktop admin app uploads AVT reports into kount_avt_reports +
+   kount_avt_rows. On phone-app boot we pull the most recent report and
+   convert its rows back to the shape renderVariancePage / closeCount1
+   already expect. If the local copy in localStorage is newer (e.g. a
+   legacy upload from before v1.5 that never made it to Supabase) we
+   keep the local one so no data is lost.
+   ================================================================ */
+async function loadAvtFromSupabase() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  try {
+    // Latest report overall — server picks one row; our reports query is cheap
+    var repResp = await supabaseRest.query('kount_avt_reports', 'select=*&order=uploaded_at.desc&limit=1');
+    if (repResp.error || !repResp.data || repResp.data.length === 0) return false;
+    var report = repResp.data[0];
+
+    // Pull all rows for that report, paginated past the db-max-rows cap
+    var rows = [];
+    var PAGE = 1000;
+    for (var p = 0; p < 10; p++) {
+      var qs = 'select=*&report_id=eq.' + encodeURIComponent(report.id) +
+               '&order=item_name&limit=' + PAGE + '&offset=' + (p * PAGE);
+      var pg = await supabaseRest.query('kount_avt_rows', qs);
+      if (pg.error || !pg.data || pg.data.length === 0) break;
+      rows = rows.concat(pg.data);
+      if (pg.data.length < PAGE) break;
+    }
+    if (rows.length === 0) return false;
+
+    // If the local copy is newer, keep it — avoids clobbering a legacy upload
+    // that hasn't reached Supabase yet.
+    var localAt = appState.avtUploadedAt ? new Date(appState.avtUploadedAt).getTime() : 0;
+    var remoteAt = new Date(report.uploaded_at).getTime();
+    if (localAt > remoteAt) {
+      console.log('[avt] local copy is newer than Supabase — keeping local');
+      return false;
+    }
+
+    appState.avtData = rows.map(function(r) {
+      return {
+        store:         r.store || '',
+        venueId:       r.venue_id,
+        venueName:     r.venue_name || '',
+        itemName:      r.item_name,
+        category:      r.category || '',
+        actual:        Number(r.actual || 0),
+        theo:          Number(r.theo || 0),
+        variance:      Number(r.variance || 0),
+        varianceValue: Number(r.variance_value || 0),
+        variancePct:   Number(r.variance_pct || 0),
+        cuPrice:       Number(r.cu_price || 0),
+        start:         Number(r.start_qty || 0),
+        purchases:     Number(r.purchases || 0),
+        depletions:    Number(r.depletions || 0),
+      };
+    });
+    appState.avtUploadedAt = report.uploaded_at;
+    appState.avtStores = Array.from(new Set(rows.map(function(r) { return r.store; }).filter(Boolean)));
+    saveState();
+
+    console.log('[avt] loaded ' + rows.length + ' rows from Supabase (report ' + report.id + ')');
+    var currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage && currentPage.id === 'page-variance') renderVariancePage();
+    return true;
+  } catch (e) {
+    console.warn('[avt] Supabase load failed, keeping local copy:', e);
+    return false;
+  }
 }
 
 function mapSupabaseToItemMaster(items) {
@@ -8996,6 +9067,7 @@ async function sendAIMessage() {
    ================================================================ */
 openPhotoDB().catch(() => {});
 loadItemMaster();
+loadAvtFromSupabase().catch(() => {});
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
