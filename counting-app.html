@@ -10,6 +10,7 @@
 <link rel="manifest" href="manifest.json">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
@@ -2734,12 +2735,27 @@ html, body {
 const VARIANCE_THRESHOLD = 10; // percent
 const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 
+/* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
+   confirm at a glance that they are running the latest build. Keep the
+   sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
+const APP_VERSION = '1.0';
+
 /* ================================================================
    SUPABASE INTEGRATION
    ================================================================ */
 const SUPABASE_URL = 'https://mnraeesscqsaappkaldb.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
 // ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
+
+/* Supabase JS client — only used for Realtime subscriptions. All reads/writes
+   still go through the minimal supabaseRest wrapper below so the write-queue
+   fallback for offline/flaky network keeps working. */
+const supabaseClient = (window.supabase && window.supabase.createClient)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      realtime: { params: { eventsPerSecond: 2 } },
+      auth: { persistSession: false },
+    })
+  : null;
 
 const supabaseRest = {
   async query(table, params) {
@@ -2865,62 +2881,118 @@ async function writeUPCToSupabase(supabaseId, upc) {
 let pendingUPCApprovals = []; // legacy — kept for migration reference only, no longer written to
 function savePendingApprovals() { /* no-op — legacy shim */ }
 
+/* Decide the policy for linking a barcode to an item.
+   Returns { action: 'approve' | 'pending' | 'block', reason: string, isUpdate: boolean }.
+
+   Rules:
+   - Admin (corporate):    approve any submission directly.
+   - Manager:              approve "blank add" (item has no UPC and barcode is not yet
+                           on another item); update submissions go to pending.
+   - Counter:              approve "blank add" only; blocked on updates entirely.
+
+   An "update" is any of:
+     (a) the target item already has a different UPC on file, OR
+     (b) the scanned barcode is already approved to a different item in the cache. */
+function resolveUpcLinkPolicy(barcode, item) {
+  const role = (appState.user && appState.user.role) || 'counter';
+  const isAdmin = role === 'corporate';
+  const isManager = role === 'manager';
+
+  const normBarcode = normalizeBarcode(barcode);
+  const itemIdStr = item.supabaseId ? String(item.supabaseId) : '';
+
+  const targetHasDifferentUPC = !!(item.upc && item.upc.trim() &&
+    normalizeBarcode(item.upc) !== normBarcode);
+
+  const cachedOwner = upcMappingsCache[normBarcode];
+  const barcodeOnAnotherItem = !!(cachedOwner && cachedOwner.masterId &&
+    itemIdStr && cachedOwner.masterId !== itemIdStr);
+
+  const isUpdate = targetHasDifferentUPC || barcodeOnAnotherItem;
+
+  if (isAdmin) return { action: 'approve', reason: isUpdate ? 'admin-overwrite' : 'admin-add', isUpdate };
+  if (!isUpdate) return { action: 'approve', reason: 'blank-add-auto', isUpdate };
+  if (isManager) return { action: 'pending', reason: 'manager-update', isUpdate };
+  return { action: 'block', reason: 'counter-update-blocked', isUpdate };
+}
+
 async function linkUPCToItem(barcode, item) {
   // item = itemMaster entry; item.supabaseId is the purchase_items uuid
-  const role = appState.user?.role || 'counter';
-  const isAdmin = role === 'corporate';
-  const hasExistingUPC = item.upc && item.upc.trim().length > 0;
+  const policy = resolveUpcLinkPolicy(barcode, item);
 
-  if (!isAdmin && hasExistingUPC) {
-    showToast('UPC already set — only admin can overwrite', 'warn');
+  if (policy.action === 'block') {
+    showToast('UPC already set — only admin can change it', 'warn');
+    logActivity('UPC ' + barcode + ' attempt blocked for ' + item.name + ' (counter)');
     return;
   }
+
+  const normBarcode = normalizeBarcode(barcode);
+  const approveNow = policy.action === 'approve';
+  const nowIso = new Date().toISOString();
+  const email = (appState.user && appState.user.email) || 'unknown';
+  const name = (appState.user && appState.user.name) || 'Unknown';
 
   // Build the upc_mappings row
   const payload = {
     barcode_raw: barcode,
-    barcode_normalized: normalizeBarcode(barcode),
+    barcode_normalized: normBarcode,
     purchase_item_id: item.supabaseId || null,
     item_name: item.name,
     item_brand: item.brand || null,
     item_category: item.category || null,
-    submitted_by_email: (appState.user && appState.user.email) || 'unknown',
-    submitted_by_name: (appState.user && appState.user.name) || 'Unknown',
-    // Corporate users auto-approve on submit (audit trail preserved)
-    status: isAdmin ? 'approved' : 'pending',
-    // If auto-approving, record the approver
-    reviewed_by_email: isAdmin ? ((appState.user && appState.user.email) || 'unknown') : null,
-    reviewed_by_name: isAdmin ? ((appState.user && appState.user.name) || 'Unknown') : null,
-    reviewed_at: isAdmin ? new Date().toISOString() : null,
+    submitted_by_email: email,
+    submitted_by_name: name,
+    status: approveNow ? 'approved' : 'pending',
+    reviewed_by_email: approveNow ? email : null,
+    reviewed_by_name: approveNow ? name : null,
+    reviewed_at: approveNow ? nowIso : null,
   };
 
   const { data, error } = await supabaseRest.insert('upc_mappings', payload);
 
   if (error) {
-    // Queue for later retry (offline, network flake, etc.)
     enqueueUpcWrite(payload);
     showToast('Offline — UPC queued, will sync when online', 'warn');
     logActivity('UPC ' + barcode + ' queued (offline) for ' + item.name);
     return;
   }
 
-  // Success paths
-  if (isAdmin) {
-    showToast('UPC ' + barcode + ' → ' + item.name + ' saved ✓', 'success');
-    logActivity('UPC ' + barcode + ' auto-approved for ' + item.name);
-    // Add to in-memory cache immediately so subsequent scans match
-    upcMappingsCache[normalizeBarcode(barcode)] = {
+  if (approveNow) {
+    // If the approval also overwrites an existing upc on the item, push the new
+    // value to purchase_items.upc so downstream lookups see the change immediately.
+    if (policy.isUpdate && item.supabaseId) {
+      // Fire-and-forget — server-side trigger from upc_mappings→purchase_items (if any)
+      // would also catch this; the explicit write is a safety net.
+      supabaseRest.update(
+        'purchase_items',
+        'id=eq.' + encodeURIComponent(item.supabaseId),
+        { upc: barcode }
+      ).catch(() => {});
+    }
+
+    const successMsg = policy.isUpdate
+      ? 'UPC updated: ' + barcode + ' → ' + item.name
+      : 'UPC ' + barcode + ' → ' + item.name + ' saved ✓';
+    showToast(successMsg, 'success');
+    logActivity('UPC ' + barcode + ' ' + policy.reason + ' for ' + item.name);
+
+    upcMappingsCache[normBarcode] = {
       title: item.name,
       brand: item.brand || '',
       category: item.category || 'other',
       masterId: item.supabaseId ? String(item.supabaseId) : null,
       barcode: barcode,
-      approvedAt: new Date().toISOString(),
+      approvedAt: nowIso,
     };
+    try {
+      localStorage.setItem(UPC_CACHE_STORAGE_KEY, JSON.stringify({
+        cache: upcMappingsCache, loadedAt: upcMappingsCacheLoadedAt
+      }));
+    } catch (e) {}
   } else {
-    showToast('UPC queued for admin approval', 'success');
-    logActivity('UPC ' + barcode + ' queued for ' + item.name);
-    // Refresh the pending count so any admin on this device sees the new badge count
+    // Pending — manager update submission waiting for admin approval
+    showToast('UPC update submitted — waiting for admin approval', 'success');
+    logActivity('UPC ' + barcode + ' pending for ' + item.name + ' (' + policy.reason + ')');
     loadPendingApprovalsCount();
   }
 }
@@ -3672,19 +3744,23 @@ function initUpcMappingsSync() {
   flushUpcWriteQueue();
   // Migration runs lazily on first login — see runMigrationIfLoggedIn()
   runMigrationIfLoggedIn();
+  // If already logged in (session restored from localStorage), open realtime
+  startUpcRealtime();
 
-  // Periodic refresh (every 5 min)
+  // Periodic refresh (every 5 min) — still a belt-and-suspenders fallback
+  // in case the realtime socket drops silently.
   setInterval(() => {
     loadApprovedUpcMappings();
     loadPendingApprovalsCount();
     runMigrationIfLoggedIn();
   }, UPC_CACHE_TTL_MS);
 
-  // Flush queue when connection comes back
+  // Flush queue + re-establish realtime when connection comes back
   window.addEventListener('online', () => {
     flushUpcWriteQueue();
     loadApprovedUpcMappings(true);
     runMigrationIfLoggedIn();
+    if (!upcRealtimeChannel) startUpcRealtime();
   });
 }
 
@@ -3693,6 +3769,72 @@ function initUpcMappingsSync() {
 function runMigrationIfLoggedIn() {
   if (appState && appState.user && appState.user.email) {
     migrateLegacyUpcStores();
+  }
+}
+
+/* ================================================================
+   REALTIME: push upc_mappings changes to admins/managers live.
+   Requires Realtime enabled on `upc_mappings` server-side:
+     alter publication supabase_realtime add table public.upc_mappings;
+   RLS must allow the anon role to SELECT rows for the event to deliver.
+   ================================================================ */
+let upcRealtimeChannel = null;
+
+function startUpcRealtime() {
+  if (!supabaseClient) return;                       // SDK failed to load
+  if (upcRealtimeChannel) return;                    // already subscribed
+  const role = appState.user && appState.user.role;
+  if (role !== 'corporate' && role !== 'manager') return;
+
+  upcRealtimeChannel = supabaseClient
+    .channel('upc-mappings-' + (appState.user.email || 'anon'))
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'upc_mappings',
+    }, (evt) => onUpcRealtimeEvent(evt))
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') console.log('[upc realtime] subscribed');
+      if (status === 'CHANNEL_ERROR') console.warn('[upc realtime] channel error');
+    });
+}
+
+function stopUpcRealtime() {
+  if (upcRealtimeChannel && supabaseClient) {
+    try { supabaseClient.removeChannel(upcRealtimeChannel); } catch (e) {}
+  }
+  upcRealtimeChannel = null;
+}
+
+function onUpcRealtimeEvent(evt) {
+  const row = (evt && (evt.new || evt.old)) || {};
+  const ev = evt && evt.eventType;
+
+  // Keep the badge + approved cache fresh on any change
+  loadPendingApprovalsCount();
+  if (ev === 'INSERT' && row.status === 'approved') {
+    const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
+    if (key) {
+      upcMappingsCache[key] = {
+        title: row.item_name,
+        brand: row.item_brand || '',
+        category: row.item_category || 'other',
+        masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
+        barcode: row.barcode_raw,
+        approvedAt: row.reviewed_at || new Date().toISOString(),
+      };
+    }
+  }
+
+  // Notify admins of new pending submissions so they can approve/reject live
+  if (ev === 'INSERT' && row.status === 'pending') {
+    showToast('New UPC pending: ' + (row.item_name || row.barcode_raw), 'warn');
+  }
+
+  // If the approvals modal is open, re-render it with fresh data
+  const modal = document.getElementById('upcApprovalModal');
+  if (modal && !modal.classList.contains('hide')) {
+    renderPendingApprovals();
   }
 }
 
@@ -3947,10 +4089,16 @@ function handleLogin() {
   saveState();
   showToast('Signed in as ' + appState.user.name + ' (' + appState.user.role + ')', 'success');
 
+  // Admin-only version prompt so corporate always knows which build they are on.
+  if (appState.user.role === 'corporate') {
+    setTimeout(() => showToast('kΩunt v' + APP_VERSION, 'info'), 800);
+  }
+
   // Kick off UPC migration + fresh sync now that we know who's logged in
   runMigrationIfLoggedIn();
   loadApprovedUpcMappings(true);
   loadPendingApprovalsCount();
+  startUpcRealtime();
 
   showPage('venues');
 }
@@ -4041,6 +4189,7 @@ function renderVenues() {
 
 function handleLogout() {
   showConfirm('Sign out? You will need to sign in again.', () => {
+    stopUpcRealtime();
     appState.user = null;
     appState.currentVenue = null;
     appState.currentZone = null;
@@ -5599,13 +5748,11 @@ function submitBarcodeEntry() {
     learnUPC(sku, fullName, brand, category, masterId);
   }
 
-  // LIVE UPC LINKING: if user picked an item and that item has no UPC, write it now
+  // LIVE UPC LINKING: delegate all policy to linkUPCToItem — it decides
+  // whether this is a blank-add (auto-approve for all roles), a manager
+  // update submission (pending), or a counter update (blocked with toast).
   if (linkedItem && sku && sku.length >= 6) {
-    var hasExistingUpc = linkedItem.upc && linkedItem.upc.trim().length > 0;
-    if (!hasExistingUpc) {
-      // Fire and forget — don't block the count flow
-      linkUPCToItem(sku, linkedItem);
-    }
+    linkUPCToItem(sku, linkedItem);
   }
 
   addCountEntry(
@@ -8107,6 +8254,10 @@ if (appState.user) {
     showPage('count');
   } else {
     showPage('venues');
+  }
+  // Restored session: same admin-only version ping as a fresh login.
+  if (appState.user.role === 'corporate') {
+    setTimeout(() => showToast('kΩunt v' + APP_VERSION, 'info'), 800);
   }
 } else {
   showPage('login');
