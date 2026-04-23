@@ -2738,7 +2738,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -2926,6 +2926,19 @@ async function linkUPCToItem(barcode, item) {
     return;
   }
 
+  // Admin overwrite needs an explicit confirm — the only data-destructive path.
+  if (policy.action === 'approve' && policy.isUpdate) {
+    const existingUpc = (item.upc || '').trim();
+    const confirmMsg = existingUpc
+      ? 'This item already has UPC ' + existingUpc + '.\nReplace with ' + barcode + '?'
+      : 'Reassign UPC ' + barcode + ' (already on another item) to ' + item.name + '?';
+    const ok = await confirmAsync(confirmMsg);
+    if (!ok) {
+      showToast('UPC change cancelled', 'info');
+      return;
+    }
+  }
+
   const normBarcode = normalizeBarcode(barcode);
   const approveNow = policy.action === 'approve';
   const nowIso = new Date().toISOString();
@@ -2958,16 +2971,20 @@ async function linkUPCToItem(barcode, item) {
   }
 
   if (approveNow) {
-    // If the approval also overwrites an existing upc on the item, push the new
-    // value to purchase_items.upc so downstream lookups see the change immediately.
-    if (policy.isUpdate && item.supabaseId) {
-      // Fire-and-forget — server-side trigger from upc_mappings→purchase_items (if any)
-      // would also catch this; the explicit write is a safety net.
+    // Push the new value to purchase_items.upc on every approved path
+    // (blank add and overwrite both) so downstream lookups see the change
+    // immediately. Server-side trigger from upc_mappings→purchase_items
+    // (if present) is idempotent with this write.
+    if (item.supabaseId) {
       supabaseRest.update(
         'purchase_items',
         'id=eq.' + encodeURIComponent(item.supabaseId),
         { upc: barcode }
       ).catch(() => {});
+      // Keep the local itemMaster entry in sync so the next scan in this
+      // session sees the new UPC without a round-trip.
+      const masterEntry = itemMaster.find(m => m.id === String(item.supabaseId) || m.id === item.id);
+      if (masterEntry) masterEntry.upc = barcode;
     }
 
     const successMsg = policy.isUpdate
@@ -7757,17 +7774,28 @@ function showToast(message, type) {
 }
 
 let confirmCallback = null;
+let confirmCancelCallback = null;
 
-function showConfirm(message, onConfirm) {
+function showConfirm(message, onConfirm, onCancel) {
   document.getElementById('confirmMsg').textContent = message;
   document.getElementById('confirmDialog').classList.remove('hide');
   confirmCallback = onConfirm;
+  confirmCancelCallback = onCancel || null;
 }
 
 function closeConfirm(confirmed) {
   document.getElementById('confirmDialog').classList.add('hide');
   if (confirmed && confirmCallback) confirmCallback();
+  else if (!confirmed && confirmCancelCallback) confirmCancelCallback();
   confirmCallback = null;
+  confirmCancelCallback = null;
+}
+
+/* Promise-wrapped showConfirm so async flows can `await` a yes/no decision. */
+function confirmAsync(message) {
+  return new Promise(resolve => {
+    showConfirm(message, () => resolve(true), () => resolve(false));
+  });
 }
 
 /* ================================================================
