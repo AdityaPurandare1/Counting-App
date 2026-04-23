@@ -2108,6 +2108,7 @@ html, body {
       </div>
       <div id="preAuditExisting" class="hide" style="margin-bottom:12px"></div>
       <button class="submit-btn" onclick="startNewAudit()" id="startAuditBtn">Start new audit</button>
+      <button class="submit-btn secondary" style="margin-top:8px" onclick="showJoinAuditModal()" id="joinAuditBtn">Join audit</button>
       <button class="submit-btn secondary" style="margin-top:8px" onclick="showPage('venues')">Back to venues</button>
     </div>
 
@@ -2738,7 +2739,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3857,6 +3858,439 @@ function onUpcRealtimeEvent(evt) {
 
 
 /* ================================================================
+   NETWORKED MULTI-USER AUDITS (v1.2)
+
+   When appState.audit.supabaseId is set we mirror count mutations to
+   public.kount_entries and fold incoming Realtime events back into
+   appState.audit.counts[zone], so every joined device sees every
+   entry live.
+
+   Solo audits (no network at start, or Supabase unreachable) leave
+   appState.audit.supabaseId null and bypass all of this — the
+   localStorage-only flow is unchanged.
+   ================================================================ */
+
+let auditChannel = null;                 // current Realtime channel
+let auditChannelState = 'disconnected';  // 'disconnected' | 'connecting' | 'connected' | 'error'
+
+function isValidUuid(v) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
+}
+
+async function startNetworkedAudit(venue) {
+  const role = appState.user && appState.user.role;
+  if (role !== 'corporate' && role !== 'manager') {
+    showToast('Only managers and admins can start audits', 'error');
+    return null;
+  }
+  if (!navigator.onLine) return null;   // caller falls back to solo
+
+  // 1) allocate a join code via the RPC (collision-safe on the DB side)
+  let code;
+  try {
+    const { data, error } = await supabaseRest.rpc('generate_kount_join_code', { p_venue_name: venue.name });
+    if (error || !data) throw error || new Error('no code returned');
+    code = String(data).replace(/^"|"$/g, '');
+  } catch (e) {
+    console.error('[audit] generate_kount_join_code failed:', e);
+    return null;
+  }
+
+  // 2) insert the audit row
+  const nowIso = new Date().toISOString();
+  const { data: inserted, error: insErr } = await supabaseRest.insert('kount_audits', {
+    venue_id: venue.id,
+    venue_name: venue.name,
+    status: 'active',
+    count_phase: 'count1',
+    join_code: code,
+    started_by_email: appState.user.email,
+    started_by_name: appState.user.name,
+    started_at: nowIso,
+  });
+  if (insErr || !inserted || !inserted[0]) {
+    console.error('[audit] insert kount_audits failed:', insErr);
+    return null;
+  }
+  const audit = inserted[0];
+
+  // 3) add the starter as an audit member (fire-and-forget)
+  supabaseRest.insert('kount_members', {
+    audit_id: audit.id,
+    user_email: appState.user.email,
+    user_name: appState.user.name,
+    role: appState.user.role,
+    assigned_zones: [],
+  }).catch(err => console.warn('[audit] insert starter member failed:', err));
+
+  subscribeToAuditRealtime(audit.id);
+  return audit;
+}
+
+async function joinNetworkedAudit(rawCode) {
+  const code = (rawCode || '').trim().toUpperCase();
+  if (!code) { showToast('Enter a join code', 'warn'); return null; }
+  if (!navigator.onLine) { showToast('Offline — cannot join an audit', 'error'); return null; }
+
+  const { data, error } = await supabaseRest.query(
+    'kount_audits',
+    'join_code=eq.' + encodeURIComponent(code) + '&status=eq.active&select=*'
+  );
+  if (error) { showToast('Database error — could not look up code', 'error'); return null; }
+  if (!data || data.length === 0) { showToast('No active audit for code ' + code, 'error'); return null; }
+  const audit = data[0];
+
+  // We must have the venue locally to render zones
+  const matchingVenue = appState.venues.find(v => v.id === audit.venue_id);
+  if (!matchingVenue) {
+    showToast('You do not have access to ' + audit.venue_name, 'error');
+    return null;
+  }
+  appState.currentVenue = matchingVenue;
+  appState.currentZone = (matchingVenue.zones && matchingVenue.zones[0]) || null;
+
+  // Join as a member — duplicate on reconnect is fine, 23505 swallowed
+  try {
+    const resp = await supabaseRest.insert('kount_members', {
+      audit_id: audit.id,
+      user_email: appState.user.email,
+      user_name: appState.user.name,
+      role: appState.user.role,
+    });
+    if (resp.error && !/duplicate key|23505/i.test(resp.error.message || '')) {
+      console.warn('[audit] join kount_members failed:', resp.error);
+    }
+  } catch (e) { console.warn('[audit] join threw:', e); }
+
+  // Pull the existing entries so the counter starts in sync
+  const existing = await fetchAuditEntries(audit.id);
+  const counts = {};
+  (matchingVenue.zones || []).forEach(z => { counts[z] = []; });
+  existing.forEach(row => {
+    const zone = row.zone;
+    if (!counts[zone]) counts[zone] = [];
+    counts[zone].push(entryFromSupabaseRow(row));
+  });
+
+  appState.audit = {
+    id: 'A' + Date.now(),
+    supabaseId: audit.id,
+    joinCode: audit.join_code,
+    venueId: audit.venue_id,
+    venueName: audit.venue_name,
+    status: audit.status,
+    countPhase: audit.count_phase,
+    startedAt: audit.started_at,
+    startedByEmail: audit.started_by_email,
+    counts: counts,
+    log: [],
+    recounts: {},
+    count1Data: null,
+    count1ClosedAt: audit.count1_closed_at,
+    count2Data: null,
+    count2ClosedAt: audit.count2_closed_at,
+  };
+  saveState();
+
+  subscribeToAuditRealtime(audit.id);
+  showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
+  showPage('count');
+  return audit;
+}
+
+async function fetchAuditEntries(auditId) {
+  const { data, error } = await supabaseRest.query(
+    'kount_entries',
+    'audit_id=eq.' + encodeURIComponent(auditId) + '&select=*&order=timestamp.asc'
+  );
+  if (error) { console.warn('[audit] fetch entries failed:', error); return []; }
+  return data || [];
+}
+
+function entryFromSupabaseRow(row) {
+  return {
+    id: row.id,
+    supabaseId: row.id,
+    name: row.item_name,
+    category: row.category,
+    qty: Number(row.qty) || 0,
+    sku: row.sku,
+    notes: row.issue_notes,
+    issue: row.issue || 'none',
+    photoId: row.photo_id,
+    masterId: row.item_id,
+    method: row.method,
+    counterEmail: row.counted_by_email,
+    counterName: row.counted_by_name,
+    timestamp: row.timestamp,
+    isRecount: row.is_recount,
+  };
+}
+
+/* Mirror a local entry to Supabase. Tries INSERT; on unique-violation
+   it falls back to UPDATE against the existing row with a qty merge. */
+async function syncEntryToSupabase(entry, zone, opts) {
+  if (!appState.audit || !appState.audit.supabaseId) return null;
+  const auditId = appState.audit.supabaseId;
+  const isRecount = !!(opts && opts.isRecount);
+
+  const payload = {
+    audit_id: auditId,
+    item_id: isValidUuid(entry.masterId) ? entry.masterId : null,
+    item_name: entry.name,
+    category: entry.category || null,
+    qty: Number(entry.qty) || 0,
+    zone: zone,
+    method: entry.method || null,
+    issue: entry.issue || 'none',
+    issue_notes: entry.notes || null,
+    sku: entry.sku || null,
+    upc: entry.sku || null,
+    counted_by_email: (appState.user && appState.user.email) || 'unknown',
+    counted_by_name: (appState.user && appState.user.name) || null,
+    is_recount: isRecount,
+    photo_id: entry.photoId || null,
+    timestamp: entry.timestamp || new Date().toISOString(),
+  };
+
+  const { data, error } = await supabaseRest.insert('kount_entries', payload);
+  if (!error && data && data[0]) {
+    entry.supabaseId = data[0].id;
+    return data[0];
+  }
+
+  // Unique-key collision — merge with the existing row
+  if (error && /duplicate key|23505/i.test(error.message || '')) {
+    const idFilter = payload.item_id
+      ? 'item_id=eq.' + payload.item_id
+      : 'item_id=is.null&item_name=eq.' + encodeURIComponent(payload.item_name);
+    const qs = 'audit_id=eq.' + auditId +
+               '&zone=eq.' + encodeURIComponent(zone) +
+               '&is_recount=eq.' + isRecount +
+               '&' + idFilter + '&select=*';
+    const lookup = await supabaseRest.query('kount_entries', qs);
+    if (lookup.data && lookup.data[0]) {
+      const existing = lookup.data[0];
+      const mergedQty = Number(existing.qty) + Number(payload.qty);
+      const upd = await supabaseRest.update('kount_entries', 'id=eq.' + existing.id, {
+        qty: mergedQty,
+        issue: payload.issue !== 'none' ? payload.issue : existing.issue,
+        issue_notes: payload.issue_notes || existing.issue_notes,
+        timestamp: new Date().toISOString(),
+      });
+      if (!upd.error) { entry.supabaseId = existing.id; return upd.data && upd.data[0]; }
+    }
+  }
+
+  console.warn('[audit] sync entry failed:', error);
+  updateOfflineBannerState('error');
+  return null;
+}
+
+/* ---------- Realtime channel ---------- */
+function subscribeToAuditRealtime(auditId) {
+  if (!supabaseClient || !auditId) return;
+  if (auditChannel) unsubscribeFromAuditRealtime();
+  auditChannelState = 'connecting';
+  updateOfflineBannerState();
+
+  auditChannel = supabaseClient
+    .channel('kount-audit-' + auditId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_entries', filter: 'audit_id=eq.' + auditId }, onAuditEntryRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_members', filter: 'audit_id=eq.' + auditId }, onAuditMemberRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_audits',  filter: 'id=eq.' + auditId },       onAuditMetaRealtime)
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED')            { auditChannelState = 'connected'; updateOfflineBannerState(); }
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
+                                              { auditChannelState = 'error';     updateOfflineBannerState(); }
+    });
+}
+
+function unsubscribeFromAuditRealtime() {
+  if (auditChannel && supabaseClient) {
+    try { supabaseClient.removeChannel(auditChannel); } catch (e) {}
+  }
+  auditChannel = null;
+  auditChannelState = 'disconnected';
+  updateOfflineBannerState();
+}
+
+function leaveNetworkedAudit() {
+  unsubscribeFromAuditRealtime();
+  hideOfflineBanner();
+}
+
+function onAuditEntryRealtime(evt) {
+  const row = evt.new || evt.old;
+  if (!row) return;
+  mergeRemoteEntryIntoLocal(row, evt.eventType);
+  const currentPage = document.querySelector('.page:not(.hide)');
+  if (currentPage && currentPage.id === 'page-count') renderCountPage();
+}
+
+function mergeRemoteEntryIntoLocal(row, evtType) {
+  if (!appState.audit || appState.audit.supabaseId !== row.audit_id) return;
+  const zone = row.zone;
+  if (!appState.audit.counts[zone]) appState.audit.counts[zone] = [];
+  const zoneItems = appState.audit.counts[zone];
+  const existing = zoneItems.find(e => e.supabaseId === row.id);
+  if (existing) {
+    if (evtType === 'DELETE') {
+      const idx = zoneItems.indexOf(existing);
+      if (idx !== -1) zoneItems.splice(idx, 1);
+    } else {
+      existing.qty = Number(row.qty);
+      existing.issue = row.issue || 'none';
+      existing.notes = row.issue_notes;
+      existing.timestamp = row.timestamp;
+    }
+  } else if (evtType !== 'DELETE') {
+    zoneItems.unshift(entryFromSupabaseRow(row));
+  }
+}
+
+function onAuditMemberRealtime(evt) {
+  // Placeholder for the manager dashboard pane (v1.3 will render members live)
+  if (evt && evt.eventType === 'INSERT' && evt.new) {
+    const row = evt.new;
+    const myEmail = appState.user && appState.user.email;
+    if (row.user_email !== myEmail) {
+      showToast(row.user_name + ' joined the audit', 'info');
+    }
+  }
+}
+
+function onAuditMetaRealtime(evt) {
+  const row = evt.new;
+  if (!row || !appState.audit || appState.audit.supabaseId !== row.id) return;
+  appState.audit.status = row.status;
+  appState.audit.countPhase = row.count_phase;
+  appState.audit.count1ClosedAt = row.count1_closed_at;
+  appState.audit.count2ClosedAt = row.count2_closed_at;
+  saveState();
+}
+
+/* ---------- Offline banner ---------- */
+function updateOfflineBannerState(forcedState) {
+  const networked = !!(appState.audit && appState.audit.supabaseId);
+  if (!networked) { hideOfflineBanner(); return; }
+  const online = navigator.onLine !== false;
+  if (forcedState === 'error')    { showOfflineBanner('Database error — changes paused'); return; }
+  if (!online)                    { showOfflineBanner('Offline — changes paused until reconnected'); return; }
+  if (auditChannelState === 'connecting') { showOfflineBanner('Reconnecting to audit…'); return; }
+  if (auditChannelState === 'error')      { showOfflineBanner('Disconnected — reconnect to continue'); return; }
+  hideOfflineBanner();
+}
+
+function showOfflineBanner(message) {
+  let bar = document.getElementById('auditOfflineBanner');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'auditOfflineBanner';
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:999;padding:8px 14px;' +
+      'background:var(--danger);color:#000;font-weight:600;font-size:12px;text-align:center;' +
+      'font-family:var(--font);box-shadow:0 2px 8px rgba(0,0,0,0.4)';
+    document.body.appendChild(bar);
+  }
+  bar.textContent = message;
+}
+
+function hideOfflineBanner() {
+  const bar = document.getElementById('auditOfflineBanner');
+  if (bar) bar.remove();
+}
+
+function isNetworkedAuditBlocked() {
+  return !!(appState.audit && appState.audit.supabaseId) &&
+         (navigator.onLine === false || auditChannelState === 'error');
+}
+
+window.addEventListener('online',  () => updateOfflineBannerState());
+window.addEventListener('offline', () => updateOfflineBannerState());
+
+/* ---------- UI: join code modal (built lazily, not in static HTML) ---------- */
+function showJoinAuditModal() {
+  if (!appState.user) return;
+  let modal = document.getElementById('joinAuditModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'joinAuditModal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML =
+      '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:340px">' +
+        '<h3>Join an audit</h3>' +
+        '<div class="form-group">' +
+          '<label>Join code</label>' +
+          '<input class="form-input" id="joinAuditCodeInput" placeholder="e.g. BSC-482" autocomplete="off" ' +
+            'style="text-transform:uppercase;font-family:var(--mono);letter-spacing:2px;text-align:center;font-size:16px">' +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="submit-btn secondary" style="flex:1" onclick="closeJoinAuditModal()">Cancel</button>' +
+          '<button class="submit-btn" style="flex:1" onclick="submitJoinAudit()">Join</button>' +
+        '</div>' +
+      '</div>';
+    modal.addEventListener('click', function(e) { if (e.target === modal) closeJoinAuditModal(); });
+    document.body.appendChild(modal);
+  }
+  modal.classList.remove('hide');
+  setTimeout(() => { const el = document.getElementById('joinAuditCodeInput'); if (el) el.focus(); }, 60);
+}
+
+function closeJoinAuditModal() {
+  const m = document.getElementById('joinAuditModal');
+  if (m) m.classList.add('hide');
+}
+
+async function submitJoinAudit() {
+  const code = (document.getElementById('joinAuditCodeInput').value || '').trim();
+  if (!code) return;
+  closeJoinAuditModal();
+  await joinNetworkedAudit(code);
+}
+
+/* ---------- UI: post-start code modal ---------- */
+function showAuditCodeModal(code, venueName) {
+  let modal = document.getElementById('auditCodeModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'auditCodeModal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML =
+      '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:340px;text-align:center">' +
+        '<h3 style="margin-bottom:8px">Audit started</h3>' +
+        '<div id="auditCodeVenue" style="font-size:13px;color:var(--text-muted);margin-bottom:12px"></div>' +
+        '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Share this code with counters:</div>' +
+        '<div id="auditCodeValue" style="font-family:var(--mono);font-size:32px;font-weight:700;letter-spacing:6px;color:var(--accent);padding:18px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px"></div>' +
+        '<div style="display:flex;gap:8px">' +
+          '<button class="submit-btn secondary" style="flex:1" onclick="copyAuditCode()">Copy</button>' +
+          '<button class="submit-btn" style="flex:1" onclick="closeAuditCodeModal()">Got it</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(modal);
+  }
+  modal.classList.remove('hide');
+  document.getElementById('auditCodeValue').textContent = code;
+  document.getElementById('auditCodeVenue').textContent = venueName || '';
+}
+
+function closeAuditCodeModal() {
+  const m = document.getElementById('auditCodeModal');
+  if (m) m.classList.add('hide');
+}
+
+function copyAuditCode() {
+  const codeEl = document.getElementById('auditCodeValue');
+  const code = codeEl ? codeEl.textContent : '';
+  if (!code) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code).then(() => showToast('Copied ' + code, 'success'));
+  } else {
+    showToast('Code: ' + code, 'info');
+  }
+}
+
+
+/* ================================================================
    Legacy external-API lookup cache (unchanged behavior).
    This is still per-device because it caches UPCitemdb results,
    not teachings — safe to stay local.
@@ -4207,6 +4641,7 @@ function renderVenues() {
 function handleLogout() {
   showConfirm('Sign out? You will need to sign in again.', () => {
     stopUpcRealtime();
+    leaveNetworkedAudit();
     appState.user = null;
     appState.currentVenue = null;
     appState.currentZone = null;
@@ -4403,25 +4838,43 @@ function renderPreAuditScreen() {
   }
 }
 
-function startNewAudit() {
+async function startNewAudit() {
   const venue = appState.currentVenue;
   if (!venue) return;
 
-  // If there was a previous active audit for this venue, confirm
+  // If there was a previous active audit for this venue, confirm first
   if (appState.audit && appState.audit.venueId === venue.id && appState.audit.status === 'active') {
-    showConfirm('An audit is already in progress for this venue. Start a new one? The current audit will be discarded.', () => {
-      createAndStartAudit(venue);
-    });
-    return;
+    const ok = await confirmAsync('An audit is already in progress for this venue. Start a new one? The current audit will be discarded.');
+    if (!ok) return;
+    // Break any live channel from the discarded audit
+    if (appState.audit.supabaseId) leaveNetworkedAudit();
+  }
+
+  // Try networked path first; fall back to solo if not eligible / offline / error.
+  const role = appState.user && appState.user.role;
+  const canNetwork = (role === 'corporate' || role === 'manager') && navigator.onLine && !!supabaseClient;
+  if (canNetwork) {
+    const audit = await startNetworkedAudit(venue);
+    if (audit) {
+      createAndStartAudit(venue, { supabaseId: audit.id, joinCode: audit.join_code });
+      showAuditCodeModal(audit.join_code, venue.name);
+      return;
+    }
+    showToast('Could not start shared audit — starting solo', 'warn');
   }
 
   createAndStartAudit(venue);
 }
 
-function createAndStartAudit(venue) {
+function createAndStartAudit(venue, opts) {
+  opts = opts || {};
   appState.audit = {
     id: 'A' + Date.now(),
+    supabaseId: opts.supabaseId || null,
+    joinCode: opts.joinCode || null,
     venueId: venue.id,
+    venueName: venue.name || '',
+    startedByEmail: appState.user && appState.user.email,
     status: 'active',
     countPhase: 'count1',
     startedAt: new Date().toISOString(),
@@ -5126,6 +5579,12 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
     showToast('Pick a zone before counting', 'warn');
     return;
   }
+  // Networked audits must be online. Refuse rather than let the local count
+  // drift from Supabase (option 3B — block offline writes).
+  if (isNetworkedAuditBlocked()) {
+    showToast('Disconnected — reconnect to continue counting', 'error');
+    return;
+  }
 
   if (!appState.audit.counts[appState.currentZone]) {
     appState.audit.counts[appState.currentZone] = [];
@@ -5174,7 +5633,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   }
 
   // Add new entry
-  zoneItems.unshift({
+  const newEntry = {
     id: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
     name: name,
     category: category,
@@ -5187,11 +5646,21 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
     details: details || null,
     masterId: masterId || null,
     timestamp: new Date().toISOString(),
-  });
+  };
+  zoneItems.unshift(newEntry);
 
   logActivity('Counted ' + name + ' x' + formatQty(parsedQty) + ' in ' + appState.currentZone + ' via ' + method);
   showToast('Added: ' + name, 'success');
   saveState();
+
+  // Mirror to Supabase for networked audits (fire-and-forget; offline-block
+  // above prevents this path when disconnected).
+  if (appState.audit && appState.audit.supabaseId) {
+    syncEntryToSupabase(newEntry, appState.currentZone).catch(err => {
+      console.warn('[audit] syncEntryToSupabase failed:', err);
+      updateOfflineBannerState('error');
+    });
+  }
 }
 
 /* ================================================================
@@ -8286,6 +8755,11 @@ if (appState.user) {
   // Restored session: same admin-only version ping as a fresh login.
   if (appState.user.role === 'corporate') {
     setTimeout(() => showToast('kΩunt v' + APP_VERSION, 'info'), 800);
+  }
+  // If the restored audit is a networked one, reopen the Realtime channel
+  // so the banner + live-merge resume without a manual action.
+  if (appState.audit && appState.audit.supabaseId) {
+    subscribeToAuditRealtime(appState.audit.supabaseId);
   }
 } else {
   showPage('login');
