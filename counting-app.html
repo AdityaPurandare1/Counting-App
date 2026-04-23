@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4822,6 +4822,61 @@ const ACCESS_LIST = [
   // Add more users below this line:
   // { email: 'newuser@example.com', name: 'New User', role: 'counter', venueIds: ['v1'] },
 ];
+
+/* ================================================================
+   app_users integration (v1.6)
+   The desktop Security screen CRUDs a Supabase app_users table. Both
+   apps pull from it so admins can manage access without a code push.
+   Strategy:
+     1. At boot, synchronously hydrate ACCESS_LIST from localStorage
+        cache (written by a prior successful Supabase fetch). Falls
+        through to the hardcoded baseline above on first visit / wipe.
+     2. Fire an async Supabase fetch; on success, replace in-memory
+        ACCESS_LIST (via splice so the `const` binding stays) and
+        refresh the localStorage cache.
+   This keeps login instant + offline-tolerant while letting admin edits
+   propagate across devices.
+   ================================================================ */
+const APP_USERS_CACHE_KEY = 'hwood_app_users_cache_v1';
+
+function applyAccessList(list) {
+  if (!Array.isArray(list) || list.length === 0) return;
+  // Mutate in place so the `const ACCESS_LIST` binding remains valid.
+  ACCESS_LIST.splice(0, ACCESS_LIST.length, ...list);
+}
+
+// 1) Hydrate synchronously from cache (if any) so login is instant.
+try {
+  const cached = JSON.parse(localStorage.getItem(APP_USERS_CACHE_KEY) || 'null');
+  if (Array.isArray(cached) && cached.length > 0) applyAccessList(cached);
+} catch (e) { /* ignore */ }
+
+// 2) Async refresh from Supabase. Swallows errors — baseline / cache keeps us running.
+async function loadAppUsersFromSupabase() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  try {
+    const { data, error } = await supabaseRest.query(
+      'app_users',
+      'select=*&is_active=eq.true&order=role,email'
+    );
+    if (error || !data || data.length === 0) return false;
+    const mapped = data.map(function(r) {
+      return {
+        email: r.email,
+        name: r.name || r.email,
+        role: r.role,
+        venueIds: r.role === 'corporate' ? 'all' : (r.venue_ids || []),
+      };
+    });
+    applyAccessList(mapped);
+    try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
+    console.log('[app_users] loaded ' + mapped.length + ' rows from Supabase');
+    return true;
+  } catch (e) {
+    console.warn('[app_users] fetch failed, keeping local list:', e);
+    return false;
+  }
+}
 
 /* ================================================================
    AUTHENTICATION
@@ -9068,6 +9123,7 @@ async function sendAIMessage() {
 openPhotoDB().catch(() => {});
 loadItemMaster();
 loadAvtFromSupabase().catch(() => {});
+loadAppUsersFromSupabase().catch(() => {});
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
