@@ -2880,7 +2880,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.11';
+const APP_VERSION = '1.12';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3137,7 +3137,6 @@ function savePendingApprovals() { /* no-op — legacy shim */ }
 function resolveUpcLinkPolicy(barcode, item) {
   const role = (appState.user && appState.user.role) || 'counter';
   const isAdmin = role === 'corporate';
-  const isManager = role === 'manager';
 
   const normBarcode = normalizeBarcode(barcode);
   const itemIdStr = item.supabaseId ? String(item.supabaseId) : '';
@@ -3151,10 +3150,13 @@ function resolveUpcLinkPolicy(barcode, item) {
 
   const isUpdate = targetHasDifferentUPC || barcodeOnAnotherItem;
 
+  // Rules (v1.12):
+  //   - Blank UPC: direct approve for ANY role (no queue, no approval).
+  //   - Update:    admin direct-approves with confirm; everyone else (manager
+  //                OR counter) queues a pending submission for admin review.
   if (isAdmin) return { action: 'approve', reason: isUpdate ? 'admin-overwrite' : 'admin-add', isUpdate };
   if (!isUpdate) return { action: 'approve', reason: 'blank-add-auto', isUpdate };
-  if (isManager) return { action: 'pending', reason: 'manager-update', isUpdate };
-  return { action: 'block', reason: 'counter-update-blocked', isUpdate };
+  return { action: 'pending', reason: role + '-update', isUpdate };
 }
 
 async function linkUPCToItem(barcode, item) {
@@ -8095,6 +8097,7 @@ function finalizeCount2() {
   logActivity('Recount complete. Audit auto-closed and submitted.');
   saveState();
   _finalizingCount2 = false;
+  loadHistoricAuditsFromSupabase().catch(function() {});   // keep picker fresh
   showToast('Audit complete! Final report ready.', 'success');
   showPage('summary');
   renderSummaryPage();
@@ -8626,6 +8629,33 @@ function generateRecountList() {
    ================================================================ */
 let summaryAuditData = null;
 
+/* Historic audits fetched from Supabase — source of truth for completed
+   audits regardless of how long ago they happened. Seeded at boot, re-
+   fetched when the summary page opens so newly-closed audits land too.
+   Held in-memory only; not persisted. */
+let supabaseHistoricAudits = [];
+
+async function loadHistoricAuditsFromSupabase() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return;
+  try {
+    const visibleIds = (appState.user && appState.user.venueIds === 'all')
+      ? null
+      : ((appState.user && Array.isArray(appState.user.venueIds)) ? appState.user.venueIds : []);
+    let qs = 'select=*&status=in.(submitted,cancelled)&order=completed_at.desc.nullslast&limit=200';
+    if (visibleIds && visibleIds.length > 0) {
+      qs += '&venue_id=in.(' + visibleIds.map(encodeURIComponent).join(',') + ')';
+    } else if (visibleIds && visibleIds.length === 0) {
+      supabaseHistoricAudits = [];
+      return;
+    }
+    const { data, error } = await supabaseRest.query('kount_audits', qs);
+    if (error) { console.warn('[history] load failed:', error); return; }
+    supabaseHistoricAudits = data || [];
+  } catch (e) {
+    console.warn('[history] load threw:', e);
+  }
+}
+
 function renderSummaryPage() {
   const select = document.getElementById('summaryVenueSelect');
   select.innerHTML = '';
@@ -8637,11 +8667,27 @@ function renderSummaryPage() {
     select.appendChild(opt);
   }
 
-  (appState.auditHistory || []).slice().reverse().forEach((audit, i) => {
+  // Merge local auditHistory (solo + recent networked) with Supabase-backed
+  // historic rows so the picker shows everything, even if localStorage has
+  // been wiped. Dedupe on appState.audit.id matches where available.
+  const localHistory = (appState.auditHistory || []).slice().reverse();
+  const localIds = new Set(localHistory.map(a => a.supabaseId).filter(Boolean));
+  const remoteOnly = supabaseHistoricAudits.filter(a => !localIds.has(a.id));
+
+  localHistory.forEach((audit, i) => {
     const opt = document.createElement('option');
     opt.value = 'history_' + i;
     const date = new Date(audit.startedAt).toLocaleDateString();
     opt.textContent = (audit.venueName || 'Venue') + ' — ' + date;
+    select.appendChild(opt);
+  });
+
+  remoteOnly.forEach((audit) => {
+    const opt = document.createElement('option');
+    opt.value = 'supabase_' + audit.id;
+    const date = new Date(audit.completed_at || audit.started_at).toLocaleDateString();
+    const tag  = audit.status === 'cancelled' ? ' (cancelled)' : '';
+    opt.textContent = (audit.venue_name || 'Venue') + ' — ' + date + tag;
     select.appendChild(opt);
   });
 
@@ -8652,11 +8698,73 @@ function renderSummaryPage() {
     select.appendChild(opt);
   }
 
+  // Kick off a refresh of the Supabase-backed list in the background; the
+  // select rebuilds on the next render cycle.
+  loadHistoricAuditsFromSupabase().then(() => {
+    // Only re-render if the summary page is still visible.
+    const page = document.querySelector('.page:not(.hide)');
+    if (page && page.id === 'page-summary' &&
+        select.options.length !== (localHistory.length + supabaseHistoricAudits.filter(a => !localIds.has(a.id)).length + (appState.audit ? 1 : 0))) {
+      renderSummaryPage();
+    }
+  }).catch(function() {});
+
   onSummaryVenueChange();
   renderPendingApprovals();
 }
 
-function onSummaryVenueChange() {
+async function hydrateSupabaseHistoricAudit(auditId) {
+  // Pull entries + members for a historic Supabase audit so renderSummaryContent
+  // can show the zone breakdown, member list, and activity log in full.
+  const header = supabaseHistoricAudits.find(a => a.id === auditId);
+  if (!header) return null;
+  try {
+    const [entriesResp, membersResp] = await Promise.all([
+      supabaseRest.query('kount_entries', 'select=*&audit_id=eq.' + encodeURIComponent(auditId) + '&order=timestamp.asc'),
+      supabaseRest.query('kount_members', 'select=*&audit_id=eq.' + encodeURIComponent(auditId)),
+    ]);
+    const entries = entriesResp.data || [];
+    const counts = {};
+    entries.forEach(function(e) {
+      if (!counts[e.zone]) counts[e.zone] = [];
+      counts[e.zone].push({
+        id: e.id,
+        name: e.item_name,
+        category: e.category,
+        qty: Number(e.qty || 0),
+        sku: e.sku,
+        notes: e.issue_notes,
+        issue: e.issue || 'none',
+        method: e.method,
+        masterId: e.item_id,
+        counterEmail: e.counted_by_email,
+        counterName: e.counted_by_name,
+        timestamp: e.timestamp,
+      });
+    });
+    return {
+      id: 'SB_' + header.id,
+      supabaseId: header.id,
+      venueId: header.venue_id,
+      venueName: header.venue_name,
+      status: header.status,
+      countPhase: header.count_phase,
+      startedAt: header.started_at,
+      completedAt: header.completed_at,
+      count1ClosedAt: header.count1_closed_at,
+      count2ClosedAt: header.count2_closed_at,
+      counts: counts,
+      recounts: {},
+      log: [],
+      members: membersResp.data || [],
+    };
+  } catch (e) {
+    console.warn('[history] hydrate failed:', e);
+    return null;
+  }
+}
+
+async function onSummaryVenueChange() {
   const val = document.getElementById('summaryVenueSelect').value;
   if (val === 'current' && appState.audit) {
     summaryAuditData = appState.audit;
@@ -8664,6 +8772,11 @@ function onSummaryVenueChange() {
     const idx = parseInt(val.split('_')[1]);
     const history = (appState.auditHistory || []).slice().reverse();
     summaryAuditData = history[idx] || null;
+  } else if (val.startsWith('supabase_')) {
+    const auditId = val.replace('supabase_', '');
+    summaryAuditData = null;
+    renderSummaryContent();                    // show placeholder while we fetch
+    summaryAuditData = await hydrateSupabaseHistoricAudit(auditId);
   } else {
     summaryAuditData = null;
   }
@@ -9417,6 +9530,7 @@ openPhotoDB().catch(() => {});
 loadItemMaster();
 loadAvtFromSupabase().catch(() => {});
 loadAppUsersFromSupabase().catch(() => {});
+loadHistoricAuditsFromSupabase().catch(() => {});
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
