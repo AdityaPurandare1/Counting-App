@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.9';
+const APP_VERSION = '1.10';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8027,12 +8027,18 @@ function syncIssuesToLog() {
         exists.issueType = item.issue;
         exists.notes = item.notes || exists.notes;
         exists.qty = item.qty;
+        // Keep the kount_entries id current so the resolve action can
+        // target it server-side even after a re-sync.
+        if (item.supabaseId) exists.entrySupabaseId = item.supabaseId;
+        if (appState.audit && appState.audit.supabaseId) exists.auditSupabaseId = appState.audit.supabaseId;
         return;
       }
 
       issueLog.push({
         id: 'ISS_' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
         auditId: auditId,
+        auditSupabaseId: appState.audit && appState.audit.supabaseId ? appState.audit.supabaseId : null,
+        entrySupabaseId: item.supabaseId || null,
         venueName: venueName,
         venueId: venueId,
         zone: zone,
@@ -8237,6 +8243,42 @@ function confirmResolveIssue(index) {
   showToast('Issue resolved', 'success');
   renderIssuesPage();
   updateIssueCountBadge();
+
+  // Propagate to Supabase so the desktop Issues screen (v0.11) sees the
+  // resolution immediately. Fire-and-forget; local state persists either way.
+  syncIssueResolutionToSupabase(issue).catch(function() {});
+}
+
+/* Patch kount_entries.issue_resolved for a resolved local issue. Prefers
+   the stashed entrySupabaseId; falls back to a best-effort match on
+   (audit_id, zone, item_name, issue). No-op if the issue came from a
+   solo/offline audit that never made it to Supabase. */
+async function syncIssueResolutionToSupabase(issue) {
+  if (!issue) return;
+  const email = (appState.user && appState.user.email) || issue.resolvedBy || 'unknown';
+  const patch = {
+    issue_resolved: true,
+    issue_resolved_by: email,
+    issue_resolved_at: issue.resolvedAt || new Date().toISOString(),
+  };
+  const appendNote = issue.resolveNotes ? ' [resolved: ' + issue.resolveNotes + ']' : '';
+
+  try {
+    if (issue.entrySupabaseId) {
+      await supabaseRest.update('kount_entries', 'id=eq.' + encodeURIComponent(issue.entrySupabaseId),
+        Object.assign({}, patch, appendNote ? { issue_notes: (issue.notes || '') + appendNote } : {}));
+      return;
+    }
+    if (issue.auditSupabaseId && issue.itemName && issue.zone) {
+      const match =
+        'audit_id=eq.' + encodeURIComponent(issue.auditSupabaseId) +
+        '&zone=eq.'    + encodeURIComponent(issue.zone) +
+        '&item_name=eq.' + encodeURIComponent(issue.itemName);
+      await supabaseRest.update('kount_entries', match, patch);
+    }
+  } catch (e) {
+    console.warn('[issue] resolution sync failed:', e);
+  }
 }
 
 function exportIssuesCSV() {
