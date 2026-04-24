@@ -2581,6 +2581,26 @@ html, body {
       <label>UPC</label>
       <input class="form-input" id="barcodeSku" readonly style="color:var(--text-muted)">
     </div>
+    <div class="form-group">
+      <label>Issue (select if applicable)</label>
+      <div class="issue-chips" id="barcodeIssueChips">
+        <span class="issue-chip selected" data-issue="none" onclick="selectBarcodeIssue(this)">None</span>
+        <span class="issue-chip" data-issue="no-sticker" onclick="selectBarcodeIssue(this)">No sticker</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectBarcodeIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="no-upc" onclick="selectBarcodeIssue(this)">No UPC/barcode</span>
+        <span class="issue-chip" data-issue="wrong-location" onclick="selectBarcodeIssue(this)">Wrong location</span>
+        <span class="issue-chip" data-issue="damaged" onclick="selectBarcodeIssue(this)">Damaged</span>
+        <span class="issue-chip" data-issue="misplaced" onclick="selectBarcodeIssue(this)">Misplaced</span>
+        <span class="issue-chip" data-issue="expired" onclick="selectBarcodeIssue(this)">Expired</span>
+        <span class="issue-chip" data-issue="wrong-vintage" onclick="selectBarcodeIssue(this)">Wrong vintage</span>
+        <span class="issue-chip" data-issue="no-label" onclick="selectBarcodeIssue(this)">No label</span>
+        <span class="issue-chip" data-issue="other" onclick="selectBarcodeIssue(this)">Other</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Issue notes (optional)</label>
+      <input class="form-input" id="barcodeIssueNotes" placeholder="e.g. sticker fell off, wrong shelf...">
+    </div>
     <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
       <label style="display:flex;align-items:center;justify-content:space-between">
         <span>Also count in other locations</span>
@@ -2860,7 +2880,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.10';
+const APP_VERSION = '1.11';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4226,6 +4246,13 @@ async function joinNetworkedAudit(rawCode) {
   saveState();
 
   subscribeToAuditRealtime(audit.id);
+
+  // If the audit is already past Count 1, pull the recount list so the
+  // counter who just joined sees the flagged items immediately.
+  if (audit.count_phase && audit.count_phase !== 'count1') {
+    refreshRecountsFromSupabase().catch(function() {});
+  }
+
   showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
   showPage('count');
   return audit;
@@ -4424,9 +4451,10 @@ function subscribeToAuditRealtime(auditId) {
 
   auditChannel = supabaseClient
     .channel('kount-audit-' + auditId)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_entries', filter: 'audit_id=eq.' + auditId }, onAuditEntryRealtime)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_members', filter: 'audit_id=eq.' + auditId }, onAuditMemberRealtime)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_audits',  filter: 'id=eq.' + auditId },       onAuditMetaRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_entries',  filter: 'audit_id=eq.' + auditId }, onAuditEntryRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_members',  filter: 'audit_id=eq.' + auditId }, onAuditMemberRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_audits',   filter: 'id=eq.' + auditId },       onAuditMetaRealtime)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_recounts', filter: 'audit_id=eq.' + auditId }, onAuditRecountRealtime)
     .subscribe((status) => {
       if (status === 'SUBSCRIBED')            { auditChannelState = 'connected'; updateOfflineBannerState(); }
       else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
@@ -4491,11 +4519,71 @@ function onAuditMemberRealtime(evt) {
 function onAuditMetaRealtime(evt) {
   const row = evt.new;
   if (!row || !appState.audit || appState.audit.supabaseId !== row.id) return;
+  const prevPhase = appState.audit.countPhase;
   appState.audit.status = row.status;
   appState.audit.countPhase = row.count_phase;
   appState.audit.count1ClosedAt = row.count1_closed_at;
   appState.audit.count2ClosedAt = row.count2_closed_at;
   saveState();
+
+  // When the manager (or admin on desktop) flips phase to 'review', every
+  // joined counter's phone needs to pull the newly-generated recount list
+  // so the Recount tab shows flagged items.
+  if (prevPhase !== 'review' && row.count_phase === 'review') {
+    refreshRecountsFromSupabase().then(function() {
+      var count = Object.keys(appState.audit.recounts || {}).length;
+      if (count > 0) showToast(count + ' items flagged for recount — tap Recount tab', 'warn');
+      var currentPage = document.querySelector('.page:not(.hide)');
+      if (currentPage && currentPage.id === 'page-count') renderCountPage();
+    }).catch(function() {});
+  }
+}
+
+function onAuditRecountRealtime(evt) {
+  // Any insert/update/delete on kount_recounts for this audit → re-sync
+  // the local set so the Recount page stays aligned live without needing
+  // the counter to navigate away and back.
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  refreshRecountsFromSupabase().catch(function() {});
+}
+
+/* Pull the full kount_recounts set for the active audit and fold it into
+   appState.audit.recounts, preserving the shape the existing phone code
+   (renderRecountPage, submitGuidedEntry recount mode, finalizeCount2)
+   already consumes. */
+async function refreshRecountsFromSupabase() {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  try {
+    const { data, error } = await supabaseRest.query(
+      'kount_recounts',
+      'select=*&audit_id=eq.' + encodeURIComponent(appState.audit.supabaseId) + '&order=created_at.asc'
+    );
+    if (error) { console.warn('[recounts] refresh failed:', error); return; }
+    const remote = {};
+    (data || []).forEach(function(r) {
+      const key = r.item_name;
+      remote[key] = {
+        supabaseId: r.id,
+        // Keep the avtItem key so renderRecountPage / submitGuidedEntry pick the new format
+        avtItem: { itemName: r.item_name },
+        severity: String(r.severity || 'MEDIUM').toUpperCase(),
+        varianceValue: Number(r.variance_value || 0),
+        variance: 0,
+        actual: 0,
+        theo: 0,
+        count1Qty: r.count1_qty != null ? Number(r.count1_qty) : null,
+        recountQty: r.count2_qty != null ? Number(r.count2_qty) : null,
+        status: r.status || 'pending',
+        notes: '',
+      };
+    });
+    appState.audit.recounts = remote;
+    saveState();
+    const currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage && currentPage.id === 'page-recount') renderRecountPage();
+  } catch (e) {
+    console.warn('[recounts] refresh threw:', e);
+  }
 }
 
 /* ---------- Offline banner ---------- */
@@ -6661,6 +6749,14 @@ function openBarcodeEntryModal(code, product) {
   document.getElementById('barcodeDupeWarning').innerHTML = '';
   _barcodeLinkedItem = null;
 
+  // Reset the issue-chip selection + notes field for this scan
+  appState.barcodeIssue = 'none';
+  document.querySelectorAll('#barcodeIssueChips .issue-chip').forEach(function(chip) {
+    chip.classList.toggle('selected', chip.dataset.issue === 'none');
+  });
+  var barcodeIssueNotes = document.getElementById('barcodeIssueNotes');
+  if (barcodeIssueNotes) barcodeIssueNotes.value = '';
+
   if (product) {
     updateBarcodeEntryModal(code, product);
   } else {
@@ -6748,14 +6844,18 @@ function submitBarcodeEntry() {
     linkUPCToItem(sku, linkedItem);
   }
 
+  const issueKind = appState.barcodeIssue || 'none';
+  const issueNotesEl = document.getElementById('barcodeIssueNotes');
+  const issueNotes = (issueNotesEl && issueNotesEl.value.trim()) || null;
+
   addCountEntry(
     fullName,
     category,
     document.getElementById('barcodeQty').value,
     'barcode',
     sku,
-    null,
-    'none',
+    issueNotes,
+    issueKind,
     null,
     null,
     masterId
@@ -6763,7 +6863,7 @@ function submitBarcodeEntry() {
 
   // Extras: other zones chosen via "+ Location"
   applyExtraLocations('barcodeExtraLocations', function(zone, extraQty) {
-    addCountEntryToZone(zone, fullName, category, extraQty, 'barcode', sku, null, 'none', null, null, masterId);
+    addCountEntryToZone(zone, fullName, category, extraQty, 'barcode', sku, issueNotes, issueKind, null, null, masterId);
   });
 
   _barcodeLinkedItem = null;
@@ -7182,6 +7282,13 @@ function selectIssue(element) {
   appState.selectedIssue = element.dataset.issue;
   document.querySelectorAll('#issueChips .issue-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.issue === appState.selectedIssue);
+  });
+}
+
+function selectBarcodeIssue(element) {
+  appState.barcodeIssue = element.dataset.issue;
+  document.querySelectorAll('#barcodeIssueChips .issue-chip').forEach(chip => {
+    chip.classList.toggle('selected', chip.dataset.issue === appState.barcodeIssue);
   });
 }
 
