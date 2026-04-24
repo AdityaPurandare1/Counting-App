@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -2936,7 +2936,20 @@ const supabaseRest = {
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
       return { data: await resp.json(), error: null };
     } catch (e) { return { data: null, error: e }; }
-  }
+  },
+  async deleteRows(table, match) {
+    try {
+      const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
+        method: 'DELETE',
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        },
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+      return { data: null, error: null };
+    } catch (e) { return { data: null, error: e }; }
+  },
 };
 
 let supabaseItems = [];
@@ -4203,6 +4216,83 @@ async function joinNetworkedAudit(rawCode) {
   showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
   showPage('count');
   return audit;
+}
+
+/* Push the full recount list to kount_recounts (v1.8). Called after
+   closeCount1 generates appState.audit.recounts. Delete-then-insert so a
+   re-close (unusual but possible) overwrites cleanly. Fire-and-forget. */
+async function syncRecountsToSupabase() {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  const auditId = appState.audit.supabaseId;
+  try {
+    // Clear any prior recounts so the (audit_id, item_name) unique index can't collide
+    await supabaseRest.deleteRows('kount_recounts', 'audit_id=eq.' + encodeURIComponent(auditId));
+
+    const recounts = appState.audit.recounts || {};
+    const keys = Object.keys(recounts);
+    if (keys.length === 0) return;
+
+    const payloads = keys.map(function(k) {
+      const rec = recounts[k];
+      return {
+        audit_id: auditId,
+        item_id: null,                                // AVT flow doesn't have a purchase_items id today
+        item_name: (rec.avtItem && rec.avtItem.itemName) || k,
+        severity: String(rec.severity || 'MEDIUM').toUpperCase(),
+        variance_value: Number(rec.varianceValue || 0),
+        count1_qty: rec.count1Qty != null ? Number(rec.count1Qty) : null,
+        count2_qty: rec.recountQty != null ? Number(rec.recountQty) : null,
+        status: rec.status || 'pending',
+      };
+    });
+
+    // Bulk insert; PostgREST accepts an array
+    const { data, error } = await supabaseRest.insert('kount_recounts', payloads);
+    if (error) { console.warn('[recounts] bulk insert failed:', error); return; }
+
+    // Stash the returned ids back into local state so the per-row update path
+    // can target by id without re-matching on name.
+    if (Array.isArray(data)) {
+      data.forEach(function(row) {
+        const key = Object.keys(recounts).find(function(k) {
+          const name = (recounts[k].avtItem && recounts[k].avtItem.itemName) || k;
+          return name === row.item_name;
+        });
+        if (key) recounts[key].supabaseId = row.id;
+      });
+      saveState();
+    }
+  } catch (e) {
+    console.warn('[recounts] sync failed:', e);
+  }
+}
+
+/* Update a single recount row after a counter submits its count 2 quantity. */
+async function syncRecountUpdateToSupabase(key) {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  const rec = appState.audit.recounts && appState.audit.recounts[key];
+  if (!rec) return;
+
+  const patch = {
+    count2_qty: rec.recountQty != null ? Number(rec.recountQty) : null,
+    status: rec.status || 'pending',
+    resolved_at: rec.status === 'done' ? new Date().toISOString() : null,
+  };
+
+  try {
+    let match;
+    if (rec.supabaseId) {
+      match = 'id=eq.' + encodeURIComponent(rec.supabaseId);
+    } else {
+      const name = (rec.avtItem && rec.avtItem.itemName) || key;
+      match = 'audit_id=eq.' + encodeURIComponent(appState.audit.supabaseId) +
+              '&item_name=eq.' + encodeURIComponent(name);
+    }
+    const { error } = await supabaseRest.update('kount_recounts', match, patch);
+    if (error) console.warn('[recounts] update failed:', error);
+  } catch (e) {
+    console.warn('[recounts] update threw:', e);
+  }
 }
 
 /* Patch kount_audits for the currently-active networked audit. No-op on solo
@@ -5682,8 +5772,13 @@ function submitGuidedEntry() {
 
     logActivity('Recounted ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty);
     saveState();
+
+    // Push this recount row's update to kount_recounts so the desktop sees
+    // the count2 value + resolved status appear live (v1.8).
+    syncRecountUpdateToSupabase(recountKey).catch(function() {});
+
     closeGuidedEntry();
-    
+
     // Check if all recounts are now done — auto-close audit
     var allRecounts = Object.values(appState.audit.recounts);
     var stillPending = allRecounts.filter(function(r) { return r.status === 'pending'; });
@@ -7679,6 +7774,9 @@ function closeCount1() {
     }
 
     saveState();
+    // Push the recount list to Supabase so the desktop Recount screen can
+    // render it live. Fire-and-forget; solo audits no-op inside the helper.
+    syncRecountsToSupabase().catch(function() {});
     showPage('recount');
   });
 }

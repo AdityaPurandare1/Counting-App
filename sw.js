@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hwood-count-v1.7';
+const CACHE_NAME = 'hwood-count-v1.8';
 
 self.addEventListener('install', event => {
   self.skipWaiting();
