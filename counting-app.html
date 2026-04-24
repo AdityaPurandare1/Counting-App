@@ -2881,7 +2881,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.13';
+const APP_VERSION = '1.14';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3003,6 +3003,77 @@ async function loadSupabaseItems() {
     return true;
   } catch (e) { console.error('Supabase load failed:', e); return false; }
 }
+
+/* ================================================================
+   Carried-items set (v1.14) — the subset of purchase_items.id that
+   the admin has flagged as actively stocked, via the desktop /catalog
+   screen. Search / scan suggestions narrow to this set when it's
+   populated; an empty set means 'no curation yet' and the phone
+   searches the full catalog as before.
+   ================================================================ */
+let carriedSet = new Set();
+
+async function loadCarriedItemsFromSupabase() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  try {
+    const { data, error } = await supabaseRest.query(
+      'kount_carried_items',
+      'select=purchase_item_id&limit=5000'
+    );
+    if (error) { console.warn('[carried] load failed:', error); return false; }
+    carriedSet = new Set((data || []).map(function(r) { return String(r.purchase_item_id); }));
+    console.log('[carried] loaded ' + carriedSet.size + ' items from Supabase');
+    return true;
+  } catch (e) {
+    console.warn('[carried] load threw:', e);
+    return false;
+  }
+}
+
+/* Shared search helper used by every scan/type path. Always prefers the
+   carried subset when it's populated; falls back to the full itemMaster
+   if the carried subset yields zero matches for the query. This is how
+   'Campari' goes from 10 near-dupe rows down to the 1L + 750 ml that
+   the admin flagged. */
+function searchItemMaster(query, limit) {
+  const q = String(query || '').toLowerCase().trim();
+  if (q.length < 2) return [];
+  const words = q.split(/\s+/);
+  function match(item) {
+    const hay = (
+      (item.name || '') + ' ' +
+      (item.brand || '') + ' ' +
+      (item.sku || '') + ' ' +
+      (item.upc || '') + ' ' +
+      (item.subcategory || '')
+    ).toLowerCase();
+    for (let i = 0; i < words.length; i++) if (!hay.includes(words[i])) return false;
+    return true;
+  }
+
+  const results = [];
+  const useCarried = carriedSet.size > 0;
+
+  if (useCarried) {
+    for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
+      const item = itemMaster[i];
+      if (carriedSet.has(String(item.id))) {
+        if (match(item)) results.push(item);
+      }
+    }
+    if (results.length > 0) return results;
+  }
+
+  // Fallback — only reached when carried set is empty OR no carried item
+  // matched the query. Matches the old pre-v1.14 behaviour so counters
+  // can still find items that simply haven't been marked carried yet.
+  for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
+    const item = itemMaster[i];
+    if (match(item)) results.push(item);
+  }
+  return results;
+}
+
 
 /* ================================================================
    AVT from Supabase (v1.5)
@@ -3416,12 +3487,9 @@ function onBarcodeNameSearch(value) {
   var container = document.getElementById('barcodeNameSuggestions');
   if (q.length < 2) { container.innerHTML = ''; return; }
 
-  // Fuzzy search: split query into words, match items containing all words
-  var words = q.split(/\s+/);
-  var matches = itemMaster.filter(function(item) {
-    var hay = (item.name + ' ' + item.brand + ' ' + item.subcategory).toLowerCase();
-    return words.every(function(w) { return hay.includes(w); });
-  }).slice(0, 15);
+  // v1.14: searchItemMaster narrows to kount_carried_items first and only
+  // falls back to the full catalog if nothing matches there.
+  var matches = searchItemMaster(value, 15);
 
   if (matches.length === 0) {
     container.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-dim)">No matches — item will be added as new</div>';
@@ -5770,15 +5838,8 @@ function doGuidedSearch(value) {
   const countedIds = getCountedItemIds();
   const isLocked = appState.audit?.status === 'submitted';
 
-  // Search item master — limit to 30 results for performance
-  const matches = [];
-  for (let i = 0; i < itemMaster.length && matches.length < 30; i++) {
-    const item = itemMaster[i];
-    const searchable = (item.name + ' ' + item.brand + ' ' + item.sku + ' ' + item.upc).toLowerCase();
-    if (searchable.includes(query)) {
-      matches.push(item);
-    }
-  }
+  // v1.14: shared helper narrows to carried items first.
+  const matches = searchItemMaster(value, 30);
 
   if (matches.length === 0) {
     resultsEl.innerHTML = '<div style="padding:10px;font-size:13px;color:var(--text-dim);text-align:center">No items matching "' + esc(value) + '"</div>';
@@ -7283,11 +7344,8 @@ function onManualSearch(value) {
     return;
   }
 
-  const matches = itemMaster.filter(item =>
-    item.name.toLowerCase().includes(query) ||
-    item.brand.toLowerCase().includes(query) ||
-    item.sku.toLowerCase().includes(query)
-  ).slice(0, 6);
+  // v1.14: narrow to carried items first; fall back to full catalog if none match.
+  const matches = searchItemMaster(value, 6);
 
   document.getElementById('manualSuggestions').innerHTML = matches.map(item =>
     '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectMasterItem(\'' + item.id + '\')">' +
@@ -9608,6 +9666,7 @@ loadItemMaster();
 loadAvtFromSupabase().catch(() => {});
 loadAppUsersFromSupabase().catch(() => {});
 loadHistoricAuditsFromSupabase().catch(() => {});
+loadCarriedItemsFromSupabase().catch(() => {});
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
