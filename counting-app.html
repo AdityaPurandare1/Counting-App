@@ -598,31 +598,33 @@ html, body {
 }
 
 /* ---------- COUNT ITEM ROW ---------- */
+/* Count-list row — prototype's lighter card: 1px border, no drop shadow,
+   14px radius, softer status indication (no gradient wash). */
 .c-item {
   background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
   margin-bottom: 10px;
   display: flex;
   align-items: center;
   gap: 14px;
-  box-shadow: var(--shadow-sm);
-  transition: all 0.15s;
+  transition: transform 0.12s ease, background 0.12s ease;
 }
 
 .c-item:active {
   transform: scale(0.99);
+  background: var(--surface2);
 }
 
 .c-item.counted {
-  border-left: 4px solid var(--success);
-  background: linear-gradient(90deg, var(--success-dim) 0%, var(--surface) 24%);
+  background: var(--teal-100, #D7EAE6);
+  border-color: var(--teal-300, #3F7D73);
 }
 
 .c-item.flagged {
-  border-left: 4px solid var(--danger);
-  background: linear-gradient(90deg, var(--danger-dim) 0%, var(--surface) 24%);
+  background: var(--raspberry-100);
+  border-color: var(--raspberry-300);
 }
 
 .c-thumb {
@@ -758,24 +760,24 @@ html, body {
   font-weight: 500;
 }
 
+/* Venue picker card — rounder, no drop shadow, gentler padding. */
 .venue-card {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
+  border-radius: 16px;
+  padding: 16px;
   margin-bottom: 10px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: transform 0.12s ease, background 0.12s ease;
   display: flex;
   align-items: center;
   gap: 14px;
-  box-shadow: var(--shadow-sm);
   min-height: 72px;
 }
 
 .venue-card:active {
   background: var(--surface2);
-  transform: scale(0.98);
+  transform: scale(0.99);
 }
 
 .venue-card .v-body {
@@ -1268,25 +1270,25 @@ html, body {
 }
 
 /* ---------- SUMMARY CARD ---------- */
+/* Summary / stats card — 1px border, no drop shadow, 16px radius. */
 .summary-card {
   background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  border-radius: 16px;
   padding: 18px;
   margin-bottom: 14px;
-  box-shadow: var(--shadow-sm);
 }
 
 .stat-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 10px 0;
-  min-height: 42px;
+  padding: 9px 0;
+  min-height: 40px;
 }
 
 .stat-row + .stat-row {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
 }
 
 .stat-label {
@@ -1307,13 +1309,15 @@ html, body {
 .stat-value.success { color: var(--success); }
 .stat-value.warning { color: var(--warning); }
 
+/* Section label ('eyebrow' in the prototype) — smaller, wider tracking,
+   muted tone so the card contents below carry the visual weight. */
 .section-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--fg-muted);
   text-transform: uppercase;
-  letter-spacing: 0.8px;
-  margin: 20px 0 10px;
+  letter-spacing: 0.12em;
+  margin: 22px 0 8px;
 }
 
 /* ---------- QUICK COUNT GRID ---------- */
@@ -2772,7 +2776,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.17';
+const APP_VERSION = '1.18';
 
 /* ================================================================
    SUPABASE INTEGRATION
