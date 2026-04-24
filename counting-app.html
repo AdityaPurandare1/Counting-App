@@ -2761,7 +2761,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.15';
+const APP_VERSION = '1.16';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -2908,6 +2908,24 @@ async function loadCarriedItemsFromSupabase() {
     console.warn('[carried] load threw:', e);
     return false;
   }
+}
+
+/* Realtime subscription so admin toggles on the desktop Catalog screen land
+   on every connected phone without a reload (v1.16). kount_carried_items is
+   small (typically a few hundred rows) so a full re-fetch on any change is
+   cheaper than maintaining a diff; we just swap carriedSet. */
+let carriedItemsChannel = null;
+function startCarriedItemsRealtime() {
+  if (!supabaseClient) return;
+  if (carriedItemsChannel) return;
+  carriedItemsChannel = supabaseClient
+    .channel('kount-carried-items-live')
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: 'kount_carried_items' },
+      function() { loadCarriedItemsFromSupabase().catch(function() {}); })
+    .subscribe(function(status) {
+      if (status === 'SUBSCRIBED') console.log('[carried realtime] subscribed');
+    });
 }
 
 /* Shared search helper used by every scan/type path. Always prefers the
@@ -9428,6 +9446,7 @@ loadAvtFromSupabase().catch(() => {});
 loadAppUsersFromSupabase().catch(() => {});
 loadHistoricAuditsFromSupabase().catch(() => {});
 loadCarriedItemsFromSupabase().catch(() => {});
+startCarriedItemsRealtime();
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
