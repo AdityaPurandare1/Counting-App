@@ -2005,126 +2005,6 @@ html, body {
   }
 }
 
-/* ================================================================
-   DESKTOP SHELL (v1.4)
-   Phone layout is the default. The sidebar and grid rules only
-   activate when BOTH (a) viewport >= 1024px AND (b) body has the
-   `desktop-enabled` class, which JS toggles only for corporate +
-   manager roles. Counters on a desktop browser still see the
-   mobile-optimised layout, as per the role decision from v1.2.
-   ================================================================ */
-#desktopSidebar { display: none; }
-
-@media (min-width: 1024px) {
-  body.desktop-enabled {
-    display: grid;
-    grid-template-columns: 300px 1fr;
-    grid-template-rows: 100vh;
-    overflow: hidden;
-  }
-  body.desktop-enabled #app {
-    max-width: none;
-    margin: 0;
-    border: none;
-    height: 100vh;
-    overflow-y: auto;
-  }
-  body.desktop-enabled #app > * {
-    max-width: 1100px;
-    margin: 0 auto;
-  }
-  body.desktop-enabled #app > .page {
-    padding: 24px 40px 80px;
-  }
-  body.desktop-enabled .bottom-nav { display: none; }
-
-  body.desktop-enabled #desktopSidebar {
-    display: flex;
-    flex-direction: column;
-    gap: 18px;
-    padding: 20px 14px;
-    background: var(--surface);
-    border-right: 1px solid var(--border);
-    overflow-y: auto;
-    grid-column: 1;
-  }
-  .sidebar-brand {
-    font-family: var(--mono);
-    font-weight: 700;
-    letter-spacing: 3px;
-    color: var(--accent);
-    font-size: 16px;
-  }
-  .sidebar-user {
-    padding: 4px 6px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  .sidebar-user .name { font-size: 13px; font-weight: 600; margin-top: 6px; color: var(--text); }
-  .sidebar-user .role { font-size: 11px; color: var(--text-muted); text-transform: capitalize; }
-  .sidebar-section-title {
-    font-size: 10px;
-    color: var(--text-muted);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    margin-bottom: 6px;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-  .sidebar-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    color: var(--text);
-    font-size: 13px;
-    transition: background 0.12s;
-  }
-  .sidebar-item:hover  { background: var(--surface2); }
-  .sidebar-item.active { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
-  .sidebar-audit-card {
-    padding: 10px 12px;
-    background: var(--surface2);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    margin-bottom: 6px;
-    font-size: 12px;
-    transition: border-color 0.12s;
-  }
-  .sidebar-audit-card:hover  { border-color: var(--accent); }
-  .sidebar-audit-card.current { border-color: var(--accent); background: var(--accent-dim); }
-  .sidebar-audit-code {
-    font-family: var(--mono);
-    font-weight: 700;
-    letter-spacing: 2px;
-    color: var(--accent);
-    font-size: 14px;
-  }
-  .sidebar-venue-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 8px 12px;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 13px;
-    color: var(--text);
-  }
-  .sidebar-venue-row:hover { background: var(--surface2); }
-  .sidebar-venue-row.current { background: var(--accent-dim); color: var(--accent); font-weight: 600; }
-  .sidebar-venue-row .z-count { color: var(--text-dim); font-size: 11px; }
-
-  /* Header tweaks so it doesn't look cramped when the page is wide */
-  body.desktop-enabled .header { padding: 14px 40px; }
-
-  /* Variance and summary pages work better with a wider readable column */
-  body.desktop-enabled .var-row,
-  body.desktop-enabled .c-item { max-width: 960px; }
-}
 </style>
 
 </head>
@@ -2881,7 +2761,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.14';
+const APP_VERSION = '1.15';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4789,118 +4669,6 @@ function copyAuditCode() {
 }
 
 
-/* ================================================================
-   DESKTOP SHELL (v1.4)
-   Pure layout — no new capabilities. The CSS media query at
-   min-width 1024px only activates when body has .desktop-enabled,
-   which applyDesktopLayout() toggles based on role (corporate +
-   manager). Counters on a desktop browser always see the mobile
-   layout, matching the role decision from v1.2.
-
-   Sidebar shows: user identity, top-level navigation, a live list
-   of active audits the user can access, and the venue list.
-   ================================================================ */
-
-function applyDesktopLayout() {
-  const role = appState.user && appState.user.role;
-  const enable = (role === 'corporate' || role === 'manager');
-  document.body.classList.toggle('desktop-enabled', enable);
-  if (enable) renderDesktopSidebar();
-}
-
-function renderDesktopSidebar() {
-  if (!appState.user) return;
-  const nameEl = document.getElementById('sidebarUserName');
-  const roleEl = document.getElementById('sidebarUserRole');
-  if (nameEl) nameEl.textContent = appState.user.name || appState.user.email;
-  if (roleEl) roleEl.textContent = appState.user.role;
-  highlightActiveSidebarNav();
-  renderSidebarVenues();
-  renderSidebarActiveAudits();
-}
-
-function highlightActiveSidebarNav() {
-  const current = document.querySelector('.page:not(.hide)');
-  const id = current ? (current.id || '').replace(/^page-/, '') : '';
-  document.querySelectorAll('#desktopSidebar .sidebar-item[data-nav]').forEach(el => {
-    el.classList.toggle('active', el.getAttribute('data-nav') === id);
-  });
-}
-
-function renderSidebarVenues() {
-  const container = document.getElementById('sidebarVenues');
-  if (!container) return;
-  const venues = getVisibleVenues();
-  const currentId = appState.currentVenue ? appState.currentVenue.id : null;
-  container.innerHTML = venues.map(v =>
-    '<div class="sidebar-venue-row' + (v.id === currentId ? ' current' : '') + '" ' +
-         'onclick="selectVenue(\'' + v.id + '\')">' +
-      '<span>' + esc(v.name) + '</span>' +
-      '<span class="z-count">' + (v.zones || []).length + ' zones</span>' +
-    '</div>'
-  ).join('');
-}
-
-async function renderSidebarActiveAudits() {
-  const container = document.getElementById('sidebarActiveAudits');
-  const countEl = document.getElementById('sidebarAuditsCount');
-  if (!container) return;
-
-  if (!navigator.onLine) {
-    container.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:6px 12px">Offline</div>';
-    if (countEl) countEl.textContent = '—';
-    return;
-  }
-
-  const { data, error } = await supabaseRest.query(
-    'kount_audits',
-    'status=eq.active&select=*&order=started_at.desc&limit=50'
-  );
-  if (error || !data) {
-    container.innerHTML = '<div style="font-size:11px;color:var(--text-dim);padding:6px 12px">Could not load</div>';
-    if (countEl) countEl.textContent = '?';
-    return;
-  }
-
-  const role = appState.user && appState.user.role;
-  const visibleIds = new Set(getVisibleVenues().map(v => v.id));
-  const filtered = (role === 'corporate') ? data : data.filter(a => visibleIds.has(a.venue_id));
-  const currentJoin = appState.audit && appState.audit.joinCode;
-
-  if (countEl) countEl.textContent = String(filtered.length);
-  container.innerHTML = filtered.length === 0
-    ? '<div style="font-size:11px;color:var(--text-dim);padding:6px 12px">No active audits</div>'
-    : filtered.map(a => {
-        const isCurrent = a.join_code === currentJoin;
-        return '<div class="sidebar-audit-card' + (isCurrent ? ' current' : '') + '" ' +
-                    'onclick="joinNetworkedAuditFromSidebar(\'' + esc(a.join_code) + '\')">' +
-                 '<div style="display:flex;justify-content:space-between;align-items:center">' +
-                   '<span class="sidebar-audit-code">' + esc(a.join_code) + '</span>' +
-                   '<span style="font-size:10px;color:var(--text-muted)">' + esc(a.count_phase) + '</span>' +
-                 '</div>' +
-                 '<div style="color:var(--text-muted);margin-top:3px">' + esc(a.venue_name) + '</div>' +
-                 '<div style="color:var(--text-dim);font-size:10px;margin-top:2px">by ' + esc(a.started_by_name || a.started_by_email) + '</div>' +
-               '</div>';
-      }).join('');
-}
-
-async function joinNetworkedAuditFromSidebar(code) {
-  // If this is the already-joined audit, just route there
-  if (appState.audit && appState.audit.joinCode === code) {
-    showPage('count');
-    return;
-  }
-  await joinNetworkedAudit(code);
-}
-
-// Periodic refresh of the active-audits sidebar (30s cadence). Realtime-
-// driven refresh on every audits table change is a v1.5 improvement.
-setInterval(() => {
-  if (document.body.classList.contains('desktop-enabled') && navigator.onLine) {
-    renderSidebarActiveAudits();
-  }
-}, 30000);
-
 
 /* ================================================================
    Legacy external-API lookup cache (unchanged behavior).
@@ -5217,7 +4985,6 @@ function handleLogin() {
   loadApprovedUpcMappings(true);
   loadPendingApprovalsCount();
   startUpcRealtime();
-  applyDesktopLayout();
 
   showPage('venues');
 }
@@ -5266,11 +5033,6 @@ function showPage(page) {
   };
 
   if (renderMap[page]) renderMap[page]();
-
-  // Keep the desktop sidebar's active-nav highlight in sync
-  if (document.body.classList.contains('desktop-enabled')) {
-    highlightActiveSidebarNav();
-  }
 }
 
 /* ================================================================
@@ -5321,7 +5083,6 @@ function handleLogout() {
     document.getElementById('headerVenue').textContent = 'Select venue';
     document.getElementById('headerAuditBadge').style.display = 'none';
     if (timerInterval) clearInterval(timerInterval);
-    document.body.classList.remove('desktop-enabled');
     saveState();
     showPage('login');
   });
@@ -9673,7 +9434,6 @@ updateAPIKeyIndicator();
 initUpcMappingsSync();
 
 if (appState.user) {
-  applyDesktopLayout();
   if (appState.currentVenue) {
     document.getElementById('headerVenue').textContent = appState.currentVenue.name;
     showPage('count');
@@ -9697,41 +9457,5 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 </script>
-
-<!-- ========== DESKTOP SIDEBAR (v1.4) — hidden by default, shown only when body has .desktop-enabled ========== -->
-<aside id="desktopSidebar">
-  <div class="sidebar-user">
-    <div class="sidebar-brand">kΩunt</div>
-    <div class="name" id="sidebarUserName"></div>
-    <div class="role" id="sidebarUserRole"></div>
-  </div>
-
-  <div>
-    <div class="sidebar-section-title">Navigate</div>
-    <div class="sidebar-item" data-nav="venues"   onclick="showPage('venues')">Venues</div>
-    <div class="sidebar-item" data-nav="count"    onclick="showPage('count')">Current count</div>
-    <div class="sidebar-item" data-nav="variance" onclick="showPage('variance')">Variance</div>
-    <div class="sidebar-item" data-nav="view"     onclick="showPage('view')">Search</div>
-    <div class="sidebar-item" data-nav="summary"  onclick="showPage('summary')">Summary</div>
-    <div class="sidebar-item" data-nav="issues"   onclick="showPage('issues')">Issues</div>
-  </div>
-
-  <div>
-    <div class="sidebar-section-title">
-      <span>Active audits</span>
-      <span id="sidebarAuditsCount" style="font-family:var(--mono);color:var(--text-muted);font-size:10px">0</span>
-    </div>
-    <div id="sidebarActiveAudits"></div>
-  </div>
-
-  <div>
-    <div class="sidebar-section-title">Venues</div>
-    <div id="sidebarVenues"></div>
-  </div>
-
-  <div style="margin-top:auto;padding-top:12px;border-top:1px solid var(--border)">
-    <div class="sidebar-item" onclick="handleLogout()" style="color:var(--danger)">Sign out</div>
-  </div>
-</aside>
 </body>
 </html>
