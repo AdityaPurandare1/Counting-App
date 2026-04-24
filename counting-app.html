@@ -197,41 +197,28 @@ html, body {
   flex: 1;
 }
 
+/* Prototype phone header is title-only — no logo, just the venue name
+   reading as a bold headline. We hide the logo slot without touching
+   markup and repaint the venue badge as a headline. */
 .logo {
-  font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--primary);
-  letter-spacing: 2.5px;
-  text-transform: uppercase;
-  flex-shrink: 0;
-}
-
-.logo::before {
-  content: '';
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  background: var(--accent);
-  border-radius: 50%;
-  margin-right: 8px;
-  vertical-align: middle;
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  display: none;
 }
 
 .venue-badge {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--primary);
-  background: var(--surface);
-  padding: 7px 14px;
-  border-radius: 24px;
-  border: 1.5px solid var(--border);
-  max-width: 180px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--fg-primary);
+  background: transparent;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  box-shadow: var(--shadow-sm);
+  line-height: 1.15;
 }
 
 .header-right {
@@ -243,13 +230,14 @@ html, body {
 
 .count-badge {
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 11px;
   font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-soft);
-  padding: 7px 12px;
-  border-radius: 24px;
-  border: 1.5px solid var(--accent);
+  color: var(--fg-secondary);
+  background: var(--off-200);
+  padding: 5px 10px;
+  border-radius: 9999px;
+  border: none;
+  letter-spacing: 0.04em;
 }
 
 .icon-btn {
@@ -2776,7 +2764,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.18';
+const APP_VERSION = '1.19';
 
 /* ================================================================
    SUPABASE INTEGRATION
