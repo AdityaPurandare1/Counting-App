@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3185,9 +3185,22 @@ async function linkUPCToItem(barcode, item) {
   const { data, error } = await supabaseRest.insert('upc_mappings', payload);
 
   if (error) {
-    enqueueUpcWrite(payload);
-    showToast('Offline — UPC queued, will sync when online', 'warn');
-    logActivity('UPC ' + barcode + ' queued (offline) for ' + item.name);
+    // Distinguish a real network outage from a server-side rejection (RLS,
+    // unique violation, missing column). True offline -> queue for retry;
+    // server error -> surface the specific message so the admin can fix it.
+    const msg = (error && error.message) ? String(error.message) : 'unknown error';
+    console.warn('[upc] insert failed:', msg, payload);
+    const isNetwork = !navigator.onLine || /Failed to fetch|NetworkError|ERR_INTERNET/i.test(msg);
+    if (isNetwork) {
+      enqueueUpcWrite(payload);
+      showToast('Offline — UPC queued, will sync when online', 'warn');
+      logActivity('UPC ' + barcode + ' queued (offline) for ' + item.name);
+    } else {
+      // Short, user-readable prefix + the server's message so we know whether
+      // it's RLS, a unique key, a missing column, etc.
+      showToast('UPC save failed: ' + msg.replace(/^HTTP \d+:\s*/, '').slice(0, 140), 'error');
+      logActivity('UPC ' + barcode + ' save failed for ' + item.name + ': ' + msg);
+    }
     return;
   }
 
