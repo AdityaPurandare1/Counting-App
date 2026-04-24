@@ -2249,6 +2249,7 @@ html, body {
         <button class="submit-btn" onclick="closeCount1()" style="font-size:13px;padding:10px">Close Count 1 → Generate recount list</button>
       </div>
       <div id="recountBanner" class="recount-banner hide" onclick="showPage('recount')"></div>
+      <div id="lastUpcErrorBanner"></div>
       <div id="countProgress" class="progress-wrap"></div>
       <div class="zone-tabs" id="zoneTabs"></div>
       <div class="mode-toggle">
@@ -2880,7 +2881,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.12';
+const APP_VERSION = '1.13';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3211,16 +3212,28 @@ async function linkUPCToItem(barcode, item) {
     // unique violation, missing column). True offline -> queue for retry;
     // server error -> surface the specific message so the admin can fix it.
     const msg = (error && error.message) ? String(error.message) : 'unknown error';
-    console.warn('[upc] insert failed:', msg, payload);
+    console.error('[upc] insert failed:', msg, '\npayload was:', payload);
     const isNetwork = !navigator.onLine || /Failed to fetch|NetworkError|ERR_INTERNET/i.test(msg);
     if (isNetwork) {
       enqueueUpcWrite(payload);
       showToast('Offline — UPC queued, will sync when online', 'warn');
       logActivity('UPC ' + barcode + ' queued (offline) for ' + item.name);
     } else {
-      // Short, user-readable prefix + the server's message so we know whether
-      // it's RLS, a unique key, a missing column, etc.
-      showToast('UPC save failed: ' + msg.replace(/^HTTP \d+:\s*/, '').slice(0, 140), 'error');
+      // Persist the last failure so the user can look at it even after the
+      // toast fades. Surfaced as a banner on the count page (v1.13).
+      appState.lastUpcError = {
+        at: new Date().toISOString(),
+        barcode: barcode,
+        item: item.name,
+        role: (appState.user && appState.user.role) || 'unknown',
+        isUpdate: !!policy.isUpdate,
+        status: payload.status,
+        message: msg,
+      };
+      saveState();
+      try { renderLastUpcErrorBanner(); } catch (e) {}
+      // Longer-lived toast with the raw server text so nothing important is lost
+      showToast('UPC save failed: ' + msg.replace(/^HTTP \d+:\s*/, '').slice(0, 180), 'error');
       logActivity('UPC ' + barcode + ' save failed for ' + item.name + ': ' + msg);
     }
     return;
@@ -5274,6 +5287,7 @@ function renderCountPage() {
     showPage('venues');
     return;
   }
+  try { renderLastUpcErrorBanner(); } catch (e) {}
 
   const hasActiveAudit = appState.audit &&
     appState.audit.venueId === appState.currentVenue.id &&
@@ -5429,11 +5443,27 @@ function renderPreAuditScreen() {
   } else {
     document.getElementById('startAuditBtn').textContent = 'Start audit';
   }
+
+  // Hide the Start button for counters — they may only join existing audits.
+  // Managers + corporate see both buttons; counters see only Join.
+  const role = appState.user && appState.user.role;
+  const canStart = role === 'corporate' || role === 'manager';
+  const startBtn = document.getElementById('startAuditBtn');
+  if (startBtn) startBtn.style.display = canStart ? '' : 'none';
 }
 
 async function startNewAudit() {
   const venue = appState.currentVenue;
   if (!venue) return;
+
+  // Role gate: only corporate + manager can start audits. Counters must join
+  // an existing one via the code. Protects against a direct DOM click or
+  // a programmatic call that bypassed the hidden-button UI path.
+  const callerRole = appState.user && appState.user.role;
+  if (callerRole !== 'corporate' && callerRole !== 'manager') {
+    showToast('Only managers and admins can start audits. Tap Join audit to enter a code.', 'error');
+    return;
+  }
 
   // If there was a previous active audit for this venue, confirm first
   if (appState.audit && appState.audit.venueId === venue.id && appState.audit.status === 'active') {
@@ -7292,6 +7322,53 @@ function selectBarcodeIssue(element) {
   document.querySelectorAll('#barcodeIssueChips .issue-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.issue === appState.barcodeIssue);
   });
+}
+
+/* Render / dismiss the 'last UPC save failure' banner on the count page so
+   the error text persists after the toast has faded. Admins can tap it to
+   copy the message + payload hint to the clipboard for diagnosis. */
+function renderLastUpcErrorBanner() {
+  const host = document.getElementById('lastUpcErrorBanner');
+  if (!host) return;
+  const err = appState.lastUpcError;
+  if (!err) { host.innerHTML = ''; return; }
+  const msg = String(err.message || '').slice(0, 280);
+  host.innerHTML =
+    '<div style="margin:8px 0;padding:10px 12px;background:var(--danger-dim);border:1px solid var(--danger);border-radius:var(--radius-sm);font-size:12px;color:var(--text)">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px">' +
+        '<strong style="color:var(--danger)">UPC save failed</strong>' +
+        '<div style="display:flex;gap:6px">' +
+          '<button onclick="copyLastUpcError()" style="background:none;border:1px solid var(--border);color:var(--text);font-size:10px;padding:3px 8px;border-radius:4px;cursor:pointer;font-family:var(--font)">Copy</button>' +
+          '<button onclick="dismissLastUpcError()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:0 4px">✕</button>' +
+        '</div>' +
+      '</div>' +
+      '<div style="font-family:var(--mono);font-size:11px;margin-top:6px;word-break:break-word;white-space:pre-wrap">' + esc(msg) + '</div>' +
+      '<div style="font-size:10px;color:var(--text-muted);margin-top:6px">' +
+        esc(err.barcode) + ' → ' + esc(err.item) + ' · role ' + esc(err.role) + ' · status ' + esc(err.status) +
+        (err.isUpdate ? ' · UPDATE path' : ' · ADD path') +
+      '</div>' +
+    '</div>';
+}
+
+function dismissLastUpcError() {
+  appState.lastUpcError = null;
+  saveState();
+  renderLastUpcErrorBanner();
+}
+
+function copyLastUpcError() {
+  const err = appState.lastUpcError;
+  if (!err) return;
+  const text =
+    'UPC save failed at ' + err.at + '\n' +
+    'role=' + err.role + ' path=' + (err.isUpdate ? 'update' : 'add') + ' status=' + err.status + '\n' +
+    'barcode=' + err.barcode + ' item=' + err.item + '\n' +
+    'message=' + err.message;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function() { showToast('Copied error to clipboard', 'success'); });
+  } else {
+    showToast(text, 'info');
+  }
 }
 
 function submitManualEntry() {
