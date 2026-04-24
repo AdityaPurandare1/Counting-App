@@ -2860,7 +2860,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.6';
+const APP_VERSION = '1.7';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4205,6 +4205,24 @@ async function joinNetworkedAudit(rawCode) {
   return audit;
 }
 
+/* Patch kount_audits for the currently-active networked audit. No-op on solo
+   audits (when appState.audit.supabaseId is null). Fire-and-forget — errors
+   are logged so the local state change still proceeds even if the network
+   write fails. */
+async function syncAuditMetaToSupabase(patch) {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  try {
+    const { error } = await supabaseRest.update(
+      'kount_audits',
+      'id=eq.' + encodeURIComponent(appState.audit.supabaseId),
+      patch
+    );
+    if (error) console.warn('[audit] sync meta failed:', error);
+  } catch (e) {
+    console.warn('[audit] sync meta threw:', e);
+  }
+}
+
 async function fetchAuditEntries(auditId) {
   const { data, error } = await supabaseRest.query(
     'kount_entries',
@@ -5293,31 +5311,30 @@ function endAuditEarly() {
   if (!appState.audit) return;
 
   const itemCount = getAllCountedItems().length;
+  const networked = !!appState.audit.supabaseId;
+  const completedAt = new Date().toISOString();
+
+  const doCancel = (note) => {
+    // Push the cancellation to Supabase FIRST (before we lose supabaseId)
+    // so the desktop admin sees the status flip live.
+    if (networked) {
+      syncAuditMetaToSupabase({ status: 'cancelled', completed_at: completedAt }).catch(() => {});
+    }
+    logActivity(note);
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    document.getElementById('auditTimer').classList.add('hide');
+    leaveNetworkedAudit();
+    appState.audit = null;
+    saveState();
+    showToast('Audit cancelled', 'warn');
+    renderCountPage();
+  };
 
   if (itemCount === 0) {
-    showConfirm('Cancel this audit? No items have been counted.', () => {
-      appState.audit.status = 'cancelled';
-      appState.audit.completedAt = new Date().toISOString();
-      logActivity('Audit cancelled (no items)');
-      // Stop timer completely
-      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-      document.getElementById('auditTimer').classList.add('hide');
-      appState.audit = null;
-      saveState();
-      showToast('Audit cancelled', 'warn');
-      renderCountPage();
-    });
+    showConfirm('Cancel this audit? No items have been counted.', () => doCancel('Audit cancelled (no items)'));
   } else {
-    showConfirm('Cancel this audit? ' + itemCount + ' items have been counted and will be discarded. This cannot be undone.', () => {
-      logActivity('Audit cancelled (' + itemCount + ' items discarded)');
-      // Stop timer completely
-      if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
-      document.getElementById('auditTimer').classList.add('hide');
-      appState.audit = null;
-      saveState();
-      showToast('Audit cancelled', 'warn');
-      renderCountPage();
-    });
+    showConfirm('Cancel this audit? ' + itemCount + ' items have been counted and will be discarded. This cannot be undone.',
+      () => doCancel('Audit cancelled (' + itemCount + ' items discarded)'));
   }
 }
 
@@ -7613,6 +7630,12 @@ function closeCount1() {
     appState.audit.count1ClosedAt = new Date().toISOString();
     appState.audit.countPhase = 'review';
 
+    // Propagate to Supabase so the desktop sees the phase flip live (v1.7).
+    syncAuditMetaToSupabase({
+      count_phase: 'review',
+      count1_closed_at: appState.audit.count1ClosedAt,
+    }).catch(() => {});
+
     // Generate recount list
     appState.audit.recounts = {};
 
@@ -7822,8 +7845,18 @@ function finalizeCount2() {
   // Save Count 2 snapshot
   appState.audit.count2Data = JSON.parse(JSON.stringify(appState.audit.counts));
   appState.audit.count2ClosedAt = new Date().toISOString();
+  appState.audit.completedAt   = appState.audit.count2ClosedAt;
   appState.audit.countPhase = 'final';
   appState.audit.status = 'submitted';
+
+  // Propagate to Supabase so the desktop moves this audit from Active to
+  // Historic live (v1.7). Fire-and-forget; local state change proceeds.
+  syncAuditMetaToSupabase({
+    count_phase: 'final',
+    count2_closed_at: appState.audit.count2ClosedAt,
+    completed_at:    appState.audit.completedAt,
+    status: 'submitted',
+  }).catch(() => {});
 
   // Mark recount items as resolved
   if (appState.audit.recounts) {
