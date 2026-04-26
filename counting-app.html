@@ -941,6 +941,26 @@ html, body {
   transform: scale(0.93);
 }
 
+.camera-flash {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.15);
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  display: none; /* shown only when the active video track supports torch */
+  align-items: center;
+  justify-content: center;
+  margin-right: 8px;
+}
+.camera-flash.on {
+  background: var(--gold-300, #d4a056);
+  color: #000;
+}
+.camera-flash:active { transform: scale(0.93); }
+.camera-flash svg { width: 22px; height: 22px; }
+
 .camera-viewfinder {
   flex: 1;
   position: relative;
@@ -2411,7 +2431,12 @@ html, body {
 <div class="camera-modal hide" id="barcodeModal">
   <div class="camera-header">
     <h3>Scan barcode</h3>
-    <button class="camera-close" onclick="closeBarcodeScanner()">X</button>
+    <div style="display:flex;align-items:center">
+      <button class="camera-flash" id="barcodeFlashBtn" type="button" onclick="toggleCameraFlash()" aria-label="Toggle flashlight" title="Flashlight">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></svg>
+      </button>
+      <button class="camera-close" onclick="closeBarcodeScanner()">X</button>
+    </div>
   </div>
   <div class="camera-viewfinder">
     <div id="barcodeViewfinder"></div>
@@ -2572,6 +2597,14 @@ html, body {
       <div id="manualExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
     <button class="submit-btn" onclick="submitManualEntry()">Add to count</button>
+    <button id="manualSuggestBtn"
+      onclick="suggestManualForCatalog()"
+      style="display:none;width:100%;margin-top:8px;background:var(--surface2);color:var(--accent);border:1px solid var(--accent);padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:600;font-size:13px;cursor:pointer">
+      Suggest "<span id="manualSuggestName"></span>" for catalog
+    </button>
+    <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">
+      Item not in catalog? Counts locally now; tap "Suggest" to send the item to admin for approval — once approved, every device will see it.
+    </div>
   </div>
 </div>
 
@@ -2782,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.20';
+const APP_VERSION = '1.21';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4817,6 +4850,57 @@ function addCustomItem(name, brand, category, subcategory, upc) {
   return id;
 }
 
+/* ================================================================
+   PENDING ITEMS — counter/manager submits a "please add to catalog"
+   request that an admin then approves (mints a purchase_items row) or
+   rejects. Mirrors the upc_mappings approval pattern.
+
+   Local-side stays unchanged: addCustomItem() still fires so the count
+   in progress doesn't block. submitPendingItem() is *additive* — it just
+   asks admin to permanently add the item to the shared catalog so other
+   counters and other audits see it without re-typing.
+   ================================================================ */
+async function submitPendingItem(payload) {
+  if (!supabaseLoaded) {
+    showToast('Catalog suggestion unavailable offline — counted locally for now', 'warn');
+    return false;
+  }
+  if (!payload || !payload.name || !payload.name.trim()) {
+    showToast('Item name required', 'error');
+    return false;
+  }
+  const role = (appState.user && appState.user.role) || 'counter';
+  if (role !== 'corporate' && role !== 'manager' && role !== 'counter') {
+    showToast('Sign in to suggest catalog items', 'error');
+    return false;
+  }
+
+  const row = {
+    name:        payload.name.trim(),
+    brand:       (payload.brand || '').trim() || null,
+    category:    payload.category || null,
+    subcategory: (payload.subcategory || '').trim() || null,
+    size:        (payload.size || '').trim() || null,
+    upc:         (payload.upc || '').replace(/\D/g, '') || null,
+    notes:       (payload.notes || '').trim() || null,
+    submitted_by_email: (appState.user && appState.user.email) || 'unknown',
+    submitted_by_name:  (appState.user && appState.user.name)  || 'Unknown',
+    audit_id:    (appState.audit && appState.audit.supabaseId) || null,
+    status:      'pending',
+  };
+
+  const { data, error } = await supabaseRest.insert('kount_pending_items', row);
+  if (error) {
+    console.error('[pending-item] insert failed:', error);
+    showToast('Catalog suggestion failed to send: ' + (error.message || 'unknown'), 'error');
+    return false;
+  }
+  const inserted = Array.isArray(data) ? data[0] : data;
+  logActivity('Suggested catalog item "' + row.name + '" — awaiting admin approval');
+  showToast('Sent to admin for approval', 'success');
+  return inserted || true;
+}
+
 function mergeCustomItemsIntoMaster() {
   if (customItems.length === 0) return;
 
@@ -6577,6 +6661,9 @@ async function openNativeBarcodeScanner() {
 
     document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
 
+    // Flash binds to the actual video track from this stream
+    bindFlashTrack(stream.getVideoTracks()[0]);
+
     const detector = new BarcodeDetector({
       formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
     });
@@ -6615,6 +6702,54 @@ async function openNativeBarcodeScanner() {
   }
 }
 
+/* ─────────── Camera flashlight toggle ───────────
+   Browsers expose torch via MediaStreamTrack.applyConstraints({torch}). Not
+   every device/browser supports it (iOS Safari notably doesn't). Only show
+   the button if the active track's getCapabilities() reports torch=true.
+   The same _activeFlashTrack variable serves both the native path and the
+   Quagga path, so the toggle handler doesn't care which scanner is running. */
+let _activeFlashTrack = null;
+let _flashOn = false;
+
+function _setFlashButtonState(visible, on) {
+  const btn = document.getElementById('barcodeFlashBtn');
+  if (!btn) return;
+  btn.style.display = visible ? 'flex' : 'none';
+  btn.classList.toggle('on', !!on);
+}
+
+async function bindFlashTrack(track) {
+  _activeFlashTrack = track || null;
+  _flashOn = false;
+  if (!track || typeof track.getCapabilities !== 'function') {
+    _setFlashButtonState(false, false);
+    return;
+  }
+  let caps = {};
+  try { caps = track.getCapabilities() || {}; } catch (e) { caps = {}; }
+  _setFlashButtonState(!!caps.torch, false);
+}
+
+async function toggleCameraFlash() {
+  if (!_activeFlashTrack) return;
+  const next = !_flashOn;
+  try {
+    await _activeFlashTrack.applyConstraints({ advanced: [{ torch: next }] });
+    _flashOn = next;
+    _setFlashButtonState(true, _flashOn);
+  } catch (e) {
+    console.warn('[flash] applyConstraints failed:', e);
+    showToast('Flashlight not supported on this device', 'warn');
+    _setFlashButtonState(false, false);
+  }
+}
+
+function unbindFlashTrack() {
+  _activeFlashTrack = null;
+  _flashOn = false;
+  _setFlashButtonState(false, false);
+}
+
 /* QuaggaJS fallback for older browsers */
 function openQuaggaBarcodeScanner() {
   if (barcodeListenerAttached) {
@@ -6644,6 +6779,13 @@ function openQuaggaBarcodeScanner() {
     }
     Quagga.start();
     document.getElementById('barcodeStatus').textContent = 'Point camera at barcode (fallback mode)';
+    // Quagga injects its own <video> into the viewfinder — grab the track from that
+    setTimeout(function() {
+      var vid = document.querySelector('#barcodeViewfinder video');
+      var stream = vid && vid.srcObject;
+      var track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+      bindFlashTrack(track);
+    }, 200);
   });
 
   Quagga.onDetected(onBarcodeDetected);
@@ -6652,6 +6794,9 @@ function openQuaggaBarcodeScanner() {
 
 function closeBarcodeScanner() {
   barcodeActive = false;
+
+  // Drop the flash binding before tracks are stopped so the button hides cleanly
+  unbindFlashTrack();
 
   // Stop native scanner
   if (nativeScanInterval) { clearInterval(nativeScanInterval); nativeScanInterval = null; }
@@ -7289,6 +7434,8 @@ function openManualEntry() {
     chip.classList.toggle('selected', chip.dataset.issue === 'none');
   });
 
+  updateManualSuggestBtn();
+
   setTimeout(() => document.getElementById('manualName').focus(), 100);
 }
 
@@ -7299,8 +7446,13 @@ function closeManualEntry(event) {
 
 function onManualSearch(value) {
   const query = value.toLowerCase().trim();
+  // Typing into the name field invalidates any prior masterId selection
+  // (otherwise selectMasterItem followed by edits leaves a stale link)
+  document.getElementById('manualName').dataset.masterId = '';
+
   if (query.length < 2) {
     document.getElementById('manualSuggestions').innerHTML = '';
+    updateManualSuggestBtn();
     return;
   }
 
@@ -7313,6 +7465,54 @@ function onManualSearch(value) {
       '<span style="color:var(--text-dim);font-size:11px">' + esc(item.sku) + '</span>' +
     '</div>'
   ).join('');
+  updateManualSuggestBtn();
+}
+
+/* Show the "Suggest for catalog" button only when the typed name is non-empty
+   AND there's no exact-name match in itemMaster. We don't want to nag with
+   the suggest button on items that already exist. */
+function updateManualSuggestBtn() {
+  const btn  = document.getElementById('manualSuggestBtn');
+  const lbl  = document.getElementById('manualSuggestName');
+  if (!btn || !lbl) return;
+  const name = (document.getElementById('manualName').value || '').trim();
+  const masterId = document.getElementById('manualName').dataset.masterId || '';
+  const exact = name && itemMaster.find(i => i.name.toLowerCase() === name.toLowerCase());
+  const show = !!name && !masterId && !exact && supabaseLoaded;
+  btn.style.display = show ? 'block' : 'none';
+  lbl.textContent = show ? (name.length > 40 ? name.slice(0, 38) + '…' : name) : '';
+}
+
+async function suggestManualForCatalog() {
+  if (isAuditLocked()) return;
+  const name = (document.getElementById('manualName').value || '').trim();
+  if (!name) { showToast('Type the item name first', 'error'); return; }
+
+  // Pre-flight: check if a pending row for this exact name already exists,
+  // so a counter doesn't spam admin with duplicates while waiting on approval.
+  try {
+    const { data: existing } = await supabaseRest.query(
+      'kount_pending_items',
+      'select=id,name,status&status=eq.pending&name=eq.' + encodeURIComponent(name)
+    );
+    if (existing && existing.length > 0) {
+      showToast('Already pending admin approval', 'info');
+      return;
+    }
+  } catch (e) {}
+
+  const ok = await submitPendingItem({
+    name: name,
+    brand: name.includes(' — ') ? name.split(' — ')[0] : '',
+    category: document.getElementById('manualCategory').value,
+    upc: document.getElementById('manualSku').value,
+    notes: document.getElementById('manualNotes').value,
+  });
+  if (ok) {
+    // Hide the button — it's now in the queue
+    var btn = document.getElementById('manualSuggestBtn');
+    if (btn) btn.style.display = 'none';
+  }
 }
 
 function selectMasterItem(id) {
@@ -7326,6 +7526,7 @@ function selectMasterItem(id) {
   document.getElementById('manualName').dataset.masterId = item.id;
   document.getElementById('manualDupeWarning').innerHTML =
     renderDupeWarning(item.id, item.sku);
+  updateManualSuggestBtn();
 }
 
 function selectIssue(element) {
