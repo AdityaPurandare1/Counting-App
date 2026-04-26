@@ -356,6 +356,24 @@ html, body {
   opacity: 0.7;
   font-weight: 500;
 }
+.zone-tab .zone-tab-x {
+  display: inline-flex;
+  align-items: center; justify-content: center;
+  margin-left: 6px;
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.08);
+  color: var(--fg-muted, #8A827F);
+  font-size: 13px; line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  -webkit-tap-highlight-color: transparent;
+}
+.zone-tab .zone-tab-x:hover,
+.zone-tab .zone-tab-x:active {
+  background: var(--danger, #C13A57);
+  color: #fff;
+}
 
 /* ---------- SCAN ACTION BUTTONS ---------- */
 .scan-actions {
@@ -2764,7 +2782,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.19';
+const APP_VERSION = '1.20';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3799,32 +3817,44 @@ function normalizeBarcode(code) {
   return digits.replace(/^0+/, '');
 }
 
-/* Load approved mappings from Supabase into the in-memory cache. */
+/* Load approved mappings from Supabase into the in-memory cache.
+   PostgREST caps anon queries at db-max-rows (default 1000), so a single
+   select=* silently truncates once we cross that threshold and any mapping
+   past page 1 disappears from `upcMappingsCache` — the symptom is "approved
+   UPC scans don't populate item details." Paginate the same way
+   loadSupabaseItems does. */
 async function loadApprovedUpcMappings(force) {
   const now = Date.now();
   if (!force && (now - upcMappingsCacheLoadedAt) < UPC_CACHE_TTL_MS) {
     return; // cache still fresh
   }
-  const { data, error } = await supabaseRest.query(
-    'upc_mappings',
-    "select=*&status=eq.approved"
-  );
-  if (error || !data) {
-    console.warn('UPC mappings load failed — using cached copy:', error);
-    return;
-  }
+  const PAGE_SIZE = 1000;
+  const MAX_PAGES = 50; // 50k mappings ceiling — well above realistic scale
   const next = {};
-  for (const row of data) {
-    const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
-    if (!key) continue;
-    next[key] = {
-      title: row.item_name,
-      brand: row.item_brand || '',
-      category: row.item_category || 'other',
-      masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
-      barcode: row.barcode_raw,
-      approvedAt: row.reviewed_at,
-    };
+  let totalRows = 0;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const offset = page * PAGE_SIZE;
+    const qs = 'select=*&status=eq.approved&order=id&limit=' + PAGE_SIZE + '&offset=' + offset;
+    const { data, error } = await supabaseRest.query('upc_mappings', qs);
+    if (error) {
+      console.warn('UPC mappings load failed — using cached copy:', error);
+      return;
+    }
+    if (!data || data.length === 0) break;
+    for (const row of data) {
+      const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
+      if (!key) continue;
+      next[key] = {
+        title: row.item_name,
+        brand: row.item_brand || '',
+        category: row.item_category || 'other',
+        masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
+        barcode: row.barcode_raw,
+        approvedAt: row.reviewed_at,
+      };
+    }
+    totalRows += data.length;
+    if (data.length < PAGE_SIZE) break;
   }
   upcMappingsCache = next;
   upcMappingsCacheLoadedAt = now;
@@ -3833,7 +3863,7 @@ async function loadApprovedUpcMappings(force) {
       cache: upcMappingsCache, loadedAt: upcMappingsCacheLoadedAt
     }));
   } catch (e) {}
-  console.log('UPC mappings cache refreshed: ' + Object.keys(upcMappingsCache).length + ' entries');
+  console.log('UPC mappings cache refreshed: ' + Object.keys(upcMappingsCache).length + ' entries (' + totalRows + ' rows fetched)');
 }
 
 /* Refresh the pending-approvals count (for Summary badge). */
@@ -5098,6 +5128,7 @@ function handleLogout() {
   showConfirm('Sign out? You will need to sign in again.', () => {
     stopUpcRealtime();
     leaveNetworkedAudit();
+    stopVenueZonesRealtime();
     appState.user = null;
     appState.currentVenue = null;
     appState.currentZone = null;
@@ -5124,6 +5155,10 @@ function selectVenue(id) {
 
   document.getElementById('headerVenue').textContent = venue.name;
   saveState();
+  // Pull any custom zones from Supabase, then keep this venue's zone
+  // list live across devices via realtime.
+  loadVenueZonesFromSupabase(venue.id).catch(function() {});
+  startVenueZonesRealtime(venue.id);
   showPage('count');
 }
 
@@ -5454,77 +5489,214 @@ function getCountedItemIds() {
   return ids;
 }
 
+/* ================================================================
+   ZONE TABS — hardcoded venue defaults + user-added zones synced
+   via Supabase (kount_venue_zones). Counters can add too — zones
+   are just text strings, easy to clean up.
+   ================================================================ */
+
+// Snapshot the original hardcoded zone list per venue so we can tell
+// which zones are user-added and therefore safely removable.
+appState.venues.forEach(v => { v._defaultZones = (v.zones || []).slice(); });
+
+function isCustomZone(zone) {
+  const venue = appState.currentVenue;
+  if (!venue) return false;
+  return venue.zones.includes(zone) && !(venue._defaultZones || []).includes(zone);
+}
+
 function renderZoneTabs() {
   const venue = appState.currentVenue;
+  const role = appState.user?.role;
+  const canRemove = role === 'corporate' || role === 'manager';
   let html = venue.zones.map(zone => {
     const count = (appState.audit.counts[zone] || []).length;
     const isActive = zone === appState.currentZone ? 'active' : '';
+    const removeBtn = (canRemove && isCustomZone(zone))
+      ? '<span class="zone-tab-x" onclick="removeCustomZone(this.parentNode.dataset.zone, event)" aria-label="Remove zone">×</span>'
+      : '';
     return '<button class="zone-tab ' + isActive + '" onclick="switchZone(this)" data-zone="' + esc(zone) + '">' +
-      esc(zone) + '<span class="zcnt">' + count + '</span></button>';
+      esc(zone) + '<span class="zcnt">' + count + '</span>' + removeBtn + '</button>';
   }).join('');
 
-  // Add zone button (for managers/admin)
-  const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
-  if (isAdmin) {
-    html += '<button class="zone-tab" onclick="addCustomZone()" style="color:var(--accent);border-color:var(--accent);border-style:dashed">+ Zone</button>';
-  }
+  // + Zone button — visible to all roles (counters can add too).
+  html += '<button class="zone-tab" onclick="addCustomZone()" style="color:var(--accent);border-color:var(--accent);border-style:dashed">+ Zone</button>';
 
   document.getElementById('zoneTabs').innerHTML = html;
 }
 
-function addCustomZone() {
+async function addCustomZone() {
   const name = prompt('Enter zone name (e.g. Back Bar, Main Fridge, VIP):');
   if (!name || !name.trim()) return;
-
   const zoneName = name.trim();
   const venue = appState.currentVenue;
+  if (!venue) return;
 
-  // Check if zone already exists
-  if (venue.zones.includes(zoneName)) {
-    showToast('Zone "' + zoneName + '" already exists', 'warn');
-    return;
-  }
+  // Case-insensitive duplicate check across hardcoded + custom zones
+  const dupe = venue.zones.find(z => z.toLowerCase() === zoneName.toLowerCase());
+  if (dupe) { showToast('Zone "' + dupe + '" already exists', 'warn'); return; }
 
-  // Add to venue zones
+  // Optimistic local add — UI updates immediately
   venue.zones.push(zoneName);
-
-  // Create empty count array for the new zone
-  if (appState.audit && !appState.audit.counts[zoneName]) {
-    appState.audit.counts[zoneName] = [];
-  }
-
-  // Save custom zones to localStorage so they persist
-  let customZones = {};
-  try { customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}'); } catch (e) {}
-  if (!customZones[venue.id]) customZones[venue.id] = [];
-  if (!customZones[venue.id].includes(zoneName)) {
-    customZones[venue.id].push(zoneName);
-    try { localStorage.setItem('hwood_custom_zones', JSON.stringify(customZones)); } catch (e) {}
-  }
-
+  if (appState.audit && !appState.audit.counts[zoneName]) appState.audit.counts[zoneName] = [];
+  appState.currentZone = zoneName;
   logActivity('Added zone: ' + zoneName);
   saveState();
-  appState.currentZone = zoneName;
   showToast('Zone "' + zoneName + '" added', 'success');
   renderCountPage();
+
+  // Persist to Supabase. localStorage acts as offline backstop only.
+  if (supabaseClient) {
+    const { error } = await supabaseRest.insert('kount_venue_zones', {
+      venue_id: venue.id,
+      zone_name: zoneName,
+      created_by: (appState.user && appState.user.email) || null,
+    });
+    if (error) {
+      console.warn('[zones] insert failed, caching for retry', error);
+      cacheZoneToLocalStorage(venue.id, zoneName);
+      showToast('Saved locally — will sync when online', 'warn');
+    }
+  } else {
+    cacheZoneToLocalStorage(venue.id, zoneName);
+  }
 }
 
-// Merge custom zones into venues on load
+async function removeCustomZone(zoneName, evt) {
+  if (evt && evt.stopPropagation) evt.stopPropagation();
+  const role = appState.user && appState.user.role;
+  if (role !== 'corporate' && role !== 'manager') {
+    showToast('Only managers can remove zones', 'warn');
+    return;
+  }
+  const venue = appState.currentVenue;
+  if (!venue) return;
+  if ((venue._defaultZones || []).includes(zoneName)) {
+    showToast('Cannot remove a default zone', 'warn');
+    return;
+  }
+  if (!confirm('Remove zone "' + zoneName + '"? Existing counts in this zone will not be visible until the zone is re-added (data is preserved on the server).')) return;
+
+  // Optimistic local remove
+  const idx = venue.zones.indexOf(zoneName);
+  if (idx >= 0) venue.zones.splice(idx, 1);
+  if (appState.currentZone === zoneName) appState.currentZone = venue.zones[0] || null;
+  saveState();
+  renderCountPage();
+
+  if (supabaseClient) {
+    const { error } = await supabaseRest.deleteRows('kount_venue_zones',
+      'venue_id=eq.' + encodeURIComponent(venue.id) + '&zone_name=eq.' + encodeURIComponent(zoneName));
+    if (error) console.warn('[zones] delete failed', error);
+  }
+  // Also drop from localStorage cache if present
+  try {
+    const cz = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}');
+    if (cz[venue.id]) {
+      cz[venue.id] = cz[venue.id].filter(z => z !== zoneName);
+      localStorage.setItem('hwood_custom_zones', JSON.stringify(cz));
+    }
+  } catch (e) {}
+
+  showToast('Zone "' + zoneName + '" removed', 'success');
+}
+
+function cacheZoneToLocalStorage(venueId, zoneName) {
+  try {
+    const cz = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}');
+    if (!cz[venueId]) cz[venueId] = [];
+    if (!cz[venueId].includes(zoneName)) cz[venueId].push(zoneName);
+    localStorage.setItem('hwood_custom_zones', JSON.stringify(cz));
+  } catch (e) {}
+}
+
+// Legacy fallback for offline / pre-Supabase data — pulls custom zones
+// from localStorage and merges into venue.zones. Always called at boot
+// so the UI works even before Supabase responds. The Supabase loader
+// runs after and supersedes this when online.
 function mergeCustomZones() {
   try {
     const customZones = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}');
     Object.entries(customZones).forEach(([venueId, zones]) => {
       const venue = appState.venues.find(v => v.id === venueId);
-      if (venue) {
-        zones.forEach(z => {
-          if (!venue.zones.includes(z)) venue.zones.push(z);
-        });
-      }
+      if (venue) zones.forEach(z => { if (!venue.zones.includes(z)) venue.zones.push(z); });
     });
   } catch (e) {}
 }
 
 mergeCustomZones();
+
+// Fetch venue zones from Supabase + one-time backfill of any localStorage
+// zones that haven't been pushed yet. Called on venue selection.
+async function loadVenueZonesFromSupabase(venueId) {
+  if (!supabaseClient || !venueId) return;
+  const venue = appState.venues.find(v => v.id === venueId);
+  if (!venue) return;
+  const { data, error } = await supabaseRest.query(
+    'kount_venue_zones',
+    'venue_id=eq.' + encodeURIComponent(venueId) + '&order=created_at.asc'
+  );
+  if (error) { console.warn('[zones] load failed', error); return; }
+  (data || []).forEach(row => {
+    if (!venue.zones.includes(row.zone_name)) venue.zones.push(row.zone_name);
+  });
+  // One-time backfill: push any localStorage zones not yet in Supabase.
+  try {
+    const ls = JSON.parse(localStorage.getItem('hwood_custom_zones') || '{}');
+    const remoteSet = new Set((data || []).map(r => r.zone_name));
+    const lsZones = (ls[venueId] || []).filter(z => !remoteSet.has(z));
+    for (const z of lsZones) {
+      const { error: insErr } = await supabaseRest.insert('kount_venue_zones', {
+        venue_id: venueId, zone_name: z,
+        created_by: (appState.user && appState.user.email) || null,
+      });
+      if (!insErr && !venue.zones.includes(z)) venue.zones.push(z);
+    }
+  } catch (e) { /* backfill is best-effort */ }
+  if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
+}
+
+// Realtime — propagate zone INSERT/DELETE across devices for the
+// currently-selected venue.
+let venueZonesChannel = null;
+function startVenueZonesRealtime(venueId) {
+  if (!supabaseClient || !venueId) return;
+  stopVenueZonesRealtime();
+  venueZonesChannel = supabaseClient
+    .channel('kount-venue-zones-' + venueId)
+    .on('postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'kount_venue_zones', filter: 'venue_id=eq.' + venueId },
+      function(evt) {
+        const row = evt.new;
+        const v = appState.venues.find(x => x.id === venueId);
+        if (v && row && !v.zones.includes(row.zone_name)) {
+          v.zones.push(row.zone_name);
+          if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
+        }
+      })
+    .on('postgres_changes',
+      { event: 'DELETE', schema: 'public', table: 'kount_venue_zones', filter: 'venue_id=eq.' + venueId },
+      function(evt) {
+        const row = evt.old;
+        const v = appState.venues.find(x => x.id === venueId);
+        if (!v || !row) return;
+        // Don't remove a hardcoded default zone even if the row is gone.
+        if ((v._defaultZones || []).includes(row.zone_name)) return;
+        const idx = v.zones.indexOf(row.zone_name);
+        if (idx >= 0) v.zones.splice(idx, 1);
+        if (appState.currentZone === row.zone_name) appState.currentZone = v.zones[0] || null;
+        if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
+      })
+    .subscribe(function(status) {
+      if (status === 'SUBSCRIBED') console.log('[zones realtime] subscribed for venue', venueId);
+    });
+}
+function stopVenueZonesRealtime() {
+  if (venueZonesChannel && supabaseClient) {
+    try { supabaseClient.removeChannel(venueZonesChannel); } catch (e) {}
+  }
+  venueZonesChannel = null;
+}
 
 function switchZone(element) {
   appState.currentZone = element.dataset.zone;
@@ -6516,21 +6688,27 @@ function detectCategory(title, description) {
 }
 
 async function handleBarcodeResult(code) {
-  // Check API cache first
-  if (upcCache[code]) {
-    openBarcodeEntryModal(code, upcCache[code]);
-    return;
-  }
-
-  // Strategy 0: Check learned UPCs (user-taught mappings from previous scans)
+  // Strategy 0: Check learned UPCs first (admin-approved upc_mappings).
+  // These are authoritative — they MUST win over the localStorage UPCitemdb
+  // cache, otherwise a UPC that was scanned before being mapped will keep
+  // showing the stale generic UPCitemdb title forever.
   const learned = lookupLearnedUPC(code);
   if (learned) {
+    // Refresh the api cache so submit-path masterId resolution stays consistent
+    upcCache[code] = learned;
+    saveUpcCache();
     openBarcodeEntryModal(code, learned);
     showToast('Matched (learned): ' + learned.title, 'success');
     return;
   }
 
-  // Strategy 1: Check if barcode matches any UPC in the item master
+  // Strategy 1: Check UPCitemdb localStorage cache (only for non-mapped UPCs)
+  if (upcCache[code]) {
+    openBarcodeEntryModal(code, upcCache[code]);
+    return;
+  }
+
+  // Strategy 2: Check if barcode matches any UPC in the item master
   // Strip ALL non-digit characters from scanned code for matching
   const digitsOnly = code.replace(/\D/g, '');
   const noLeadZeros = digitsOnly.replace(/^0+/, '');
@@ -6571,7 +6749,7 @@ async function handleBarcodeResult(code) {
   // Show loading state
   openBarcodeEntryModal(code, null);
 
-  // Strategy 2: Try UPCitemdb API (direct, works on localhost)
+  // Strategy 3: Try UPCitemdb API (direct, works on localhost)
   try {
     const response = await fetch('https://api.upcitemdb.com/prod/trial/lookup?upc=' + code);
     if (!response.ok) throw new Error('API error ' + response.status);
@@ -6604,7 +6782,7 @@ async function handleBarcodeResult(code) {
     console.log('Direct UPC lookup failed (CORS expected on tunnel):', error.message);
   }
 
-  // Strategy 3: If API fails (CORS), try fuzzy matching the UPC digits
+  // Strategy 4: If API fails (CORS), try fuzzy matching the UPC digits
   // against known patterns in the item master
   // (In production, this lookup goes through Supabase Edge Function)
   updateBarcodeEntryModal(code, { notFound: true });
@@ -9458,6 +9636,9 @@ initUpcMappingsSync();
 if (appState.user) {
   if (appState.currentVenue) {
     document.getElementById('headerVenue').textContent = appState.currentVenue.name;
+    // Restored session — pull custom zones + start realtime for this venue
+    loadVenueZonesFromSupabase(appState.currentVenue.id).catch(function() {});
+    startVenueZonesRealtime(appState.currentVenue.id);
     showPage('count');
   } else {
     showPage('venues');
