@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.21';
+const APP_VERSION = '1.22';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4891,8 +4891,17 @@ async function submitPendingItem(payload) {
 
   const { data, error } = await supabaseRest.insert('kount_pending_items', row);
   if (error) {
+    // Migration 0010 adds a unique partial index on lower(name) where status='pending'.
+    // A 23505 / "duplicate key" error here means another phone beat us in the race the
+    // pre-flight SELECT can't catch; surface that as the friendly dedupe toast instead
+    // of a scary error.
+    const msg = String(error.message || '');
+    if (/23505|duplicate key|unique constraint/i.test(msg)) {
+      showToast('Already pending admin approval', 'info');
+      return false;
+    }
     console.error('[pending-item] insert failed:', error);
-    showToast('Catalog suggestion failed to send: ' + (error.message || 'unknown'), 'error');
+    showToast('Catalog suggestion failed to send: ' + (msg || 'unknown'), 'error');
     return false;
   }
   const inserted = Array.isArray(data) ? data[0] : data;
@@ -6661,8 +6670,10 @@ async function openNativeBarcodeScanner() {
 
     document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
 
-    // Flash binds to the actual video track from this stream
-    bindFlashTrack(stream.getVideoTracks()[0]);
+    // Flash binds to the actual video track from this stream. Guard against
+    // permission-deferred WebViews that hand back a stream with no tracks.
+    var nativeTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+    bindFlashTrack(nativeTracks.length > 0 ? nativeTracks[0] : null);
 
     const detector = new BarcodeDetector({
       formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
@@ -6710,6 +6721,11 @@ async function openNativeBarcodeScanner() {
    Quagga path, so the toggle handler doesn't care which scanner is running. */
 let _activeFlashTrack = null;
 let _flashOn = false;
+
+// Pending setTimeout id from the Quagga path so closeBarcodeScanner can clear
+// it. Otherwise a fast open→close→open within 200ms would let a stale timeout
+// bind a now-detached <video>'s track to the new scanner session.
+let _quaggaFlashBindTimer = null;
 
 function _setFlashButtonState(visible, on) {
   const btn = document.getElementById('barcodeFlashBtn');
@@ -6779,12 +6795,19 @@ function openQuaggaBarcodeScanner() {
     }
     Quagga.start();
     document.getElementById('barcodeStatus').textContent = 'Point camera at barcode (fallback mode)';
-    // Quagga injects its own <video> into the viewfinder — grab the track from that
-    setTimeout(function() {
+    // Quagga injects its own <video> into the viewfinder. The element isn't
+    // there synchronously, so we poll once after a short delay. Keep the
+    // timer id so closeBarcodeScanner can cancel it if the user closes the
+    // scanner before this fires (otherwise it would bind whatever <video>
+    // it finds — possibly the next scanner's, possibly nothing).
+    if (_quaggaFlashBindTimer) { clearTimeout(_quaggaFlashBindTimer); _quaggaFlashBindTimer = null; }
+    _quaggaFlashBindTimer = setTimeout(function() {
+      _quaggaFlashBindTimer = null;
+      if (!barcodeActive) return; // scanner already closed
       var vid = document.querySelector('#barcodeViewfinder video');
       var stream = vid && vid.srcObject;
-      var track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-      bindFlashTrack(track);
+      var tracks = stream && stream.getVideoTracks ? stream.getVideoTracks() : [];
+      bindFlashTrack(tracks.length > 0 ? tracks[0] : null);
     }, 200);
   });
 
@@ -6794,6 +6817,10 @@ function openQuaggaBarcodeScanner() {
 
 function closeBarcodeScanner() {
   barcodeActive = false;
+
+  // Cancel any in-flight Quagga flash-bind poll so a stale timer doesn't
+  // grab a now-detached <video> after the scanner has been torn down.
+  if (_quaggaFlashBindTimer) { clearTimeout(_quaggaFlashBindTimer); _quaggaFlashBindTimer = null; }
 
   // Drop the flash binding before tracks are stopped so the button hides cleanly
   unbindFlashTrack();
@@ -7488,12 +7515,17 @@ async function suggestManualForCatalog() {
   const name = (document.getElementById('manualName').value || '').trim();
   if (!name) { showToast('Type the item name first', 'error'); return; }
 
-  // Pre-flight: check if a pending row for this exact name already exists,
-  // so a counter doesn't spam admin with duplicates while waiting on approval.
+  // Pre-flight: check if a pending row for this exact name (case-insensitive)
+  // already exists, so a counter doesn't spam admin with duplicates while
+  // waiting on approval. PostgREST treats `,()"` specially in eq.<value>; for
+  // safety with names like `Tito's Handmade Vodka, (1.75L)` we wrap in `"..."`
+  // and escape any inner double-quotes, then use ilike for case-insensitive
+  // comparison so "Tito's" and "tito's" don't both leak through as duplicates.
   try {
+    const ilikeValue = '"' + name.replace(/"/g, '\\"') + '"';
     const { data: existing } = await supabaseRest.query(
       'kount_pending_items',
-      'select=id,name,status&status=eq.pending&name=eq.' + encodeURIComponent(name)
+      'select=id,name,status&status=eq.pending&name=ilike.' + encodeURIComponent(ilikeValue)
     );
     if (existing && existing.length > 0) {
       showToast('Already pending admin approval', 'info');
