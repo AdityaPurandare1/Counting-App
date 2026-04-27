@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.22';
+const APP_VERSION = '1.23';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4064,6 +4064,7 @@ function initUpcMappingsSync() {
   runMigrationIfLoggedIn();
   // If already logged in (session restored from localStorage), open realtime
   startUpcRealtime();
+  startPendingItemsRealtime();
 
   // Periodic refresh (every 5 min) — still a belt-and-suspenders fallback
   // in case the realtime socket drops silently.
@@ -4079,6 +4080,7 @@ function initUpcMappingsSync() {
     loadApprovedUpcMappings(true);
     runMigrationIfLoggedIn();
     if (!upcRealtimeChannel) startUpcRealtime();
+    if (!pendingItemsChannel) startPendingItemsRealtime();
   });
 }
 
@@ -4122,6 +4124,70 @@ function stopUpcRealtime() {
     try { supabaseClient.removeChannel(upcRealtimeChannel); } catch (e) {}
   }
   upcRealtimeChannel = null;
+}
+
+/* ================================================================
+   REALTIME: pending-item review feedback for counters.
+   When a counter submits a "Suggest for catalog" via submitPendingItem,
+   they get nothing back until they reload. This channel watches
+   kount_pending_items so the *submitter* gets a toast the moment
+   admin approves/rejects, and admins/managers see a heads-up banner
+   on new pending submissions (mirrors the UPC pending pattern).
+   Requires migration 0009 (table) — 0010 hardens the approval RPC. */
+let pendingItemsChannel = null;
+
+function startPendingItemsRealtime() {
+  if (!supabaseClient) return;
+  if (pendingItemsChannel) return;
+  if (!appState.user || !appState.user.email) return;
+
+  pendingItemsChannel = supabaseClient
+    .channel('pending-items-' + appState.user.email)
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'kount_pending_items',
+    }, (evt) => onPendingItemRealtimeEvent(evt))
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') console.log('[pending-items realtime] subscribed');
+      if (status === 'CHANNEL_ERROR') console.warn('[pending-items realtime] channel error');
+    });
+}
+
+function stopPendingItemsRealtime() {
+  if (pendingItemsChannel && supabaseClient) {
+    try { supabaseClient.removeChannel(pendingItemsChannel); } catch (e) {}
+  }
+  pendingItemsChannel = null;
+}
+
+function onPendingItemRealtimeEvent(evt) {
+  const row = (evt && (evt.new || evt.old)) || {};
+  const ev  = evt && evt.eventType;
+  const me  = (appState.user && appState.user.email || '').toLowerCase();
+  const submitter = String(row.submitted_by_email || '').toLowerCase();
+  const role = appState.user && appState.user.role;
+
+  // Submitter-targeted feedback on UPDATE: status flipped pending → approved/rejected
+  if (ev === 'UPDATE' && submitter === me) {
+    if (row.status === 'approved') {
+      showToast('Catalog suggestion approved: ' + (row.name || ''), 'success');
+      logActivity('Catalog suggestion "' + (row.name || '') + '" approved');
+      // Refresh local catalog so the new purchase_items row shows up in search
+      // without forcing a full reload. loadSupabaseItems re-paginates — cheap
+      // enough on the rare approve event.
+      loadSupabaseItems().catch(function() {});
+    } else if (row.status === 'rejected') {
+      const reasonSuffix = row.reject_reason ? ' (' + row.reject_reason + ')' : '';
+      showToast('Catalog suggestion rejected: ' + (row.name || '') + reasonSuffix, 'warn');
+      logActivity('Catalog suggestion "' + (row.name || '') + '" rejected' + reasonSuffix);
+    }
+  }
+
+  // Admin/manager-targeted heads-up on INSERT of a new pending submission
+  if (ev === 'INSERT' && row.status === 'pending' && (role === 'corporate' || role === 'manager')) {
+    showToast('New item pending: ' + (row.name || 'unnamed'), 'warn');
+  }
 }
 
 function onUpcRealtimeEvent(evt) {
@@ -5129,6 +5195,10 @@ function handleLogin() {
   loadApprovedUpcMappings(true);
   loadPendingApprovalsCount();
   startUpcRealtime();
+  // Pending-item channel is keyed on user.email — restart so feedback toasts
+  // route to the freshly signed-in user instead of the previous identity.
+  stopPendingItemsRealtime();
+  startPendingItemsRealtime();
 
   showPage('venues');
 }
@@ -5220,6 +5290,7 @@ function renderVenues() {
 function handleLogout() {
   showConfirm('Sign out? You will need to sign in again.', () => {
     stopUpcRealtime();
+    stopPendingItemsRealtime();
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
     appState.user = null;
