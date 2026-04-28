@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.23';
+const APP_VERSION = '1.24';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4107,7 +4107,7 @@ function startUpcRealtime() {
   if (role !== 'corporate' && role !== 'manager') return;
 
   upcRealtimeChannel = supabaseClient
-    .channel('upc-mappings-' + (appState.user.email || 'anon'))
+    .channel('upc-mappings-' + _tabSessionId)
     .on('postgres_changes', {
       event: '*',
       schema: 'public',
@@ -4136,13 +4136,23 @@ function stopUpcRealtime() {
    Requires migration 0009 (table) — 0010 hardens the approval RPC. */
 let pendingItemsChannel = null;
 
+/* Per-tab session id used to disambiguate realtime channel names.
+   Earlier the channel was keyed on raw email — emails containing `+`, `.`,
+   uppercase, or non-ASCII could trip Supabase's channel-name rules, AND two
+   tabs signed in as the same user collapsed onto one channel where Supabase
+   only delivered events to whichever socket connected first. A random per-
+   tab id sidesteps both issues; cleared with the channel on logout. */
+const _tabSessionId =
+  (typeof crypto !== 'undefined' && crypto.randomUUID && crypto.randomUUID()) ||
+  ('t' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+
 function startPendingItemsRealtime() {
   if (!supabaseClient) return;
   if (pendingItemsChannel) return;
   if (!appState.user || !appState.user.email) return;
 
   pendingItemsChannel = supabaseClient
-    .channel('pending-items-' + appState.user.email)
+    .channel('pending-items-' + _tabSessionId)
     .on('postgres_changes', {
       event: '*',
       schema: 'public',
@@ -4154,19 +4164,27 @@ function startPendingItemsRealtime() {
     });
 }
 
-function stopPendingItemsRealtime() {
+async function stopPendingItemsRealtime() {
   if (pendingItemsChannel && supabaseClient) {
-    try { supabaseClient.removeChannel(pendingItemsChannel); } catch (e) {}
+    // removeChannel returns a Promise — await so the unsubscribe round-trips
+    // to the server before a subsequent start() opens a fresh channel for a
+    // different identity. Otherwise the old channel can keep delivering
+    // events for several seconds and a freshly-signed-in user briefly sees
+    // toasts targeted at the previous user's submissions.
+    try { await supabaseClient.removeChannel(pendingItemsChannel); } catch (e) {}
   }
   pendingItemsChannel = null;
 }
 
 function onPendingItemRealtimeEvent(evt) {
+  // Guard against an event firing in the gap between sign-out and channel
+  // tear-down. If the user is gone, there's no one to notify.
+  if (!appState.user) return;
   const row = (evt && (evt.new || evt.old)) || {};
   const ev  = evt && evt.eventType;
-  const me  = (appState.user && appState.user.email || '').toLowerCase();
+  const me  = (appState.user.email || '').toLowerCase();
   const submitter = String(row.submitted_by_email || '').toLowerCase();
-  const role = appState.user && appState.user.role;
+  const role = appState.user.role;
 
   // Submitter-targeted feedback on UPDATE: status flipped pending → approved/rejected
   if (ev === 'UPDATE' && submitter === me) {
@@ -4175,8 +4193,12 @@ function onPendingItemRealtimeEvent(evt) {
       logActivity('Catalog suggestion "' + (row.name || '') + '" approved');
       // Refresh local catalog so the new purchase_items row shows up in search
       // without forcing a full reload. loadSupabaseItems re-paginates — cheap
-      // enough on the rare approve event.
-      loadSupabaseItems().catch(function() {});
+      // enough on the rare approve event. After it resolves, re-evaluate the
+      // manual modal's "Suggest" button if it's still open: the typed name
+      // might now match an existing master row and the button should hide.
+      loadSupabaseItems().then(function() {
+        try { updateManualSuggestBtn(); } catch (e) {}
+      }).catch(function() {});
     } else if (row.status === 'rejected') {
       const reasonSuffix = row.reject_reason ? ' (' + row.reject_reason + ')' : '';
       showToast('Catalog suggestion rejected: ' + (row.name || '') + reasonSuffix, 'warn');
@@ -5195,10 +5217,10 @@ function handleLogin() {
   loadApprovedUpcMappings(true);
   loadPendingApprovalsCount();
   startUpcRealtime();
-  // Pending-item channel is keyed on user.email — restart so feedback toasts
-  // route to the freshly signed-in user instead of the previous identity.
-  stopPendingItemsRealtime();
-  startPendingItemsRealtime();
+  // Pending-item channel is per-tab now (see _tabSessionId), so the old and
+  // new channel names already differ. Still await the old channel's tear-down
+  // so the previous identity's events don't briefly leak to the new one.
+  stopPendingItemsRealtime().then(startPendingItemsRealtime);
 
   showPage('venues');
 }
@@ -6817,8 +6839,14 @@ async function bindFlashTrack(track) {
   _setFlashButtonState(!!caps.torch, false);
 }
 
+let _flashBusy = false;
 async function toggleCameraFlash() {
   if (!_activeFlashTrack) return;
+  // Guard against double-tap: applyConstraints is async and a second tap
+  // could race the first, leaving _flashOn out of sync with what the camera
+  // actually does. Drop the second tap until the first round-trip resolves.
+  if (_flashBusy) return;
+  _flashBusy = true;
   const next = !_flashOn;
   try {
     await _activeFlashTrack.applyConstraints({ advanced: [{ torch: next }] });
@@ -6828,12 +6856,15 @@ async function toggleCameraFlash() {
     console.warn('[flash] applyConstraints failed:', e);
     showToast('Flashlight not supported on this device', 'warn');
     _setFlashButtonState(false, false);
+  } finally {
+    _flashBusy = false;
   }
 }
 
 function unbindFlashTrack() {
   _activeFlashTrack = null;
   _flashOn = false;
+  _flashBusy = false;
   _setFlashButtonState(false, false);
 }
 
@@ -7588,12 +7619,19 @@ async function suggestManualForCatalog() {
 
   // Pre-flight: check if a pending row for this exact name (case-insensitive)
   // already exists, so a counter doesn't spam admin with duplicates while
-  // waiting on approval. PostgREST treats `,()"` specially in eq.<value>; for
-  // safety with names like `Tito's Handmade Vodka, (1.75L)` we wrap in `"..."`
-  // and escape any inner double-quotes, then use ilike for case-insensitive
-  // comparison so "Tito's" and "tito's" don't both leak through as duplicates.
+  // waiting on approval. Three layers of escaping at play here:
+  //   1. SQL LIKE: `%` and `_` are wildcards; literal % must be `\%`, literal
+  //      _ must be `\_`, literal `\` must be `\\`. Without this a name like
+  //      `100% Agave Tequila` would match every pending row starting `100`,
+  //      blocking submission with a misleading "already pending" toast.
+  //   2. PostgREST eq./ilike: values containing `,()"` need wrapping in
+  //      `"..."` with internal " escaped as \".
+  //   3. URL: encodeURIComponent for the whole thing.
+  // ilike (case-insensitive) is used instead of eq so "Tito's" and "tito's"
+  // don't both leak through as duplicates.
   try {
-    const ilikeValue = '"' + name.replace(/"/g, '\\"') + '"';
+    const sqlEscaped = name.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const ilikeValue = '"' + sqlEscaped.replace(/"/g, '\\"') + '"';
     const { data: existing } = await supabaseRest.query(
       'kount_pending_items',
       'select=id,name,status&status=eq.pending&name=ilike.' + encodeURIComponent(ilikeValue)
