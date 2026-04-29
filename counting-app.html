@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.27';
+const APP_VERSION = '1.28';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -5233,8 +5233,16 @@ async function loadAppUsersFromSupabase() {
       'app_users',
       'select=*&is_active=eq.true&order=role,email'
     );
-    if (error || !data || data.length === 0) return false;
-    const mapped = data.map(function(r) {
+    // Network/RLS error → keep the existing access list (transient failure
+    // shouldn't accidentally lock someone out). Empty result is DIFFERENT
+    // from an error and must still flow through the self-eval below — that
+    // is exactly the path "admin set my own is_active=false" takes.
+    if (error) {
+      console.warn('[app_users] fetch error, keeping local list:', error);
+      return false;
+    }
+    const rows = data || [];
+    const mapped = rows.map(function(r) {
       return {
         email: r.email,
         name: r.name || r.email,
@@ -5242,14 +5250,19 @@ async function loadAppUsersFromSupabase() {
         venueIds: r.role === 'corporate' ? 'all' : (r.venue_ids || []),
       };
     });
-    applyAccessList(mapped);
-    try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
+    if (mapped.length > 0) {
+      applyAccessList(mapped);
+      try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
+    }
     console.log('[app_users] loaded ' + mapped.length + ' rows from Supabase');
 
     // v1.27: if the currently-signed-in user's role / venue access changed
     // server-side (e.g. admin demoted a counter, or revoked a venue), pick
     // it up immediately so write operations gate on the new role at the
     // very next interaction. Sign-out only when access is fully revoked.
+    // v1.28: also sign out when the active list is EMPTY (the user setting
+    // their own is_active=false is the most common revoke path; the prior
+    // version early-returned on empty rows and never reached here).
     if (appState.user && appState.user.email) {
       const me = mapped.find(function(u) { return u.email.toLowerCase() === String(appState.user.email).toLowerCase(); });
       if (!me) {
@@ -5265,7 +5278,7 @@ async function loadAppUsersFromSupabase() {
         showToast('Your access has been updated by an admin.', 'info');
       }
     }
-    return true;
+    return mapped.length > 0;
   } catch (e) {
     console.warn('[app_users] fetch failed, keeping local list:', e);
     return false;
@@ -8244,25 +8257,52 @@ function getWeeksFlaggedFor(itemName, venueId) {
   return _avtWeeksMap.get(key) || 0;
 }
 
+/* Convert a Date (or ISO string) to an ISO-week key like "2026-W17". Used
+   to dedupe same-week double-uploads — two reports uploaded the same week
+   for a corrective re-run should count as one week of variance, not two,
+   for chronic-band scoring. */
+function _isoWeekKey(d) {
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt.getTime())) return null;
+  // ISO 8601: Thursday in the same week determines the year/week
+  const tmp = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate()));
+  const dayNum = (tmp.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+  tmp.setUTCDate(tmp.getUTCDate() - dayNum + 3);
+  const firstThursday = new Date(Date.UTC(tmp.getUTCFullYear(), 0, 4));
+  const week = 1 + Math.round(((tmp.getTime() - firstThursday.getTime()) / 86400000 - 3 + ((firstThursday.getUTCDay() + 6) % 7)) / 7);
+  return tmp.getUTCFullYear() + '-W' + String(week).padStart(2, '0');
+}
+
 async function loadAvtWeeksHistory(venueId) {
   if (!venueId) { _avtWeeksMap = new Map(); return; }
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return;
 
   try {
+    // v1.28: filter the report list to ones that COVER this venue. Without
+    // this, the global most-recent 12 reports might all be from other
+    // venues, leaving weeks_flagged silently 0 for everything at a
+    // smaller-traffic venue. kount_avt_reports.venue_ids is text[]; the
+    // PostgREST contains operator on an array is `cs.{value}`.
     const repsResp = await supabaseRest.query(
       'kount_avt_reports',
-      'select=id&order=uploaded_at.desc&limit=' + WEEKS_HISTORY_LIMIT
+      'select=id,uploaded_at'
+        + '&venue_ids=cs.{' + encodeURIComponent(venueId) + '}'
+        + '&order=uploaded_at.desc'
+        + '&limit=' + WEEKS_HISTORY_LIMIT
     );
     if (repsResp.error || !repsResp.data || repsResp.data.length === 0) {
       _avtWeeksMap = new Map();
       return;
     }
 
-    const ids = repsResp.data.map(function(r) { return r.id; });
-    // PostgREST `in.(...)` wants comma-separated quoted UUIDs
+    const reps = repsResp.data;
+    // Map each report id → its ISO week so we can dedupe in the count
+    // pass below. Multiple uploads in the same calendar week count as one.
+    const repToWeek = new Map();
+    for (const r of reps) repToWeek.set(r.id, _isoWeekKey(r.uploaded_at) || r.id);
+
+    const ids = reps.map(function(r) { return r.id; });
     const inList = ids.map(function(id) { return '"' + id + '"'; }).join(',');
-    // Filter to current venue + non-trivial variance to keep the row count
-    // small (most AVT rows are fine; we only care about persistently-bad ones).
     const qs = 'select=item_name,report_id'
       + '&venue_id=eq.' + encodeURIComponent(venueId)
       + '&report_id=in.(' + inList + ')'
@@ -8274,19 +8314,22 @@ async function loadAvtWeeksHistory(venueId) {
       return;
     }
 
-    // Per item: count distinct reports (one report ~= one week).
-    const reportsByItem = new Map();
+    // v1.28: count distinct ISO weeks (not distinct report ids) so a same-
+    // week corrective re-upload doesn't double-count.
+    const weeksByItem = new Map();
     for (const row of rowsResp.data) {
       const key = venueId + '|' + _normAvtName(row.item_name);
-      if (!reportsByItem.has(key)) reportsByItem.set(key, new Set());
-      reportsByItem.get(key).add(row.report_id);
+      const week = repToWeek.get(row.report_id);
+      if (!week) continue;
+      if (!weeksByItem.has(key)) weeksByItem.set(key, new Set());
+      weeksByItem.get(key).add(week);
     }
     const out = new Map();
-    for (const [key, reportSet] of reportsByItem) {
-      out.set(key, reportSet.size);
+    for (const [key, weekSet] of weeksByItem) {
+      out.set(key, weekSet.size);
     }
     _avtWeeksMap = out;
-    console.log('[avt weeks] cached ' + out.size + ' items across ' + ids.length + ' reports for venue ' + venueId);
+    console.log('[avt weeks] cached ' + out.size + ' items across ' + reps.length + ' reports / ' + (new Set(repToWeek.values())).size + ' weeks for venue ' + venueId);
   } catch (e) {
     console.warn('[avt weeks] history fetch failed:', e);
     _avtWeeksMap = new Map();
@@ -8490,11 +8533,25 @@ function renderVariancePage() {
    where one side has no token are still allowed through. Mirrors the
    gateParsedPair logic in the standalone inventory-workflow tool. */
 const AVT_SIZE_RE = /\b(750ml|1l|1\.5l|1\.75l|3l|6l|9l|15l|375ml|500ml|200ml|250ml|300ml|330ml|187ml|700ml|720ml|1\.8l)\b/i;
-const AVT_VINTAGE_RE = /\b(19|20)\d{2}\b/;
+/* v1.28: anchor on whitespace boundaries (or start/end) instead of \b so
+   `2000ml` doesn't get parsed as vintage `2000` — \b sits between digit
+   and non-digit, which fires inside `2000ml` (between `0` and `m`). The
+   stricter anchor demands the year be its own token. */
+const AVT_VINTAGE_RE = /(?:^|\s)(19|20)\d{2}(?=\s|,|$)/;
+/* v1.28: longest-first ordering matters because the lookup walks in array
+   order and returns first hit. "cabernet sauvignon" must be tried before
+   "cabernet" so a Cab Sauv name doesn't get tagged as just "cabernet".
+   Dropped 'champagne' / 'prosecco' — those are categories, not varietals,
+   and listing them caused "Veuve Clicquot Champagne" to get tagged
+   varietal=champagne and reject merging with "Veuve Clicquot Brut" rows.
+   'rose' and 'rosé' both map to canonical 'rose' via the extractor so the
+   diacritic doesn't accidentally split rows. */
 const AVT_VARIETALS = [
-  'cabernet sauvignon','cabernet','cab sauv','sauvignon blanc','pinot noir','pinot grigio','pinot gris','chardonnay',
-  'merlot','syrah','shiraz','riesling','rose','rosé','grenache','malbec','tempranillo','nebbiolo','sangiovese',
-  'zinfandel','viognier','gewurztraminer','prosecco','champagne','barbera','barolo','brunello','chianti',
+  'cabernet sauvignon','sauvignon blanc','pinot noir','pinot grigio','pinot gris',
+  'cab sauv','cabernet','chardonnay','merlot','syrah','shiraz','riesling',
+  'grenache','malbec','tempranillo','nebbiolo','sangiovese','zinfandel',
+  'viognier','gewurztraminer','barbera','barolo','brunello','chianti',
+  'rosé','rose',
 ];
 
 function _extractAvtSize(name) {
@@ -8504,7 +8561,12 @@ function _extractAvtSize(name) {
 function _extractAvtVintage(name) {
   const m = (name || '').match(AVT_VINTAGE_RE);
   if (!m) return null;
-  const y = parseInt(m[0], 10);
+  // The regex captures the decade prefix (19 or 20) in group 1, but the
+  // full match m[0] still includes the optional leading whitespace. Trim
+  // and re-parse the 4-digit year out of the match.
+  const yStr = (m[0].match(/(19|20)\d{2}/) || [])[0];
+  if (!yStr) return null;
+  const y = parseInt(yStr, 10);
   // Only accept plausible wine vintages — strip 4-digit numbers that are
   // likely UPCs/SKUs leaking into the name. 1900–current+1 is the band.
   if (y < 1900 || y > new Date().getFullYear() + 1) return null;
@@ -8512,17 +8574,31 @@ function _extractAvtVintage(name) {
 }
 function _extractAvtVarietal(name) {
   const lower = (name || '').toLowerCase();
-  for (const v of AVT_VARIETALS) if (lower.includes(v)) return v;
+  for (const v of AVT_VARIETALS) {
+    if (lower.includes(v)) {
+      // Canonicalize rosé → rose so the accented and unaccented spellings
+      // don't split a wine into two distinct varietals.
+      return v === 'rosé' ? 'rose' : v;
+    }
+  }
   return null;
 }
 
 /* True iff `a` and `b` could plausibly be the same product. Each gate
    skipped if either side lacks the token — only firing rejection on an
-   explicit conflict. After all gates pass, falls back to the legacy
-   substring match the previous matcher used. */
+   explicit conflict.
+
+   v1.28: previous version always fell back to substring match when no
+   tokens fired, which defeated the point of the gates for bare brand
+   names. "Hennessy" (raw) vs "Hennessy VS" both lack size/varietal/
+   vintage → both gates skip → substring `includes` matches → counts
+   wrongly absorbed. Now: substring fallback ONLY when at least one gate
+   fired and confirmed a positive match. With zero gating signal we
+   require exact normalized equality. */
 function _avtNamesMatch(a, b) {
   if (!a || !b) return false;
-  const lo = String(a).toLowerCase(), lo2 = String(b).toLowerCase();
+  const lo  = String(a).toLowerCase().trim();
+  const lo2 = String(b).toLowerCase().trim();
 
   const sa = _extractAvtSize(a), sb = _extractAvtSize(b);
   if (sa && sb && sa !== sb) return false;
@@ -8533,6 +8609,13 @@ function _avtNamesMatch(a, b) {
   const xa = _extractAvtVarietal(a), xb = _extractAvtVarietal(b);
   if (xa && xb && xa !== xb) return false;
 
+  // Count how many discriminating tokens we have evidence on. If none of
+  // the gates fired (zero tokens on EITHER side), fall back to exact
+  // normalized equality only — substring match is too permissive.
+  const hasAnyDiscriminator = !!(sa || sb || va || vb || xa || xb);
+  if (!hasAnyDiscriminator) {
+    return lo === lo2;
+  }
   return lo === lo2 || lo.includes(lo2) || lo2.includes(lo);
 }
 
