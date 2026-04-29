@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.24';
+const APP_VERSION = '1.25';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3036,6 +3036,60 @@ function searchItemMaster(query, limit) {
    legacy upload from before v1.5 that never made it to Supabase) we
    keep the local one so no data is lost.
    ================================================================ */
+/* ================================================================
+   REALTIME: AVT report refresh.
+   Without this, loadAvtFromSupabase only runs at app boot — so when
+   admin uploads a fresh AVT mid-session, every connected counter
+   keeps using yesterday's variance and yesterday's auto-generated
+   recount list. Subscribe to kount_avt_reports INSERT events; on
+   fire, re-pull and surface a non-blocking toast so the counter
+   knows the numbers shifted under their feet.
+   Channel name uses the per-tab uuid (defined alongside the
+   pending-items channel) to avoid collisions across tabs/devices. */
+let avtReportsChannel = null;
+
+function startAvtReportsRealtime() {
+  if (!supabaseClient) return;
+  if (avtReportsChannel) return;
+
+  avtReportsChannel = supabaseClient
+    .channel('avt-reports-' + _tabSessionId)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'kount_avt_reports',
+    }, function(evt) { onAvtReportInserted(evt); })
+    .subscribe(function(status) {
+      if (status === 'SUBSCRIBED') console.log('[avt realtime] subscribed');
+      if (status === 'CHANNEL_ERROR') console.warn('[avt realtime] channel error');
+    });
+}
+
+async function stopAvtReportsRealtime() {
+  if (avtReportsChannel && supabaseClient) {
+    try { await supabaseClient.removeChannel(avtReportsChannel); } catch (e) {}
+  }
+  avtReportsChannel = null;
+}
+
+async function onAvtReportInserted(_evt) {
+  // Pull the fresh AVT — same code path the boot loader uses, so cache
+  // semantics + page re-render stay consistent. The "local-newer" guard
+  // inside loadAvtFromSupabase still applies, so a phone that uploaded
+  // its own AVT (legacy path) and hasn't yet synced to Supabase won't
+  // get clobbered by an older Supabase report.
+  const before = appState.avtUploadedAt;
+  const ok = await loadAvtFromSupabase();
+  if (!ok) return;
+  // Only toast if the timestamp actually advanced — guards against an
+  // event that arrives before the Supabase REST is consistent (rare,
+  // but cheap to defend against).
+  if (appState.avtUploadedAt && appState.avtUploadedAt !== before) {
+    showToast('Fresh AVT loaded — variance updated', 'info');
+    logActivity('AVT report auto-refreshed (' + (appState.avtData || []).length + ' rows)');
+  }
+}
+
 async function loadAvtFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
@@ -4065,6 +4119,7 @@ function initUpcMappingsSync() {
   // If already logged in (session restored from localStorage), open realtime
   startUpcRealtime();
   startPendingItemsRealtime();
+  startAvtReportsRealtime();
 
   // Periodic refresh (every 5 min) — still a belt-and-suspenders fallback
   // in case the realtime socket drops silently.
@@ -4081,6 +4136,7 @@ function initUpcMappingsSync() {
     runMigrationIfLoggedIn();
     if (!upcRealtimeChannel) startUpcRealtime();
     if (!pendingItemsChannel) startPendingItemsRealtime();
+    if (!avtReportsChannel) startAvtReportsRealtime();
   });
 }
 
@@ -5221,6 +5277,9 @@ function handleLogin() {
   // new channel names already differ. Still await the old channel's tear-down
   // so the previous identity's events don't briefly leak to the new one.
   stopPendingItemsRealtime().then(startPendingItemsRealtime);
+  // AVT realtime is identity-agnostic but cheap to restart — keeps it tied
+  // to the same _tabSessionId convention.
+  stopAvtReportsRealtime().then(startAvtReportsRealtime);
 
   showPage('venues');
 }
@@ -5313,6 +5372,7 @@ function handleLogout() {
   showConfirm('Sign out? You will need to sign in again.', () => {
     stopUpcRealtime();
     stopPendingItemsRealtime();
+    stopAvtReportsRealtime();
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
     appState.user = null;
