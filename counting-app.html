@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.25';
+const APP_VERSION = '1.26';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3047,6 +3047,11 @@ function searchItemMaster(query, limit) {
    Channel name uses the per-tab uuid (defined alongside the
    pending-items channel) to avoid collisions across tabs/devices. */
 let avtReportsChannel = null;
+// When THIS phone uploaded the AVT, we suppress the realtime echo so
+// the user doesn't get a confusing "Fresh AVT loaded" toast right after
+// they uploaded. Cleared a few seconds later in case the event arrives
+// later than expected. The id matches kount_avt_reports.id.
+let _avtSelfUploadedReportId = null;
 
 function startAvtReportsRealtime() {
   if (!supabaseClient) return;
@@ -3072,7 +3077,14 @@ async function stopAvtReportsRealtime() {
   avtReportsChannel = null;
 }
 
-async function onAvtReportInserted(_evt) {
+async function onAvtReportInserted(evt) {
+  // Skip our own echo: when this phone just uploaded an AVT we don't
+  // want the realtime event to fire a redundant re-pull and a confusing
+  // "Fresh AVT loaded" toast right after the user uploaded.
+  const incomingId = evt && evt.new && evt.new.id;
+  if (incomingId && incomingId === _avtSelfUploadedReportId) {
+    return;
+  }
   // Pull the fresh AVT — same code path the boot loader uses, so cache
   // semantics + page re-render stay consistent. The "local-newer" guard
   // inside loadAvtFromSupabase still applies, so a phone that uploaded
@@ -8026,12 +8038,107 @@ async function handleAvtUpload(event) {
     });
     document.getElementById('avtStoreFilter').classList.remove('hide');
 
+    // Cross-platform push: also write the AVT to Supabase so admin and
+    // every other phone see it via realtime. Mirrors AvtUpload.tsx in the
+    // admin app — same payload, same chunking. Rows that can't be mapped
+    // to a venue are skipped on the push (kount_avt_rows.venue_id is NOT
+    // NULL) but kept in local appState.avtData so the uploading phone's
+    // variance still includes them.
+    let pushedToCloud = false;
+    let pushedReportId = null;
+    let pushedRowCount = 0;
+    let skippedNoVenueCount = 0;
+    if (supabaseLoaded) {
+      try {
+        const cloudPayload = avtItems
+          .filter(it => {
+            const ok = !!it.venueId;
+            if (!ok) skippedNoVenueCount++;
+            return ok;
+          })
+          .map(it => ({
+            store:          it.store || null,
+            venue_id:       it.venueId,
+            venue_name:     it.venueName || null,
+            item_name:      it.itemName,
+            category:       it.category || null,
+            actual:         Number.isFinite(it.actual)        ? it.actual        : null,
+            theo:           Number.isFinite(it.theo)          ? it.theo          : null,
+            variance:       Number.isFinite(it.variance)      ? it.variance      : null,
+            variance_value: Number.isFinite(it.varianceValue) ? it.varianceValue : null,
+            variance_pct:   Number.isFinite(it.variancePct)   ? it.variancePct   : null,
+            cu_price:       Number.isFinite(it.cuPrice)       ? it.cuPrice       : null,
+            start_qty:      Number.isFinite(it.start)         ? it.start         : null,
+            purchases:      Number.isFinite(it.purchases)     ? it.purchases     : null,
+            depletions:     Number.isFinite(it.depletions)    ? it.depletions    : null,
+          }));
+
+        if (cloudPayload.length === 0) {
+          showToast('No rows mapped to a known venue — saved locally only', 'warn');
+        } else {
+          const venueIds = Array.from(new Set(cloudPayload.map(r => r.venue_id)));
+
+          // 1) report header row
+          const reportInsert = await supabaseRest.insert('kount_avt_reports', {
+            uploaded_by_email: (appState.user && appState.user.email) || 'unknown',
+            uploaded_by_name:  (appState.user && appState.user.name)  || 'Unknown',
+            file_name:         file.name,
+            row_count:         cloudPayload.length,
+            venue_ids:         venueIds,
+          });
+          if (reportInsert.error || !reportInsert.data || !reportInsert.data[0]) {
+            throw new Error(reportInsert.error?.message || 'report insert failed');
+          }
+          const report = reportInsert.data[0];
+          pushedReportId = report.id;
+
+          // Suppress own-echo before the realtime event arrives. Cleared
+          // ~10s later (well past Supabase's realtime delivery window).
+          _avtSelfUploadedReportId = report.id;
+          setTimeout(function() {
+            if (_avtSelfUploadedReportId === report.id) _avtSelfUploadedReportId = null;
+          }, 10000);
+
+          // 2) rows in 500-chunk batches (matches admin's CHUNK_SIZE)
+          const CHUNK = 500;
+          for (let i = 0; i < cloudPayload.length; i += CHUNK) {
+            const slice = cloudPayload.slice(i, i + CHUNK).map(r => Object.assign({}, r, { report_id: report.id }));
+            const ins = await supabaseRest.insert('kount_avt_rows', slice);
+            if (ins.error) throw new Error(ins.error.message || 'row chunk insert failed');
+          }
+
+          // Sync local timestamp to the server-stamped uploaded_at so the
+          // local-newer guard in loadAvtFromSupabase doesn't keep stale
+          // local data over the cloud copy.
+          if (report.uploaded_at) {
+            appState.avtUploadedAt = report.uploaded_at;
+            saveState();
+          }
+          pushedToCloud = true;
+          pushedRowCount = cloudPayload.length;
+        }
+      } catch (e) {
+        console.warn('[avt] cloud push failed:', e);
+        // Non-fatal — local data is preserved. Admin and other phones won't
+        // see this upload, but the uploading phone's count flow still works.
+        showToast('AVT saved locally — cloud sync failed: ' + (e.message || 'unknown'), 'warn');
+      }
+    }
+
     document.getElementById('avtStatus').innerHTML =
       '<span style="color:var(--success)">' + avtItems.length + ' items loaded from ' + stores.size + ' store(s).</span>' +
-      '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date().toLocaleString() + '</span>';
+      (pushedToCloud
+        ? '<br><span style="font-size:11px;color:var(--success)">✓ Synced to all devices (' + pushedRowCount + ' rows)' +
+          (skippedNoVenueCount > 0 ? ', ' + skippedNoVenueCount + ' rows skipped (unmapped store)' : '') + '</span>'
+        : '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date().toLocaleString() + ' (local only)</span>');
 
-    logActivity('AVT report uploaded: ' + avtItems.length + ' items from ' + file.name);
-    showToast(avtItems.length + ' AVT items loaded from ' + stores.size + ' store(s)', 'success');
+    if (pushedToCloud) {
+      logActivity('AVT uploaded + synced to cloud: ' + pushedRowCount + ' rows from ' + file.name);
+      showToast(pushedRowCount + ' AVT items synced to all devices', 'success');
+    } else {
+      logActivity('AVT uploaded (local only): ' + avtItems.length + ' items from ' + file.name);
+      showToast(avtItems.length + ' AVT items loaded locally', 'success');
+    }
     renderVariancePage();
 
   } catch (error) {
