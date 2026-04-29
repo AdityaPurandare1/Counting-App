@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.26';
+const APP_VERSION = '1.27';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3155,6 +3155,18 @@ async function loadAvtFromSupabase() {
     saveState();
 
     console.log('[avt] loaded ' + rows.length + ' rows from Supabase (report ' + report.id + ')');
+
+    // v1.27: refresh the weeks_flagged history for the current venue so
+    // chronic-band scoring reflects the latest report. Fire-and-forget;
+    // the page render below uses whatever's cached and will re-render
+    // implicitly on next paint if the cache lands later.
+    if (appState.currentVenue && appState.currentVenue.id) {
+      loadAvtWeeksHistory(appState.currentVenue.id).then(function() {
+        var p = document.querySelector('.page:not(.hide)');
+        if (p && p.id === 'page-variance') renderVariancePage();
+      }).catch(function() {});
+    }
+
     var currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-variance') renderVariancePage();
     return true;
@@ -4132,6 +4144,7 @@ function initUpcMappingsSync() {
   startUpcRealtime();
   startPendingItemsRealtime();
   startAvtReportsRealtime();
+  startAppUsersRealtime();
 
   // Periodic refresh (every 5 min) — still a belt-and-suspenders fallback
   // in case the realtime socket drops silently.
@@ -4149,6 +4162,7 @@ function initUpcMappingsSync() {
     if (!upcRealtimeChannel) startUpcRealtime();
     if (!pendingItemsChannel) startPendingItemsRealtime();
     if (!avtReportsChannel) startAvtReportsRealtime();
+    if (!appUsersChannel) startAppUsersRealtime();
   });
 }
 
@@ -5231,11 +5245,60 @@ async function loadAppUsersFromSupabase() {
     applyAccessList(mapped);
     try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
     console.log('[app_users] loaded ' + mapped.length + ' rows from Supabase');
+
+    // v1.27: if the currently-signed-in user's role / venue access changed
+    // server-side (e.g. admin demoted a counter, or revoked a venue), pick
+    // it up immediately so write operations gate on the new role at the
+    // very next interaction. Sign-out only when access is fully revoked.
+    if (appState.user && appState.user.email) {
+      const me = mapped.find(function(u) { return u.email.toLowerCase() === String(appState.user.email).toLowerCase(); });
+      if (!me) {
+        // User is no longer in the active list — force sign-out next paint.
+        showToast('Your access has been revoked — signing out.', 'warn');
+        setTimeout(function() {
+          try { handleLogout(); } catch (e) { appState.user = null; saveState(); showPage('login'); }
+        }, 1500);
+      } else if (me.role !== appState.user.role || JSON.stringify(me.venueIds) !== JSON.stringify(appState.user.venueIds)) {
+        appState.user.role     = me.role;
+        appState.user.venueIds = me.venueIds;
+        saveState();
+        showToast('Your access has been updated by an admin.', 'info');
+      }
+    }
     return true;
   } catch (e) {
     console.warn('[app_users] fetch failed, keeping local list:', e);
     return false;
   }
+}
+
+/* v1.27: realtime channel so admin-side Security CRUD propagates to the
+   phone within the next render tick. Without this, a counter who's been
+   demoted keeps using their old role until they sign out — a real
+   correctness gap because every write path on the phone gates on the
+   in-memory appState.user.role. Channel name uses the per-tab uuid so
+   multiple devices signed in as the same user don't collapse onto one
+   channel via Supabase dedup. */
+let appUsersChannel = null;
+
+function startAppUsersRealtime() {
+  if (!supabaseClient) return;
+  if (appUsersChannel) return;
+  appUsersChannel = supabaseClient
+    .channel('app-users-' + _tabSessionId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'app_users' }, function() {
+      loadAppUsersFromSupabase().catch(function() {});
+    })
+    .subscribe(function(status) {
+      if (status === 'SUBSCRIBED') console.log('[app_users realtime] subscribed');
+    });
+}
+
+async function stopAppUsersRealtime() {
+  if (appUsersChannel && supabaseClient) {
+    try { await supabaseClient.removeChannel(appUsersChannel); } catch (e) {}
+  }
+  appUsersChannel = null;
 }
 
 /* ================================================================
@@ -5385,6 +5448,7 @@ function handleLogout() {
     stopUpcRealtime();
     stopPendingItemsRealtime();
     stopAvtReportsRealtime();
+    stopAppUsersRealtime();
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
     appState.user = null;
@@ -5417,6 +5481,10 @@ function selectVenue(id) {
   // list live across devices via realtime.
   loadVenueZonesFromSupabase(venue.id).catch(function() {});
   startVenueZonesRealtime(venue.id);
+  // v1.27: refresh the weeks_flagged history for the new venue so
+  // scoreSeverity's chronic bands compute correctly when the user
+  // navigates to Variance / closes Count 1 here.
+  loadAvtWeeksHistory(venue.id).catch(function() {});
   showPage('count');
 }
 
@@ -8150,6 +8218,82 @@ async function handleAvtUpload(event) {
 }
 
 /* ================================================================
+   WEEKS-FLAGGED HISTORY (v1.27)
+   Phone used to call scoreSeverity with weeksActive=0 everywhere, so
+   the chronic CRITICAL ($≥200 for ≥5 weeks, or ≥10 weeks alone) and
+   HIGH (≥5 weeks alone) bands never fired. Mirrors how the standalone
+   inventory-workflow tool feeds weeks_flagged into the same scorer.
+
+   Implementation: for the current venue, pull the 12 most-recent
+   kount_avt_reports and count, per item, how many distinct reports
+   that item appeared in with non-trivial absolute variance ($≥50).
+   Cached in _avtWeeksMap keyed by `${venueId}|${normName}`. Recomputed
+   on every loadAvtFromSupabase call (boot, realtime, post-upload).
+   ================================================================ */
+const WEEKS_HISTORY_LIMIT = 12;
+const WEEKS_HISTORY_VARIANCE_FLOOR = 50;
+let _avtWeeksMap = new Map();
+
+function _normAvtName(name) {
+  return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function getWeeksFlaggedFor(itemName, venueId) {
+  if (!venueId) return 0;
+  const key = venueId + '|' + _normAvtName(itemName);
+  return _avtWeeksMap.get(key) || 0;
+}
+
+async function loadAvtWeeksHistory(venueId) {
+  if (!venueId) { _avtWeeksMap = new Map(); return; }
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return;
+
+  try {
+    const repsResp = await supabaseRest.query(
+      'kount_avt_reports',
+      'select=id&order=uploaded_at.desc&limit=' + WEEKS_HISTORY_LIMIT
+    );
+    if (repsResp.error || !repsResp.data || repsResp.data.length === 0) {
+      _avtWeeksMap = new Map();
+      return;
+    }
+
+    const ids = repsResp.data.map(function(r) { return r.id; });
+    // PostgREST `in.(...)` wants comma-separated quoted UUIDs
+    const inList = ids.map(function(id) { return '"' + id + '"'; }).join(',');
+    // Filter to current venue + non-trivial variance to keep the row count
+    // small (most AVT rows are fine; we only care about persistently-bad ones).
+    const qs = 'select=item_name,report_id'
+      + '&venue_id=eq.' + encodeURIComponent(venueId)
+      + '&report_id=in.(' + inList + ')'
+      + '&or=(variance_value.gte.' + WEEKS_HISTORY_VARIANCE_FLOOR
+      +    ',variance_value.lte.-' + WEEKS_HISTORY_VARIANCE_FLOOR + ')';
+    const rowsResp = await supabaseRest.query('kount_avt_rows', qs);
+    if (rowsResp.error || !rowsResp.data) {
+      _avtWeeksMap = new Map();
+      return;
+    }
+
+    // Per item: count distinct reports (one report ~= one week).
+    const reportsByItem = new Map();
+    for (const row of rowsResp.data) {
+      const key = venueId + '|' + _normAvtName(row.item_name);
+      if (!reportsByItem.has(key)) reportsByItem.set(key, new Set());
+      reportsByItem.get(key).add(row.report_id);
+    }
+    const out = new Map();
+    for (const [key, reportSet] of reportsByItem) {
+      out.set(key, reportSet.size);
+    }
+    _avtWeeksMap = out;
+    console.log('[avt weeks] cached ' + out.size + ' items across ' + ids.length + ' reports for venue ' + venueId);
+  } catch (e) {
+    console.warn('[avt weeks] history fetch failed:', e);
+    _avtWeeksMap = new Map();
+  }
+}
+
+/* ================================================================
    SEVERITY SCORING
    Matches the logic from the inventory workflow app.
    Uses Craftable AVT data + count data to score each item.
@@ -8171,6 +8315,7 @@ function isWineCategory(category) {
 function scoreSeverity(item) {
   const absVar = Math.abs(item.varianceValue || 0);
   const absQty = Math.abs(item.variance || 0);
+  const absPct = Math.abs(item.variancePct || 0);   // v1.27: percentage band
   const weeksActive = item.weeksActive || 0;
   const isWine = isWineCategory(item.category);
   const threshold = isWine ? SEVERITY_THRESHOLDS.wineVarianceDollars : SEVERITY_THRESHOLDS.liquorVarianceDollars;
@@ -8185,8 +8330,10 @@ function scoreSeverity(item) {
     return 'HIGH';
   }
 
-  // MEDIUM: above threshold
-  if (weeksActive >= 3 || absVar >= threshold || absQty >= SEVERITY_THRESHOLDS.bottleVariance * 3) {
+  // MEDIUM: above $ threshold OR ≥3 weeks active OR ≥3 bottles OR ≥25% off.
+  // The pct≥25 band catches cheap-but-very-off items (e.g. an $30 bottle
+  // 80% missing) that the dollar bands ignore. Mirrors inventory-workflow.
+  if (weeksActive >= 3 || absVar >= threshold || absQty >= SEVERITY_THRESHOLDS.bottleVariance * 3 || absPct >= 25) {
     return 'MEDIUM';
   }
 
@@ -8198,8 +8345,12 @@ function scoreSeverity(item) {
   return 'LOW';
 }
 
-function needsRecount(severity, absVar) {
-  return severity === 'CRITICAL' || severity === 'HIGH' || (severity === 'MEDIUM' && absVar >= 100);
+function needsRecount(severity /*, absVar */) {
+  // v1.27: recount everything CRITICAL / HIGH / MEDIUM. The previous
+  // version added an `absVar >= $100` gate on MEDIUM that excluded the
+  // $50–$100 medium-severity items — too aggressive a filter. Matches
+  // inventory-workflow's needsRC rule: severity ∈ {CRITICAL,HIGH,MEDIUM}.
+  return severity === 'CRITICAL' || severity === 'HIGH' || severity === 'MEDIUM';
 }
 
 function severityOrder(sev) {
@@ -8256,10 +8407,11 @@ function renderVariancePage() {
     const severity = scoreSeverity({
       varianceValue: avt.varianceValue,
       variance: avt.variance,
+      variancePct: avt.variancePct,
       category: avt.category,
-      weeksActive: 0,
+      weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
     });
-    const recount = needsRecount(severity, Math.abs(avt.varianceValue));
+    const recount = needsRecount(severity);
     const isMissing = counted === 0 && expected > 0;
 
     totalExpected += expected;
@@ -8330,27 +8482,81 @@ function renderVariancePage() {
   updateVarianceActions();
 }
 
+/* Token extractors for the AVT-vs-counted name matcher. The phone used to
+   substring-match raw lowercased names, so "Hennessy" in AVT would absorb
+   counts from "Hennessy VS", "Hennessy XO", and "Hennessy Paradis" all at
+   once and attribute them to the wrong row. The gated matcher rejects
+   pairs where size, vintage, or varietal explicitly conflict — pairs
+   where one side has no token are still allowed through. Mirrors the
+   gateParsedPair logic in the standalone inventory-workflow tool. */
+const AVT_SIZE_RE = /\b(750ml|1l|1\.5l|1\.75l|3l|6l|9l|15l|375ml|500ml|200ml|250ml|300ml|330ml|187ml|700ml|720ml|1\.8l)\b/i;
+const AVT_VINTAGE_RE = /\b(19|20)\d{2}\b/;
+const AVT_VARIETALS = [
+  'cabernet sauvignon','cabernet','cab sauv','sauvignon blanc','pinot noir','pinot grigio','pinot gris','chardonnay',
+  'merlot','syrah','shiraz','riesling','rose','rosé','grenache','malbec','tempranillo','nebbiolo','sangiovese',
+  'zinfandel','viognier','gewurztraminer','prosecco','champagne','barbera','barolo','brunello','chianti',
+];
+
+function _extractAvtSize(name) {
+  const m = (name || '').match(AVT_SIZE_RE);
+  return m ? m[0].toLowerCase() : null;
+}
+function _extractAvtVintage(name) {
+  const m = (name || '').match(AVT_VINTAGE_RE);
+  if (!m) return null;
+  const y = parseInt(m[0], 10);
+  // Only accept plausible wine vintages — strip 4-digit numbers that are
+  // likely UPCs/SKUs leaking into the name. 1900–current+1 is the band.
+  if (y < 1900 || y > new Date().getFullYear() + 1) return null;
+  return y;
+}
+function _extractAvtVarietal(name) {
+  const lower = (name || '').toLowerCase();
+  for (const v of AVT_VARIETALS) if (lower.includes(v)) return v;
+  return null;
+}
+
+/* True iff `a` and `b` could plausibly be the same product. Each gate
+   skipped if either side lacks the token — only firing rejection on an
+   explicit conflict. After all gates pass, falls back to the legacy
+   substring match the previous matcher used. */
+function _avtNamesMatch(a, b) {
+  if (!a || !b) return false;
+  const lo = String(a).toLowerCase(), lo2 = String(b).toLowerCase();
+
+  const sa = _extractAvtSize(a), sb = _extractAvtSize(b);
+  if (sa && sb && sa !== sb) return false;
+
+  const va = _extractAvtVintage(a), vb = _extractAvtVintage(b);
+  if (va && vb && Math.abs(va - vb) > 1) return false;
+
+  const xa = _extractAvtVarietal(a), xb = _extractAvtVarietal(b);
+  if (xa && xb && xa !== xb) return false;
+
+  return lo === lo2 || lo.includes(lo2) || lo2.includes(lo);
+}
+
 function findCountedQtyForAvtItem(avt, countedMap) {
-  // Try to match AVT item to a counted item by fuzzy name matching
-  const avtName = (avt.itemName || '').toLowerCase();
+  const avtName = avt.itemName || '';
   let bestQty = 0;
 
+  // First pass: try matching against itemMaster-linked entries
   for (const [masterId, qty] of Object.entries(countedMap)) {
     const masterItem = itemMaster.find(m => m.id === masterId);
     if (!masterItem) continue;
-    const masterName = masterItem.name.toLowerCase();
-    if (masterName === avtName || masterName.includes(avtName) || avtName.includes(masterName)) {
+    if (_avtNamesMatch(masterItem.name, avtName)) {
       bestQty = qty;
       break;
     }
   }
 
-  // Also check non-master-linked items in the audit
+  // Second pass: fall back to free-text counted entries (custom items,
+  // typo'd names that didn't pick up a masterId on submit). Sums across
+  // all matching rows in the audit, all zones.
   if (bestQty === 0 && appState.audit) {
     for (const [zone, items] of Object.entries(appState.audit.counts)) {
       for (const item of items) {
-        const itemName = item.name.toLowerCase();
-        if (itemName === avtName || itemName.includes(avtName) || avtName.includes(itemName)) {
+        if (_avtNamesMatch(item.name, avtName)) {
           bestQty += item.qty;
         }
       }
@@ -8524,11 +8730,12 @@ function generateRecountFromAvt() {
     const severity = scoreSeverity({
       varianceValue: avt.varianceValue,
       variance: avt.variance,
+      variancePct: avt.variancePct,
       category: avt.category,
-      weeksActive: 0,
+      weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
     });
 
-    if (needsRecount(severity, Math.abs(avt.varianceValue))) {
+    if (needsRecount(severity)) {
       flagged.push({ avt, counted, severity });
     }
   });
@@ -9095,10 +9302,11 @@ function exportCountCSV(countNumber) {
     const severity = scoreSeverity({
       varianceValue: avt.varianceValue,
       variance: avt.variance,
+      variancePct: avt.variancePct,
       category: avt.category,
-      weeksActive: 0,
+      weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
     });
-    const recount = needsRecount(severity, Math.abs(avt.varianceValue));
+    const recount = needsRecount(severity);
     const issues = findIssuesForItem(avt.itemName);
 
     // Check recount data if Count 2
@@ -9174,13 +9382,13 @@ function exportCountCSV(countNumber) {
   csvRows.push('"Total AVT items:","' + venueAvt.length + '"');
   csvRows.push('"Items with variance:","' + venueAvt.filter(a => a.variance !== 0).length + '"');
   csvRows.push('"Total variance value:","$' + Math.abs(venueAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '"');
-  csvRows.push('"Items needing recount:","' + venueAvt.filter(a => needsRecount(scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, category: a.category, weeksActive: 0 }), Math.abs(a.varianceValue))).length + '"');
+  csvRows.push('"Items needing recount:","' + venueAvt.filter(a => needsRecount(scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, variancePct: a.variancePct, category: a.category, weeksActive: getWeeksFlaggedFor(a.itemName, a.venueId) }))).length + '"');
 
   // Severity breakdown
   csvRows.push('');
   csvRows.push('"SEVERITY BREAKDOWN"');
   ['CRITICAL', 'HIGH', 'MEDIUM', 'WATCH', 'LOW'].forEach(sev => {
-    const count = venueAvt.filter(a => scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, category: a.category, weeksActive: 0 }) === sev).length;
+    const count = venueAvt.filter(a => scoreSeverity({ varianceValue: a.varianceValue, variance: a.variance, variancePct: a.variancePct, category: a.category, weeksActive: getWeeksFlaggedFor(a.itemName, a.venueId) }) === sev).length;
     csvRows.push('"' + sev + ':","' + count + '"');
   });
 
