@@ -2815,7 +2815,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.28';
+const APP_VERSION = '1.29';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3036,6 +3036,102 @@ function searchItemMaster(query, limit) {
    legacy upload from before v1.5 that never made it to Supabase) we
    keep the local one so no data is lost.
    ================================================================ */
+/* ================================================================
+   VENUES (v1.29)
+   Until now appState.venues was hardcoded right next to the appState
+   declaration. This function pulls the live list from public.venues
+   (migration 0013) and rewrites appState.venues + appState.venues[i]
+   ._defaultZones in place. Other code reads via appState — no callsite
+   changes. The hardcoded list inside appState stays as the boot-time
+   fallback for offline/Supabase-unreachable starts.
+   ================================================================ */
+async function loadVenuesFromSupabase() {
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  try {
+    const resp = await supabaseRest.query(
+      'kount_venues',
+      'select=id,name,address,default_zones,store_aliases,ordinal,is_active'
+        + '&is_active=eq.true&order=ordinal'
+    );
+    if (resp.error || !resp.data) {
+      console.warn('[venues] load failed, keeping hardcoded list:', resp.error);
+      return false;
+    }
+    if (resp.data.length === 0) {
+      // Schema present but empty (e.g. seed didn't run) — keep the local
+      // hardcoded fallback so the picker isn't blank.
+      console.warn('[venues] table is empty, keeping hardcoded list');
+      return false;
+    }
+    var prevById = {};
+    appState.venues.forEach(function(v) { prevById[v.id] = v; });
+
+    appState.venues = resp.data.map(function(r) {
+      var prev = prevById[r.id];
+      return {
+        id: r.id,
+        name: r.name,
+        address: r.address || '',
+        zones: (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev.zones ? prev.zones.slice() : []),
+        // Snapshot of the immutable defaults so the zone-tab UI can tell
+        // which zones are admin-default vs counter-added (kount_venue_zones).
+        _defaultZones: (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev._defaultZones ? prev._defaultZones.slice() : []),
+        _storeAliases: r.store_aliases || [],
+      };
+    });
+
+    // If currentVenue still exists in the new list, refresh its in-place
+    // reference so anything holding `appState.currentVenue` sees the new
+    // name/address/zones. If it was removed (soft delete), drop the
+    // selection — counters will be sent back to the venue picker.
+    if (appState.currentVenue) {
+      var fresh = appState.venues.find(function(v) { return v.id === appState.currentVenue.id; });
+      if (fresh) appState.currentVenue = fresh;
+      else {
+        showToast('The venue you were on was removed by an admin', 'warn');
+        appState.currentVenue = null;
+        appState.currentZone = null;
+      }
+    }
+
+    saveState();
+    console.log('[venues] loaded ' + appState.venues.length + ' venues from Supabase');
+    // If currently rendering venue cards, refresh
+    var page = document.querySelector('.page:not(.hide)');
+    if (page && page.id === 'page-venues') renderVenues();
+    return true;
+  } catch (e) {
+    console.warn('[venues] load threw, keeping hardcoded list:', e);
+    return false;
+  }
+}
+
+/* Realtime: admin CRUD on the venues table propagates here so a counter
+   sees a renamed venue, a new venue, or a removal within a render tick.
+   Channel name uses the per-tab uuid for the same reason as the other
+   channels (avoid same-user-on-multiple-devices collisions). */
+let venuesChannel = null;
+
+function startVenuesRealtime() {
+  if (!supabaseClient) return;
+  if (venuesChannel) return;
+  venuesChannel = supabaseClient
+    .channel('venues-' + _tabSessionId)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_venues' }, function() {
+      loadVenuesFromSupabase().catch(function() {});
+    })
+    .subscribe(function(status) {
+      if (status === 'SUBSCRIBED') console.log('[venues realtime] subscribed');
+    });
+}
+
+async function stopVenuesRealtime() {
+  if (venuesChannel && supabaseClient) {
+    try { await supabaseClient.removeChannel(venuesChannel); } catch (e) {}
+  }
+  venuesChannel = null;
+}
+
 /* ================================================================
    REALTIME: AVT report refresh.
    Without this, loadAvtFromSupabase only runs at app boot — so when
@@ -4163,6 +4259,10 @@ function initUpcMappingsSync() {
     if (!pendingItemsChannel) startPendingItemsRealtime();
     if (!avtReportsChannel) startAvtReportsRealtime();
     if (!appUsersChannel) startAppUsersRealtime();
+    if (!venuesChannel) startVenuesRealtime();
+    // Online recovery: also re-pull venues so a venue admin added/renamed
+    // during the offline window lands without a manual refresh.
+    loadVenuesFromSupabase().catch(function() {});
   });
 }
 
@@ -5462,6 +5562,7 @@ function handleLogout() {
     stopPendingItemsRealtime();
     stopAvtReportsRealtime();
     stopAppUsersRealtime();
+    stopVenuesRealtime();
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
     appState.user = null;
@@ -5836,6 +5937,13 @@ function getCountedItemIds() {
 
 // Snapshot the original hardcoded zone list per venue so we can tell
 // which zones are user-added and therefore safely removable.
+// FOOT-GUN: This forEach runs once at script-parse, BEFORE the async
+// loadVenuesFromSupabase resolves. After that load, the function rewrites
+// each venue.zones AND venue._defaultZones from r.default_zones, so the
+// values here get superseded. DO NOT call this forEach a second time
+// (e.g. after a session restore or page navigation) — it would re-snapshot
+// venue.zones (which may now include counter-added customs) as the new
+// "default" list, making custom zones non-removable.
 appState.venues.forEach(v => { v._defaultZones = (v.zones || []).slice(); });
 
 function isCustomZone(zone) {
@@ -10423,11 +10531,13 @@ async function sendAIMessage() {
    ================================================================ */
 openPhotoDB().catch(() => {});
 loadItemMaster();
+loadVenuesFromSupabase().catch(() => {});
 loadAvtFromSupabase().catch(() => {});
 loadAppUsersFromSupabase().catch(() => {});
 loadHistoricAuditsFromSupabase().catch(() => {});
 loadCarriedItemsFromSupabase().catch(() => {});
 startCarriedItemsRealtime();
+startVenuesRealtime();
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
