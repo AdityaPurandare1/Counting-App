@@ -2989,16 +2989,20 @@ function startCarriedItemsRealtime() {
    the admin flagged. */
 function searchItemMaster(query, limit) {
   const q = String(query || '').toLowerCase().trim();
-  if (q.length < 2) return [];
-  const words = q.split(/\s+/);
+  if (q.length < 1) return [];
+  const words = q.split(/\s+/).filter(function(w) { return w.length > 0; });
+  if (words.length === 0) return [];
   function match(item) {
+    if (!item) return false;
     const hay = (
       (item.name || '') + ' ' +
       (item.brand || '') + ' ' +
       (item.sku || '') + ' ' +
       (item.upc || '') + ' ' +
+      (item.category || '') + ' ' +
       (item.subcategory || '')
     ).toLowerCase();
+    if (!hay.trim()) return false;
     for (let i = 0; i < words.length; i++) if (!hay.includes(words[i])) return false;
     return true;
   }
@@ -3611,7 +3615,7 @@ let _barcodeLinkedItem = null; // the itemMaster entry the user picked
 function onBarcodeNameSearch(value) {
   var q = value.toLowerCase().trim();
   var container = document.getElementById('barcodeNameSuggestions');
-  if (q.length < 2) { container.innerHTML = ''; return; }
+  if (q.length < 1) { container.innerHTML = ''; return; }
 
   // v1.14: searchItemMaster narrows to kount_carried_items first and only
   // falls back to the full catalog if nothing matches there.
@@ -3739,6 +3743,7 @@ async function loadItemMaster() {
     mergeCustomItemsIntoMaster();
     console.log('Item master from Supabase: ' + itemMaster.length + ' items');
     showToast(itemMaster.length + ' items from Supabase', 'success');
+    validateItemMaster('supabase');
     var currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-count') renderCountPage();
     return;
@@ -3768,13 +3773,61 @@ async function loadItemMaster() {
     mergeCustomItemsIntoMaster();
     console.log('Item master from items.json: ' + itemMaster.length + ' items');
     showToast(itemMaster.length + ' items loaded', 'success');
+    validateItemMaster('items.json');
 
     currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-count') renderCountPage();
   } catch (error) {
     console.error('Failed to load item master:', error);
     showToast('Could not load inventory data', 'error');
+    showMasterBanner('Could not load inventory — search and scan will not match items. Reload the app or check your connection.');
   }
+}
+
+/* Visible banner pinned to the top of the screen when the master is empty,
+   degenerate ("Unknown Item" repeats), or otherwise unfit for matching. We
+   hide it if a later reload succeeds. */
+function showMasterBanner(text) {
+  var bar = document.getElementById('kountMasterWarn');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'kountMasterWarn';
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:#b91c1c;color:#fff;padding:8px 12px;font-size:12px;font-weight:600;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,0.2)';
+    document.body.insertBefore(bar, document.body.firstChild);
+  }
+  bar.textContent = text;
+  bar.style.display = 'block';
+}
+function hideMasterBanner() {
+  var bar = document.getElementById('kountMasterWarn');
+  if (bar) bar.style.display = 'none';
+}
+
+/* Sanity-check the loaded master: empty, all-named "Unknown Item", or
+   missing UPCs across the board are all signs the search/scan flows will
+   silently fail. Surface them loudly so the counter doesn't keep tapping
+   through a broken catalog. */
+function validateItemMaster(source) {
+  var n = (itemMaster || []).length;
+  if (n === 0) {
+    showMasterBanner('Inventory list is empty (' + source + '). Pull-to-reload or restart the app.');
+    return;
+  }
+  var unknownCount = 0;
+  var noNameCount = 0;
+  var withUpc = 0;
+  for (var i = 0; i < n; i++) {
+    var it = itemMaster[i];
+    if (!it || !it.name || !String(it.name).trim()) noNameCount++;
+    else if (it.name === 'Unknown Item') unknownCount++;
+    if (it && it.upc && String(it.upc).trim()) withUpc++;
+  }
+  if (unknownCount > n * 0.5 || noNameCount > n * 0.5) {
+    showMasterBanner('Inventory loaded but ' + (unknownCount + noNameCount) + ' of ' + n + ' items have no name. Search will not match — restart the app.');
+    return;
+  }
+  console.log('[master] ' + source + ' validated: ' + n + ' items, ' + withUpc + ' with UPC, ' + unknownCount + ' Unknown, ' + noNameCount + ' nameless');
+  hideMasterBanner();
 }
 
 /* ================================================================
@@ -5051,11 +5104,21 @@ function lookupLearnedUPC(code) {
   const key = normalizeBarcode(code);
   if (!key) return null;
   if (upcMappingsCache[key]) return upcMappingsCache[key];
+  // Tolerant match against the in-memory cache — try same-digits variants
+  // so a scanner that adds/strips a leading zero or a check digit still
+  // resolves to a known mapping.
+  var noZeros = key.replace(/^0+/, '');
+  for (var ck in upcMappingsCache) {
+    if (!ck) continue;
+    var ckNoZeros = ck.replace(/^0+/, '');
+    if (ckNoZeros === noZeros && noZeros.length >= 6) return upcMappingsCache[ck];
+    // Last-12 digits match handles EAN-13 vs UPC-A check digit drift
+    if (key.length >= 12 && ck.length >= 12 && key.slice(-12) === ck.slice(-12)) return upcMappingsCache[ck];
+  }
   // Legacy key format (kept around briefly — empty after migration runs)
   try {
     var legacy = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}');
     if (legacy[key]) return legacy[key];
-    var noZeros = key.replace(/^0+/, '');
     for (var k in legacy) {
       if (k.replace(/^0+/, '') === noZeros) return legacy[k];
     }
@@ -5842,6 +5905,14 @@ function createAndStartAudit(venue, opts) {
   logActivity('Audit started by ' + (appState.user?.name || 'Unknown'));
   saveState();
   showToast('Audit started for ' + venue.name, 'success');
+
+  // Always pull a fresh master + carried set + UPC mappings when an audit
+  // begins, so a stale localStorage cache from days ago can never silently
+  // drive search/scan against out-of-date inventory.
+  loadItemMaster().catch(function() {});
+  loadCarriedItemsFromSupabase().catch(function() {});
+  loadApprovedUpcMappings(true).catch(function() {});
+
   renderCountPage();
 }
 
@@ -6231,7 +6302,7 @@ function doGuidedSearch(value) {
   const query = value.toLowerCase().trim();
   const resultsEl = document.getElementById('guidedSearchResults');
 
-  if (query.length < 2) {
+  if (query.length < 1) {
     resultsEl.innerHTML = '';
     return;
   }
@@ -6511,7 +6582,7 @@ function doQuickSearch(value) {
   const query = value.toLowerCase().trim();
   const resultsEl = document.getElementById('quickSearchResults');
 
-  if (query.length < 2) {
+  if (query.length < 1) {
     resultsEl.innerHTML = '';
     return;
   }
@@ -6527,7 +6598,8 @@ function doQuickSearch(value) {
   const matches = [];
   for (let i = 0; i < itemMaster.length && matches.length < 20; i++) {
     const item = itemMaster[i];
-    if ((item.name + ' ' + item.brand + ' ' + item.sku).toLowerCase().includes(query)) {
+    const hay = ((item.name || '') + ' ' + (item.brand || '') + ' ' + (item.sku || '') + ' ' + (item.upc || '')).toLowerCase();
+    if (hay.includes(query)) {
       matches.push(item);
     }
   }
@@ -7223,6 +7295,17 @@ function detectCategory(title, description) {
 }
 
 async function handleBarcodeResult(code) {
+  // Best-effort: refresh the approved-mappings cache before lookup so a
+  // recently-approved UPC mapping doesn't get missed because of the 5-min
+  // TTL. Don't block on it — if the network is slow, fall through to the
+  // already-cached copy.
+  try {
+    if (typeof loadApprovedUpcMappings === 'function') {
+      // Fire-and-forget; the next scan will see the refreshed cache.
+      loadApprovedUpcMappings(false).catch(function() {});
+    }
+  } catch (e) {}
+
   // Strategy 0: Check learned UPCs first (admin-approved upc_mappings).
   // These are authoritative — they MUST win over the localStorage UPCitemdb
   // cache, otherwise a UPC that was scanned before being mapped will keep
@@ -7840,7 +7923,7 @@ function onManualSearch(value) {
   // (otherwise selectMasterItem followed by edits leaves a stale link)
   document.getElementById('manualName').dataset.masterId = '';
 
-  if (query.length < 2) {
+  if (query.length < 1) {
     document.getElementById('manualSuggestions').innerHTML = '';
     updateManualSuggestBtn();
     return;
@@ -10529,6 +10612,27 @@ async function sendAIMessage() {
 /* ================================================================
    INITIALIZATION
    ================================================================ */
+window.kountDiag = function () {
+  var sample = (itemMaster || [])[0] || null;
+  var withUpc = (itemMaster || []).filter(function(i) { return i && i.upc && String(i.upc).trim(); }).length;
+  var info = {
+    itemMaster_length: (itemMaster || []).length,
+    itemMaster_with_upc: withUpc,
+    itemMaster_first_row: sample,
+    supabaseLoaded: typeof supabaseLoaded !== 'undefined' ? supabaseLoaded : null,
+    carriedSet_size: (typeof carriedSet !== 'undefined' && carriedSet) ? carriedSet.size : null,
+    upcMappingsCache_size: Object.keys(upcMappingsCache || {}).length,
+    upcMappingsCache_loadedAt: upcMappingsCacheLoadedAt ? new Date(upcMappingsCacheLoadedAt).toISOString() : null,
+    audit_active: !!(appState && appState.audit),
+    audit_status: appState && appState.audit ? appState.audit.status : null,
+    audit_locked: typeof isAuditLocked === 'function' ? isAuditLocked() : null,
+    venue: appState && appState.currentVenue ? appState.currentVenue.name : null,
+    user: appState && appState.user ? appState.user.email : null,
+  };
+  console.table(info);
+  return info;
+};
+
 openPhotoDB().catch(() => {});
 loadItemMaster();
 loadVenuesFromSupabase().catch(() => {});
