@@ -2132,7 +2132,7 @@ html, body {
       </div>
       <div class="summary-card">
         <div class="stat-row">
-          <span class="stat-label">Items in inventory</span>
+          <span class="stat-label">Items in inventory <button onclick="kountRefresh()" title="Refresh inventory" style="background:none;border:none;color:var(--accent);cursor:pointer;font-size:11px;margin-left:4px;text-decoration:underline">refresh</button></span>
           <span class="stat-value accent" id="preAuditItemCount">0</span>
         </div>
         <div class="stat-row" style="flex-direction:column;align-items:flex-start;gap:4px">
@@ -2950,17 +2950,58 @@ let carriedSet = new Set();
 async function loadCarriedItemsFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
-    const { data, error } = await supabaseRest.query(
-      'kount_carried_items',
-      'select=purchase_item_id&limit=5000'
-    );
-    if (error) { console.warn('[carried] load failed:', error); return false; }
-    carriedSet = new Set((data || []).map(function(r) { return String(r.purchase_item_id); }));
+    // PostgREST caps anon SELECT at db-max-rows (default 1000). The catalog
+    // is now ~5K items and growing — paginate so a curated item past row
+    // 1000 never silently disappears from the phone.
+    const PAGE_SIZE = 1000;
+    const MAX_PAGES = 20;
+    const all = [];
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const offset = page * PAGE_SIZE;
+      const qs = 'select=purchase_item_id&order=purchase_item_id&limit=' + PAGE_SIZE + '&offset=' + offset;
+      const { data, error } = await supabaseRest.query('kount_carried_items', qs);
+      if (error) { console.warn('[carried] page ' + page + ' failed:', error); return false; }
+      if (!data || data.length === 0) break;
+      for (let i = 0; i < data.length; i++) all.push(data[i]);
+      if (data.length < PAGE_SIZE) break;
+    }
+    carriedSet = new Set(all.map(function(r) { return String(r.purchase_item_id); }));
     console.log('[carried] loaded ' + carriedSet.size + ' items from Supabase');
+
+    // After refreshing carriedSet, validate that itemMaster actually contains
+    // the IDs we just got. If resolution is poor (<80%), itemMaster is stale
+    // — trigger a master reload so admin-curated items become findable.
+    reconcileCarriedAgainstMaster();
     return true;
   } catch (e) {
     console.warn('[carried] load threw:', e);
     return false;
+  }
+}
+
+/* Compares carriedSet against the loaded itemMaster. If itemMaster is missing
+   a meaningful chunk of curated IDs (almost always because itemMaster was
+   built from the static items.json fallback while carriedSet has live
+   Supabase UUIDs), force a fresh Supabase items reload. */
+let _reconcileInFlight = false;
+function reconcileCarriedAgainstMaster() {
+  if (_reconcileInFlight) return;
+  if (!carriedSet || carriedSet.size === 0) return;
+  if (!itemMaster || itemMaster.length === 0) return;
+  var masterIds = new Set();
+  for (var i = 0; i < itemMaster.length; i++) {
+    if (itemMaster[i] && itemMaster[i].id) masterIds.add(String(itemMaster[i].id));
+  }
+  var matched = 0;
+  carriedSet.forEach(function(id) { if (masterIds.has(id)) matched++; });
+  var rate = matched / carriedSet.size;
+  console.log('[carried] resolution: ' + matched + '/' + carriedSet.size + ' (' + Math.round(rate * 100) + '%)');
+  if (rate < 0.8) {
+    console.warn('[carried] resolution low — itemMaster appears stale, forcing reload');
+    _reconcileInFlight = true;
+    loadItemMaster()
+      .catch(function() {})
+      .then(function() { _reconcileInFlight = false; });
   }
 }
 
@@ -2976,10 +3017,34 @@ function startCarriedItemsRealtime() {
     .channel('kount-carried-items-live')
     .on('postgres_changes',
       { event: '*', schema: 'public', table: 'kount_carried_items' },
-      function() { loadCarriedItemsFromSupabase().catch(function() {}); })
+      function() {
+        // A carried-items mutation often means a NEW purchase_item was just
+        // added to the catalog. Re-fetch carriedSet AND itemMaster so the
+        // phone never holds a curated ID that points to an unloaded item.
+        loadCarriedItemsFromSupabase().catch(function() {});
+        loadItemMaster().catch(function() {});
+      })
     .subscribe(function(status) {
       if (status === 'SUBSCRIBED') console.log('[carried realtime] subscribed');
     });
+}
+
+/* Periodic backstop. Realtime is great when it works, but WebSocket
+   subscriptions silently drop on flaky cellular / when the PWA is
+   backgrounded. A 60-second poll while the page is visible guarantees that
+   a curated item never stays invisible for more than a minute. */
+let _periodicSyncTimer = null;
+function startPeriodicCatalogSync() {
+  if (_periodicSyncTimer) return;
+  _periodicSyncTimer = setInterval(function() {
+    if (document.visibilityState !== 'visible') return;
+    loadCarriedItemsFromSupabase().catch(function() {});
+    // Retry items only if we are still on the items.json fallback (i.e.
+    // Supabase failed at boot) — otherwise the realtime + carried-reconcile
+    // path covers fresh items.
+    if (!supabaseLoaded) loadItemMaster().catch(function() {});
+    loadApprovedUpcMappings(false).catch(function() {});
+  }, 60 * 1000);
 }
 
 /* Shared search helper used by every scan/type path. Always prefers the
@@ -10642,6 +10707,30 @@ loadHistoricAuditsFromSupabase().catch(() => {});
 loadCarriedItemsFromSupabase().catch(() => {});
 startCarriedItemsRealtime();
 startVenuesRealtime();
+startPeriodicCatalogSync();
+
+// Refresh on tab focus. Coming back to the app after the desktop admin
+// curated more items should not require a hard reload.
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState !== 'visible') return;
+  loadCarriedItemsFromSupabase().catch(function() {});
+  if (!supabaseLoaded) loadItemMaster().catch(function() {});
+  loadApprovedUpcMappings(false).catch(function() {});
+});
+
+// Public refresh hook — UI can call this from a button, and we expose it on
+// window so a counter can run kountRefresh() from the console as a panic
+// button if anything ever looks stale.
+window.kountRefresh = function () {
+  showToast('Refreshing inventory...', 'info');
+  return Promise.allSettled([
+    loadItemMaster(),
+    loadCarriedItemsFromSupabase(),
+    loadApprovedUpcMappings(true),
+  ]).then(function() {
+    showToast('Inventory refreshed (' + (itemMaster || []).length + ' items, ' + (carriedSet ? carriedSet.size : 0) + ' carried)', 'success');
+  });
+};
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
