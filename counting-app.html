@@ -2389,7 +2389,7 @@ html, body {
       <button class="mode-btn" data-rf="pending" onclick="setRecountFilter('pending', this)">Pending</button>
     </div>
     <div id="recountList"></div>
-    <button class="submit-btn" style="margin-top:12px" onclick="submitRecount()">Mark all recount done</button>
+    <button class="submit-btn hide" id="recountCloseBtn" style="margin-top:12px" onclick="submitRecount()">Close recount and generate final report</button>
   </div>
 
   <!-- ========== BOTTOM NAV ========== -->
@@ -2501,7 +2501,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="barcodeQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+        <input class="form-input" id="barcodeQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
       </div>
     </div>
     <div class="form-group">
@@ -2562,7 +2562,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="manualQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+        <input class="form-input" id="manualQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
       </div>
     </div>
     <div class="form-group">
@@ -2697,7 +2697,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="photoQty" type="number" value="1" min="0" step="0.25" inputmode="decimal">
+        <input class="form-input" id="photoQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
       </div>
     </div>
     <div class="form-group">
@@ -2732,7 +2732,7 @@ html, body {
 
       <div class="gh-stepper">
         <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">−</button>
-        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.25" inputmode="decimal" placeholder="0">
+        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0">
         <button class="gh-step gh-plus" onclick="adjustGuidedQty(1)" type="button">+</button>
       </div>
 
@@ -2762,6 +2762,21 @@ html, body {
     <div class="form-group">
       <label>Issue notes (optional)</label>
       <input class="form-input" id="guidedIssueNotes" placeholder="e.g. sticker fell off, wrong shelf...">
+    </div>
+    <!-- Recount-only block: visible when openRecountEntry sets data-mode="recount".
+         Both fields are required to mark the row as "recorded" — finalizeCount2
+         and the recount close button block until every recount row has both. -->
+    <div class="form-group hide" id="recountResultGroup">
+      <label>Audit result <span style="color:var(--danger)">*</span></label>
+      <select class="form-input" id="recountResultSelect">
+        <option value="">— Pick a result —</option>
+        <option value="corrected">Count Corrected (count was changed)</option>
+        <option value="verified">Count Verified (count stayed the same)</option>
+      </select>
+    </div>
+    <div class="form-group hide" id="recountReasonGroup">
+      <label>Why? <span style="color:var(--danger)">*</span></label>
+      <textarea class="form-input" id="recountReasonInput" rows="2" placeholder="e.g. found 4 hidden in back fridge, original count missed them"></textarea>
     </div>
     <div style="display:flex;gap:8px">
       <button class="submit-btn secondary" style="flex:1" onclick="closeGuidedEntry()">Skip</button>
@@ -3769,6 +3784,17 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
+/* clampQty(v) — every quantity input across the app routes through this so
+   we never write more than 2 decimal places (matches kount_entries.qty's
+   numeric(12,2)) and never accept negative quantities. Returns NaN for
+   non-numeric input so callers can early-return with a "valid quantity"
+   toast. Strips scientific notation by going through Number(). */
+function clampQty(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return NaN;
+  return Math.round(n * 100) / 100;
+}
+
 /* ================================================================
    FIX #2: DETERMINISTIC EXPECTED QUANTITIES
    Uses a seeded hash based on SKU so values are stable across reloads.
@@ -4752,6 +4778,12 @@ async function syncRecountUpdateToSupabase(key) {
     count2_qty: rec.recountQty != null ? Number(rec.recountQty) : null,
     status: rec.status || 'pending',
     resolved_at: rec.status === 'done' ? new Date().toISOString() : null,
+    audit_result: rec.auditResult || null,
+    audit_reason: rec.auditReason || null,
+    zone: rec.zone || null,
+    category: rec.category || null,
+    counter_initials: rec.counterInitials || null,
+    variance_qty: rec.variance != null ? Number(rec.variance) : null,
   };
 
   try {
@@ -5003,13 +5035,18 @@ async function refreshRecountsFromSupabase() {
         avtItem: { itemName: r.item_name },
         severity: String(r.severity || 'MEDIUM').toUpperCase(),
         varianceValue: Number(r.variance_value || 0),
-        variance: 0,
+        variance: r.variance_qty != null ? Number(r.variance_qty) : 0,
         actual: 0,
         theo: 0,
         count1Qty: r.count1_qty != null ? Number(r.count1_qty) : null,
         recountQty: r.count2_qty != null ? Number(r.count2_qty) : null,
         status: r.status || 'pending',
         notes: '',
+        zone: r.zone || '',
+        category: r.category || '',
+        auditResult: r.audit_result || null,
+        auditReason: r.audit_reason || '',
+        counterInitials: r.counter_initials || '',
       };
     });
     appState.audit.recounts = remote;
@@ -5866,7 +5903,17 @@ function renderPreAuditScreen() {
   document.getElementById('preAuditVenue').textContent = venue.name;
   document.getElementById('preAuditAddr').textContent = venue.address;
   var src = supabaseLoaded ? ' (Supabase)' : ' (local)';
-  document.getElementById('preAuditItemCount').innerHTML = itemMaster.length + '<span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:4px">' + esc(src) + '</span>';
+  // Catalog size is admin-only context; counters/managers see a generic
+  // "Catalog ready" pill so they aren't anchored on a number that's
+  // really only meaningful for catalog hygiene work.
+  var preAuditEl = document.getElementById('preAuditItemCount');
+  if (preAuditEl) {
+    if (appState.user?.role === 'corporate') {
+      preAuditEl.innerHTML = itemMaster.length + '<span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:4px">' + esc(src) + '</span>';
+    } else {
+      preAuditEl.innerHTML = '<span style="font-size:13px;font-weight:500;color:var(--text-muted)">Catalog ready</span>';
+    }
+  }
   document.getElementById('preAuditZoneCount').textContent = venue.zones.join(', ');
   document.getElementById('preAuditUser').textContent = appState.user?.name || '-';
   document.getElementById('preAuditDate').textContent = new Date().toLocaleDateString('en-US', {
@@ -6031,13 +6078,22 @@ function renderProgress() {
   const countedCount = getCountedItemIds().size;
   const totalCount = itemMaster.length;
   const percent = totalCount > 0 ? Math.round(countedCount / totalCount * 100) : 0;
+  const isAdmin = appState.user?.role === 'corporate';
+
+  // Non-admin counters see just the running count, no "/ 20001" anchor.
+  // The X-of-Y framing implies a goal of counting the entire catalog —
+  // operationally misleading for a per-venue audit.
+  const leftLabel = isAdmin
+    ? '<strong>' + countedCount + '</strong> of <strong>' + totalCount + '</strong> items counted'
+    : '<strong>' + countedCount + '</strong> item' + (countedCount === 1 ? '' : 's') + ' counted';
+  const rightLabel = isAdmin ? '<strong>' + percent + '%</strong>' : '';
 
   document.getElementById('countProgress').innerHTML =
     '<div class="progress-info">' +
-      '<span><strong>' + countedCount + '</strong> of <strong>' + totalCount + '</strong> items counted</span>' +
-      '<span><strong>' + percent + '%</strong></span>' +
+      '<span>' + leftLabel + '</span>' +
+      '<span>' + rightLabel + '</span>' +
     '</div>' +
-    '<div class="progress-bar"><div class="progress-fill" style="width:' + percent + '%"></div></div>';
+    (isAdmin ? '<div class="progress-bar"><div class="progress-fill" style="width:' + percent + '%"></div></div>' : '');
 }
 
 /* FIX #4: Recount banner on count page */
@@ -6289,7 +6345,17 @@ function switchZone(element) {
 
 function updateHeaderCount() {
   const counted = getCountedItemIds().size;
-  document.getElementById('headerCount').textContent = counted + ' / ' + itemMaster.length;
+  const el = document.getElementById('headerCount');
+  if (!el) return;
+  // Hide the "X / catalogTotal" pill from counters/managers — they don't
+  // benefit from seeing the full catalog size, only the corporate admin
+  // working on catalog hygiene does.
+  if (appState.user?.role === 'corporate') {
+    el.textContent = counted + ' / ' + itemMaster.length;
+    el.classList.remove('hide');
+  } else {
+    el.textContent = String(counted);
+  }
 }
 
 /* ================================================================
@@ -6482,9 +6548,27 @@ function submitGuidedEntry() {
   // Handle recount mode
   if (modal.dataset.mode === 'recount') {
     const recountKey = modal.dataset.masterId;
-    const qty = parseFloat(document.getElementById('guidedQty').value);
-    if (isNaN(qty)) {
-      showToast('Enter a quantity', 'error');
+    const qty = clampQty(document.getElementById('guidedQty').value);
+    if (!Number.isFinite(qty)) {
+      showToast('Enter a valid quantity', 'error');
+      return;
+    }
+
+    // Mandatory: audit result + reason. Both block save — the user must
+    // explicitly mark the row as Corrected (count changed) or Verified
+    // (count stayed the same) AND give a reason so the admin Reports
+    // table has Context. This is the "cannot move forward without these"
+    // rule for the recount lifecycle.
+    const auditResult = (document.getElementById('recountResultSelect')?.value || '').trim();
+    const auditReason = (document.getElementById('recountReasonInput')?.value || '').trim();
+    if (auditResult !== 'corrected' && auditResult !== 'verified') {
+      showToast('Pick an audit result (Corrected or Verified)', 'error');
+      document.getElementById('recountResultSelect')?.focus();
+      return;
+    }
+    if (!auditReason) {
+      showToast('Enter a reason — required for the audit report', 'error');
+      document.getElementById('recountReasonInput')?.focus();
       return;
     }
 
@@ -6499,26 +6583,34 @@ function submitGuidedEntry() {
         rec.recount = qty;
         rec.status = 'done';
       }
+      rec.auditResult = auditResult;
+      rec.auditReason = auditReason;
+      // Stamp the counter's initials for the admin Reports column. Falls
+      // back to the email's local-part if user.name isn't set.
+      const u = appState.user || {};
+      rec.counterInitials = (function() {
+        const name = (u.name || '').trim();
+        if (name) {
+          const parts = name.split(/\s+/).filter(Boolean);
+          if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+          return parts[0].slice(0, 2).toUpperCase();
+        }
+        return (u.email || '').split('@')[0].slice(0, 2).toUpperCase();
+      })();
     }
 
-    logActivity('Recounted ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty);
+    logActivity('Recount ' + auditResult + ' — ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty + ' (' + auditReason.slice(0, 60) + ')');
     saveState();
 
     // Push this recount row's update to kount_recounts so the desktop sees
-    // the count2 value + resolved status appear live (v1.8).
+    // the count2 value + audit_result + audit_reason live.
     syncRecountUpdateToSupabase(recountKey).catch(function() {});
 
     closeGuidedEntry();
 
-    // Check if all recounts are now done — auto-close audit
-    var allRecounts = Object.values(appState.audit.recounts);
-    var stillPending = allRecounts.filter(function(r) { return r.status === 'pending'; });
-    if (stillPending.length === 0) {
-      showToast('All recounts done! Closing audit...', 'success');
-      setTimeout(function() { finalizeCount2(); }, 600);
-    } else {
-      renderRecountPage();
-    }
+    // Don't auto-finalize — that's now an explicit manager-only action via
+    // the Close Recount button (with all-rows-recorded validation).
+    renderRecountPage();
     return;
   }
 
@@ -6549,6 +6641,12 @@ function submitGuidedEntry() {
 function closeGuidedEntry(event) {
   if (event && event.target !== event.currentTarget) return;
   document.getElementById('guidedEntryModal').classList.add('hide');
+  // Reset modal mode + hide the recount-only fields so a subsequent
+  // non-recount guided open doesn't show the audit-result selector.
+  const modal = document.getElementById('guidedEntryModal');
+  if (modal) modal.dataset.mode = '';
+  document.getElementById('recountResultGroup')?.classList.add('hide');
+  document.getElementById('recountReasonGroup')?.classList.add('hide');
 }
 
 /* ================================================================
@@ -6817,7 +6915,8 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   }
 
   const zoneItems = appState.audit.counts[appState.currentZone];
-  const parsedQty = parseFloat(qty) || 1;
+  const clamped = clampQty(qty);
+  const parsedQty = Number.isFinite(clamped) ? clamped : 1;
 
   // If no masterId, try to find one by name match, or create a custom item
   if (!masterId) {
@@ -6901,8 +7000,8 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
    same-item-in-multiple-zones natively. */
 function addCountEntryToZone(zone, name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
   if (!zone || zone === appState.currentZone) return;
-  const parsedQty = parseFloat(qty);
-  if (!parsedQty || parsedQty <= 0) return;
+  const parsedQty = clampQty(qty);
+  if (!Number.isFinite(parsedQty) || parsedQty <= 0) return;
   const originalZone = appState.currentZone;
   try {
     appState.currentZone = zone;
@@ -8905,6 +9004,21 @@ function findCountedQtyForAvtItem(avt, countedMap) {
   return bestQty;
 }
 
+/* Find the FIRST matching zone an item was counted in for the active audit.
+   Used by the recount list so each row can display its source zone (e.g.
+   "Back Bar") and so the list can sort by zone → category. Returns empty
+   string when the AVT item was never counted in any zone. */
+function findCountedZoneForAvtItem(avt) {
+  if (!appState.audit) return '';
+  const avtName = avt.itemName || '';
+  for (const [zone, items] of Object.entries(appState.audit.counts)) {
+    for (const item of items) {
+      if (_avtNamesMatch(item.name, avtName)) return zone;
+    }
+  }
+  return '';
+}
+
 function updateCountPhaseIndicator() {
   const phase = appState.audit?.countPhase || 'pre';
   const phases = {
@@ -8927,6 +9041,8 @@ function updateCountPhaseIndicator() {
 
 function updateVarianceActions() {
   const phase = appState.audit?.countPhase || 'pre';
+  const role = appState.user?.role;
+  const canCloseRecount = role === 'manager' || role === 'corporate';
   const c1Btn = document.getElementById('closeCount1Btn');
   const c2Btn = document.getElementById('closeCount2Btn');
   const e1Btn = document.getElementById('exportCount1Btn');
@@ -8939,7 +9055,10 @@ function updateVarianceActions() {
     e2Btn.classList.add('hide');
   } else if (phase === 'review' || phase === 'count2') {
     c1Btn.classList.add('hide');
-    c2Btn.classList.remove('hide');
+    // Recount close is manager+corporate only. Counters see their recount
+    // entries persist but the close button stays hidden — they just keep
+    // recording until a manager closes the audit.
+    c2Btn.classList.toggle('hide', !canCloseRecount);
     e1Btn.classList.remove('hide');
     e2Btn.classList.add('hide');
   } else if (phase === 'final') {
@@ -9020,6 +9139,13 @@ function closeCount1() {
           recountQty: null,
           status: 'pending',
           notes: '',
+          // New: zone + category drive the recount-page sort and the
+          // admin Reports table. auditResult/auditReason stay null until
+          // the counter records a recount decision.
+          zone: findCountedZoneForAvtItem(item.avt),
+          category: item.avt.category || '',
+          auditResult: null,
+          auditReason: '',
         };
       });
       logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items flagged for recount.');
@@ -9038,6 +9164,10 @@ function closeCount1() {
           recountQty: null,
           status: 'pending',
           notes: 'No AVT data — verify count',
+          zone: item.zone || '',
+          category: item.category || '',
+          auditResult: null,
+          auditReason: '',
         };
       });
       logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items listed for verification.');
@@ -9091,7 +9221,30 @@ function generateRecountFromAvt() {
 function closeCount2() {
   if (!appState.audit) { showToast('No active audit', 'error'); return; }
 
-  showConfirm('Close Count 2 and generate the final report?', function() {
+  // Manager-only gate. Counters can record recount entries but only
+  // managers + corporate can close the recount. Defense-in-depth: the
+  // close button is hidden for counters via updateCountPhaseIndicator,
+  // but a counter who keeps a stale tab open still hits this branch.
+  const role = appState.user && appState.user.role;
+  if (role !== 'manager' && role !== 'corporate') {
+    showToast('Only managers can close the recount', 'error');
+    return;
+  }
+
+  // All-rows-recorded validation. The user's rule: "block it if that item
+  // hasn't been recorded under the recount". A row is "recorded" once it
+  // has a non-null auditResult — the corrected/verified pick is the
+  // explicit signal that the manager has decided what to do with the row.
+  const recounts = appState.audit.recounts || {};
+  const entries = Object.entries(recounts);
+  const missing = entries.filter(([, r]) => !r.auditResult);
+  if (missing.length > 0) {
+    const sample = missing.slice(0, 3).map(([k]) => k).join(', ') + (missing.length > 3 ? '…' : '');
+    showToast(missing.length + ' item' + (missing.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+    return;
+  }
+
+  showConfirm('Close recount and generate the final report?', function() {
     finalizeCount2();
   });
 }
@@ -9111,6 +9264,14 @@ function setRecountFilter(filter, element) {
 }
 
 function renderRecountPage() {
+  // Manager-only gate for the close-recount button. Re-evaluated on every
+  // render so a role change pushed via realtime (kount_members) flips the
+  // button visibility live without a refresh.
+  const _closeBtn = document.getElementById('recountCloseBtn');
+  if (_closeBtn) {
+    const _role = appState.user && appState.user.role;
+    _closeBtn.classList.toggle('hide', _role !== 'manager' && _role !== 'corporate');
+  }
   if (!appState.audit?.recounts) {
     document.getElementById('recountList').innerHTML =
       '<div class="empty-state"><p>No recount list generated yet. Close Count 1 first from the Variance page.</p></div>';
@@ -9136,25 +9297,55 @@ function renderRecountPage() {
   if (recountFilter === 'high') filtered = entries.filter(([, r]) => r.severity === 'HIGH');
   if (recountFilter === 'pending') filtered = entries.filter(([, r]) => r.status === 'pending');
 
-  // Sort by severity
-  filtered.sort((a, b) => severityOrder(a[1].severity) - severityOrder(b[1].severity));
+  // Sort: zone (alpha) → category (alpha) → severity (CRITICAL first as a
+  // tie-breaker so within a (zone, category) the most urgent item leads).
+  // Items missing zone/category land at the end of the list under "—".
+  filtered.sort((a, b) => {
+    const az = (a[1].zone || '').toLowerCase();
+    const bz = (b[1].zone || '').toLowerCase();
+    if (az !== bz) {
+      if (!az) return 1;
+      if (!bz) return -1;
+      return az.localeCompare(bz);
+    }
+    const ac = (a[1].category || '').toLowerCase();
+    const bc = (b[1].category || '').toLowerCase();
+    if (ac !== bc) {
+      if (!ac) return 1;
+      if (!bc) return -1;
+      return ac.localeCompare(bc);
+    }
+    return severityOrder(a[1].severity) - severityOrder(b[1].severity);
+  });
 
-  // Render
+  // Render with zone/category headers + audit-result state on each row
+  let lastZone = null;
   document.getElementById('recountList').innerHTML = filtered.map(([key, rec]) => {
     const isDone = rec.status === 'done';
-    return '<div class="focus-item ' + (isDone ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
+    const isRecorded = !!rec.auditResult;
+    const zoneLabel = rec.zone || '—';
+    let zoneHeader = '';
+    if (zoneLabel !== lastZone) {
+      lastZone = zoneLabel;
+      zoneHeader = '<div style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin:14px 0 6px;padding:0 2px">📍 ' + esc(zoneLabel) + '</div>';
+    }
+    const resultBadge = isRecorded
+      ? '<span style="font-size:10px;font-weight:700;background:' + (rec.auditResult === 'corrected' ? 'var(--accent-dim)' : 'var(--success-dim, rgba(0,200,150,0.18))') + ';color:' + (rec.auditResult === 'corrected' ? 'var(--accent)' : 'var(--success)') + ';padding:2px 6px;border-radius:4px">' + (rec.auditResult === 'corrected' ? '✏️ Count Corrected' : '✓ Count Verified') + '</span>'
+      : '<span style="font-size:10px;font-weight:700;background:var(--warning-dim,rgba(255,180,0,0.18));color:var(--warning);padding:2px 6px;border-radius:4px">⚠ Awaiting recount decision</span>';
+    return zoneHeader +
+      '<div class="focus-item ' + (isRecorded ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
       'onclick="openRecountEntry(\'' + esc(key).replace(/'/g, "\\'") + '\')" style="cursor:pointer">' +
-      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;gap:6px">' +
         '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(key) + '</div>' +
         '<span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
       '</div>' +
-      '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px">' +
-        '<span>Actual: ' + rec.actual.toFixed(1) + '</span>' +
-        '<span>Theo: ' + rec.theo.toFixed(1) + '</span>' +
+      '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">' +
+        (rec.category ? '<span>' + esc(rec.category) + '</span>' : '') +
         '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' +
-        '<span>Count 1: ' + (rec.count1Qty || 0) + '</span>' +
-        (isDone ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '<span style="color:var(--warning)">Pending</span>') +
+        '<span><strong style="color:var(--text)">Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
+        (rec.recountQty != null ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '') +
       '</div>' +
+      '<div>' + resultBadge + (rec.auditReason ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;font-style:italic">' + esc(rec.auditReason) + '</span>' : '') + '</div>' +
     '</div>';
   }).join('');
 }
@@ -9171,17 +9362,35 @@ function openRecountEntry(key) {
   const heroMeta = document.getElementById('guidedHeroMeta');
   if (heroTitle) heroTitle.textContent = key;
   if (heroMeta) {
+    // Lead with Count 1 since that's the operator's anchor for the recount.
+    // Zone + category surface here too so they don't have to jump back to the list.
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
-      ' · Actual ' + rec.actual.toFixed(1) +
-      ' · Theo ' + rec.theo.toFixed(1) +
       ' · Variance $' + rec.varianceValue.toFixed(2) +
-      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty || 'Not counted')) + '</strong>';
+      (rec.zone ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>' : '') +
+      (rec.category ? ' · ' + esc(rec.category) : '') +
+      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>';
   }
   const dupe = document.getElementById('guidedDupeWarning');
   if (dupe) dupe.innerHTML = '';
 
-  document.getElementById('guidedQty').value = rec.recountQty !== null ? rec.recountQty : '';
+  // Pre-fill recount qty with whatever's stored — if nothing yet, default to
+  // the Count 1 number so a "Verified" row only needs one tap on Confirm.
+  const qtyInput = document.getElementById('guidedQty');
+  if (rec.recountQty != null) qtyInput.value = rec.recountQty;
+  else if (rec.count1Qty != null) qtyInput.value = rec.count1Qty;
+  else qtyInput.value = '';
+
+  // Show the recount-only required fields and pre-fill any prior values.
+  const resultGroup = document.getElementById('recountResultGroup');
+  const reasonGroup = document.getElementById('recountReasonGroup');
+  const resultSel   = document.getElementById('recountResultSelect');
+  const reasonInput = document.getElementById('recountReasonInput');
+  if (resultGroup) resultGroup.classList.remove('hide');
+  if (reasonGroup) reasonGroup.classList.remove('hide');
+  if (resultSel)   resultSel.value   = rec.auditResult || '';
+  if (reasonInput) reasonInput.value = rec.auditReason || '';
+
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'recount';
   document.getElementById('guidedEntryModal').dataset.masterId = key;
@@ -9191,17 +9400,27 @@ function openRecountEntry(key) {
 
 function submitRecount() {
   if (!appState.audit?.recounts) return;
-
-  // Mark remaining pending items
-  const pending = Object.values(appState.audit.recounts).filter(r => r.status === 'pending');
-  if (pending.length > 0) {
-    showConfirm(pending.length + ' items still pending. Mark recount as complete anyway?', () => {
-      finalizeCount2();
-    });
+  // Manager-only — counters can keep recording recount entries but cannot
+  // close the recount themselves. The button is also hidden for counters
+  // (see renderRecountPage's footer toggle), this is the defense-in-depth.
+  const role = appState.user && appState.user.role;
+  if (role !== 'manager' && role !== 'corporate') {
+    showToast('Only managers can close the recount', 'error');
     return;
   }
-
-  finalizeCount2();
+  // Block close if any row hasn't been "recorded" — i.e., the manager
+  // hasn't marked it Corrected or Verified yet. Quantity alone isn't
+  // enough because the count may have stayed the same on purpose.
+  const entries = Object.entries(appState.audit.recounts);
+  const missing = entries.filter(([, r]) => !r.auditResult);
+  if (missing.length > 0) {
+    const sample = missing.slice(0, 3).map(([k]) => k).join(', ') + (missing.length > 3 ? '…' : '');
+    showToast(missing.length + ' item' + (missing.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+    return;
+  }
+  showConfirm('Close recount and generate the final report?', function() {
+    finalizeCount2();
+  });
 }
 
 let _finalizingCount2 = false;
