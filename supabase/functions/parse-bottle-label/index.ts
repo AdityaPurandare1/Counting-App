@@ -56,7 +56,11 @@ const RESPONSE_SCHEMA = {
       description: 'Free-form additional details visible on the label that might disambiguate (region, varietal, etc.).',
     },
     matchedId: {
-      type: ['string', 'null'],
+      // anyOf instead of type: ['string', 'null'] — the array-of-types form
+      // isn't reliably accepted by Anthropic's strict JSON-schema validator,
+      // even though it's valid per the JSON Schema spec. anyOf is the
+      // documented-supported way to express nullability.
+      anyOf: [{ type: 'string' }, { type: 'null' }],
       description: 'Catalog id of the matching row if you are confident. Null otherwise.',
     },
     confidence: {
@@ -202,6 +206,10 @@ Deno.serve(async (req) => {
         'Content-Type': 'application/json',
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01',
+        // structured-outputs feature flag. The Anthropic SDKs (Python/TS)
+        // add this implicitly when output_config is present; raw HTTP
+        // needs to send it manually or the API rejects output_config.
+        'anthropic-beta': 'structured-outputs-2025-11-13',
       },
       body: JSON.stringify(requestBody),
     });
