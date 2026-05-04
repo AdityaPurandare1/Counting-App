@@ -9100,19 +9100,33 @@ function findCountedQtyForAvtItem(avt, countedMap) {
   return bestQty;
 }
 
-/* Find the FIRST matching zone an item was counted in for the active audit.
-   Used by the recount list so each row can display its source zone (e.g.
-   "Back Bar") and so the list can sort by zone → category. Returns empty
-   string when the AVT item was never counted in any zone. */
-function findCountedZoneForAvtItem(avt) {
-  if (!appState.audit) return '';
+/* Find every zone an item was counted in for the active audit, with the
+   per-zone qty totals. Returns [{zone, qty}, ...] sorted by qty desc, so
+   the caller's [0].zone is the "primary" zone (where the bulk of the item
+   lives). Used by the recount list to drive sort + group + "+N more
+   zones" hints when an item shows up in multiple zones. */
+function findCountedZonesForAvtItem(avt) {
+  if (!appState.audit) return [];
   const avtName = avt.itemName || '';
+  const totals = {};
   for (const [zone, items] of Object.entries(appState.audit.counts)) {
     for (const item of items) {
-      if (_avtNamesMatch(item.name, avtName)) return zone;
+      if (_avtNamesMatch(item.name, avtName)) {
+        totals[zone] = (totals[zone] || 0) + (Number(item.qty) || 0);
+      }
     }
   }
-  return '';
+  return Object.entries(totals)
+    .map(([zone, qty]) => ({ zone, qty }))
+    .sort((a, b) => b.qty - a.qty);
+}
+
+/* Backwards-compat shim: returns just the primary zone (or '' if the AVT
+   item was never counted). Kept because downstream callers in other
+   tools may have referenced the old helper name. */
+function findCountedZoneForAvtItem(avt) {
+  const all = findCountedZonesForAvtItem(avt);
+  return all.length > 0 ? all[0].zone : '';
 }
 
 function updateCountPhaseIndicator() {
@@ -9224,6 +9238,14 @@ function closeCount1() {
       // AVT-based recount: flag items with high variance from Craftable data
       const recountItems = generateRecountFromAvt();
       recountItems.forEach(item => {
+        // Multi-zone awareness: an item counted in both Back Bar (5) and
+        // VIP (3) gets primary zone = Back Bar (highest qty leads the
+        // recount sweep) and allZones = ['Back Bar (5)', 'VIP (3)'] for
+        // the row hint + modal hero. allZones is derived locally — the
+        // DB only stores the primary in `zone`.
+        const zoneTotals = findCountedZonesForAvtItem(item.avt);
+        const primaryZone = zoneTotals[0]?.zone || '';
+        const allZonesLabels = zoneTotals.map(z => z.zone + ' (' + z.qty + ')');
         appState.audit.recounts[item.avt.itemName] = {
           avtItem: item.avt,
           severity: item.severity,
@@ -9238,7 +9260,8 @@ function closeCount1() {
           // New: zone + category drive the recount-page sort and the
           // admin Reports table. auditResult/auditReason stay null until
           // the counter records a recount decision.
-          zone: findCountedZoneForAvtItem(item.avt),
+          zone: primaryZone,
+          allZones: allZonesLabels,
           category: item.avt.category || '',
           auditResult: null,
           auditReason: '',
@@ -9247,21 +9270,44 @@ function closeCount1() {
       logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items flagged for recount.');
       showToast('Count 1 closed. ' + recountItems.length + ' items need recount.', 'success');
     } else {
-      // No AVT: create recount list from ALL counted items so counters can verify
+      // No AVT: create recount list from ALL counted items so counters can verify.
+      // We aggregate by item.name across zones so an item counted in two
+      // zones produces ONE recount row (with summed qty + primary zone +
+      // multi-zone hint) instead of two rows where the second overwrites
+      // the first via the recounts-dict key collision.
+      const byName = {};
       allItems.forEach(item => {
-        appState.audit.recounts[item.name] = {
+        const key = item.name;
+        if (!byName[key]) {
+          byName[key] = {
+            name: item.name,
+            category: item.category || '',
+            zoneQtys: {},
+            totalQty: 0,
+          };
+        }
+        const zone = item.zone || '';
+        byName[key].zoneQtys[zone] = (byName[key].zoneQtys[zone] || 0) + (Number(item.qty) || 0);
+        byName[key].totalQty += (Number(item.qty) || 0);
+      });
+      Object.values(byName).forEach(entry => {
+        const zoneTotals = Object.entries(entry.zoneQtys)
+          .map(([zone, qty]) => ({ zone, qty }))
+          .sort((a, b) => b.qty - a.qty);
+        appState.audit.recounts[entry.name] = {
           avtItem: null,
           severity: 'MEDIUM',
           varianceValue: 0,
           variance: 0,
-          actual: item.qty,
+          actual: entry.totalQty,
           theo: 0,
-          count1Qty: item.qty,
+          count1Qty: entry.totalQty,
           recountQty: null,
           status: 'pending',
           notes: 'No AVT data — verify count',
-          zone: item.zone || '',
-          category: item.category || '',
+          zone: zoneTotals[0]?.zone || '',
+          allZones: zoneTotals.map(z => z.zone + ' (' + z.qty + ')'),
+          category: entry.category,
           auditResult: null,
           auditReason: '',
         };
@@ -9459,6 +9505,13 @@ function renderRecountPage() {
         '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' +
         '<span><strong style="color:var(--text)">Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
         (rec.recountQty != null ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '') +
+        // Multi-zone hint: when an item was counted in more than one
+        // zone, the row shows the primary zone in its group header but
+        // the counter still needs to know about the other zones to
+        // recount accurately.
+        (Array.isArray(rec.allZones) && rec.allZones.length > 1
+          ? '<span style="color:var(--accent)">+' + (rec.allZones.length - 1) + ' more zone' + (rec.allZones.length === 2 ? '' : 's') + '</span>'
+          : '') +
       '</div>' +
       '<div>' + resultBadge + (rec.auditReason ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;font-style:italic">' + esc(rec.auditReason) + '</span>' : '') + '</div>' +
     '</div>';
@@ -9488,10 +9541,17 @@ function openRecountEntry(key) {
     const priorLine = prior
       ? '<br><span style="color:var(--warning);font-weight:600">⚠ Previously recorded as ' + prior + ' — re-check before confirming</span>'
       : '';
+    // When the item lives in multiple zones, list every zone's qty so the
+    // counter knows where to look. Primary zone is bolded as the lead.
+    const allZones = Array.isArray(rec.allZones) ? rec.allZones : [];
+    const zoneLine = allZones.length > 1
+      ? '<br>📍 <strong style="color:var(--text)">' + esc(allZones[0]) + '</strong>' +
+        ' <span style="color:var(--text-muted);font-size:11px">also in: ' + esc(allZones.slice(1).join(', ')) + '</span>'
+      : (rec.zone ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>' : '');
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
       ' · Variance $' + rec.varianceValue.toFixed(2) +
-      (rec.zone ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>' : '') +
+      zoneLine +
       (rec.category ? ' · ' + esc(rec.category) : '') +
       '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>' +
       priorLine;
