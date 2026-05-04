@@ -3787,9 +3787,17 @@ function esc(str) {
 /* clampQty(v) — every quantity input across the app routes through this so
    we never write more than 2 decimal places (matches kount_entries.qty's
    numeric(12,2)) and never accept negative quantities. Returns NaN for
-   non-numeric input so callers can early-return with a "valid quantity"
-   toast. Strips scientific notation by going through Number(). */
+   non-numeric, blank, or null input so callers can early-return or fall
+   back to the legacy default of 1. Strips scientific notation via Number().
+
+   Why the explicit empty/null guards: Number('') and Number(null) both
+   coerce to 0, which is a finite non-negative number — so the pre-guard
+   version of this function silently turned a blank submit into qty=0.
+   That regressed the original behavior of "blank means 1" and produced
+   ghost zero-count entries when a counter cleared the field. */
 function clampQty(v) {
+  if (v === '' || v === null || v === undefined) return NaN;
+  if (typeof v === 'string' && v.trim() === '') return NaN;
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return NaN;
   return Math.round(n * 100) / 100;
@@ -4397,6 +4405,7 @@ function initUpcMappingsSync() {
   // Flush queue + re-establish realtime when connection comes back
   window.addEventListener('online', () => {
     flushUpcWriteQueue();
+    if (typeof flushPendingRecountSyncs === 'function') flushPendingRecountSyncs().catch(() => {});
     loadApprovedUpcMappings(true);
     runMigrationIfLoggedIn();
     if (!upcRealtimeChannel) startUpcRealtime();
@@ -4786,6 +4795,18 @@ async function syncRecountUpdateToSupabase(key) {
     variance_qty: rec.variance != null ? Number(rec.variance) : null,
   };
 
+  // Helper to mark a row as needing retry. We persist via saveState so the
+  // pending flag survives a tab close, and surface a toast so the user
+  // doesn't think their entry vanished. Without this, an offline save
+  // looked successful locally but never reached the cloud, so the admin
+  // Reports table showed blank Audit Results / Context columns.
+  const markPending = (msg) => {
+    rec._pendingSync = true;
+    rec._pendingSyncAt = new Date().toISOString();
+    try { saveState(); } catch (e) {}
+    if (typeof showToast === 'function') showToast(msg, 'warn');
+  };
+
   try {
     let match;
     if (rec.supabaseId) {
@@ -4796,9 +4817,35 @@ async function syncRecountUpdateToSupabase(key) {
               '&item_name=eq.' + encodeURIComponent(name);
     }
     const { error } = await supabaseRest.update('kount_recounts', match, patch);
-    if (error) console.warn('[recounts] update failed:', error);
+    if (error) {
+      console.warn('[recounts] update failed:', error);
+      markPending('Saved locally — recount sync will retry when online');
+      return;
+    }
+    // Success — clear the retry flag if a previous attempt had set it.
+    if (rec._pendingSync) {
+      delete rec._pendingSync;
+      delete rec._pendingSyncAt;
+      try { saveState(); } catch (e) {}
+    }
   } catch (e) {
     console.warn('[recounts] update threw:', e);
+    markPending('Offline — recount sync will retry when online');
+  }
+}
+
+/* Retry every recount row in the active audit that has _pendingSync set.
+   Called from the existing 'online' event listener and after the audit
+   page is opened so a counter who reconnects mid-session sees their
+   entries flush without a manual re-tap. */
+async function flushPendingRecountSyncs() {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  const recounts = appState.audit.recounts || {};
+  const pendingKeys = Object.keys(recounts).filter(k => recounts[k]._pendingSync);
+  if (pendingKeys.length === 0) return;
+  console.log('[recounts] retrying', pendingKeys.length, 'pending sync(s)');
+  for (const key of pendingKeys) {
+    await syncRecountUpdateToSupabase(key);
   }
 }
 
@@ -6610,6 +6657,22 @@ function submitGuidedEntry() {
 
     // Don't auto-finalize — that's now an explicit manager-only action via
     // the Close Recount button (with all-rows-recorded validation).
+    // Surface a per-role toast so a counter understands their entry is
+    // saved but a manager still has to close the recount, and a manager
+    // sees how many items remain before they can close.
+    const _role = appState.user && appState.user.role;
+    const _all = Object.values(appState.audit.recounts || {});
+    const _remaining = _all.filter(r => !r.auditResult).length;
+    if (_role === 'manager' || _role === 'corporate') {
+      if (_remaining === 0) {
+        showToast('All items recorded — tap "Close recount" to finalize', 'success');
+      } else {
+        showToast('Recorded · ' + _remaining + ' item' + (_remaining === 1 ? '' : 's') + ' left to review', 'success');
+      }
+    } else {
+      // Counters can't close — make sure they don't think they're done.
+      showToast('Recorded · manager will close the recount', 'success');
+    }
     renderRecountPage();
     return;
   }
@@ -7043,7 +7106,7 @@ function addLocationRow(containerId) {
 
   row.innerHTML =
     '<select class="form-input extra-loc-zone" style="flex:1;margin-bottom:0">' + options + '</select>' +
-    '<input class="form-input extra-loc-qty" type="number" min="0" step="0.25" value="1" inputmode="decimal" ' +
+    '<input class="form-input extra-loc-qty" type="number" min="0" step="0.01" max="999999" value="1" inputmode="decimal" ' +
     'style="width:70px;margin-bottom:0;text-align:center;font-family:var(--mono)">' +
     '<button type="button" class="extra-loc-remove" ' +
     'style="width:32px;height:38px;border-radius:var(--radius-sm);background:var(--surface3);border:1px solid var(--border);' +
@@ -7074,8 +7137,11 @@ function applyExtraLocations(containerId, callback) {
   const seen = {};
   rows.forEach(function(row) {
     const zone = row.querySelector('.extra-loc-zone').value;
-    const qty = parseFloat(row.querySelector('.extra-loc-qty').value);
-    if (!zone || !qty || qty <= 0) return;
+    // Route through clampQty so blanks / negatives / >2-decimal entries
+    // get rejected the same way the primary qty inputs do, instead of
+    // silently slipping through parseFloat.
+    const qty = clampQty(row.querySelector('.extra-loc-qty').value);
+    if (!zone || !Number.isFinite(qty) || qty <= 0) return;
     if (seen[zone]) return; // ignore accidental duplicate zone selection
     seen[zone] = true;
     callback(zone, qty);
@@ -9235,12 +9301,31 @@ function closeCount2() {
   // hasn't been recorded under the recount". A row is "recorded" once it
   // has a non-null auditResult — the corrected/verified pick is the
   // explicit signal that the manager has decided what to do with the row.
+  // We also re-validate auditReason here in case a refresh / race / legacy
+  // row left it blank; the admin Reports CSV's Context column depends on
+  // it and we never want a silent blank.
   const recounts = appState.audit.recounts || {};
   const entries = Object.entries(recounts);
-  const missing = entries.filter(([, r]) => !r.auditResult);
-  if (missing.length > 0) {
-    const sample = missing.slice(0, 3).map(([k]) => k).join(', ') + (missing.length > 3 ? '…' : '');
-    showToast(missing.length + ' item' + (missing.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+  const missingResult = entries.filter(([, r]) => !r.auditResult);
+  if (missingResult.length > 0) {
+    const sample = missingResult.slice(0, 3).map(([k]) => k).join(', ') + (missingResult.length > 3 ? '…' : '');
+    showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+    return;
+  }
+  const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
+  if (missingReason.length > 0) {
+    const sample = missingReason.slice(0, 3).map(([k]) => k).join(', ') + (missingReason.length > 3 ? '…' : '');
+    showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
+    return;
+  }
+  // Defense against rows that picked up auditResult but never got a
+  // numeric recountQty (e.g. a stale cloud row, a sync race, a manual DB
+  // edit). Without this, the audit "completes" with count2_qty=null on
+  // the affected rows and the admin Reports CSV shows a blank quantity.
+  const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
+  if (missingQty.length > 0) {
+    const sample = missingQty.slice(0, 3).map(([k]) => k).join(', ') + (missingQty.length > 3 ? '…' : '');
+    showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
     return;
   }
 
@@ -9411,11 +9496,32 @@ function submitRecount() {
   // Block close if any row hasn't been "recorded" — i.e., the manager
   // hasn't marked it Corrected or Verified yet. Quantity alone isn't
   // enough because the count may have stayed the same on purpose.
+  // We also re-validate the reason text here even though the entry modal
+  // requires it on save: a row pulled from cloud (refreshRecountsFromSupabase)
+  // could land here with audit_result set but audit_reason blank if a prior
+  // sync failed, raced, or pre-dated the reason field. Block both ways so
+  // the admin Reports table's Context column is never silently empty.
   const entries = Object.entries(appState.audit.recounts);
-  const missing = entries.filter(([, r]) => !r.auditResult);
-  if (missing.length > 0) {
-    const sample = missing.slice(0, 3).map(([k]) => k).join(', ') + (missing.length > 3 ? '…' : '');
-    showToast(missing.length + ' item' + (missing.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+  const missingResult = entries.filter(([, r]) => !r.auditResult);
+  if (missingResult.length > 0) {
+    const sample = missingResult.slice(0, 3).map(([k]) => k).join(', ') + (missingResult.length > 3 ? '…' : '');
+    showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+    return;
+  }
+  const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
+  if (missingReason.length > 0) {
+    const sample = missingReason.slice(0, 3).map(([k]) => k).join(', ') + (missingReason.length > 3 ? '…' : '');
+    showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
+    return;
+  }
+  // Defense against rows that picked up auditResult but never got a
+  // numeric recountQty (e.g. a stale cloud row, a sync race, a manual DB
+  // edit). Without this, the audit "completes" with count2_qty=null on
+  // the affected rows and the admin Reports CSV shows a blank quantity.
+  const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
+  if (missingQty.length > 0) {
+    const sample = missingQty.slice(0, 3).map(([k]) => k).join(', ') + (missingQty.length > 3 ? '…' : '');
+    showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
     return;
   }
   showConfirm('Close recount and generate the final report?', function() {
