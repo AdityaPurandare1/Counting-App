@@ -2501,7 +2501,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="barcodeQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
+        <input class="form-input" id="barcodeQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal" onblur="qtyBlur(this)">
       </div>
     </div>
     <div class="form-group">
@@ -2562,7 +2562,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="manualQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
+        <input class="form-input" id="manualQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal" onblur="qtyBlur(this)">
       </div>
     </div>
     <div class="form-group">
@@ -2697,7 +2697,7 @@ html, body {
       </div>
       <div class="form-group">
         <label>Quantity</label>
-        <input class="form-input" id="photoQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal">
+        <input class="form-input" id="photoQty" type="number" value="1" min="0" step="0.01" max="999999" inputmode="decimal" onblur="qtyBlur(this)">
       </div>
     </div>
     <div class="form-group">
@@ -2732,7 +2732,7 @@ html, body {
 
       <div class="gh-stepper">
         <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">−</button>
-        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0">
+        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0" onblur="qtyBlur(this)">
         <button class="gh-step gh-plus" onclick="adjustGuidedQty(1)" type="button">+</button>
       </div>
 
@@ -3801,6 +3801,21 @@ function clampQty(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n < 0) return NaN;
   return Math.round(n * 100) / 100;
+}
+
+/* qtyBlur(el) — onblur handler wired into every quantity input. <input
+   type="number" step="0.01"> only constrains the spinner, not what the
+   user types — so a counter typing "1.234" sees that value sit in the
+   field until submit, when clampQty silently rounds it. Snapping the
+   field on blur makes the rounding visible and prevents the "I typed
+   1.234, why does the report show 1.23?" surprise. Empties stay empty so
+   the legacy "blank = default of 1" fallback path isn't disturbed. */
+function qtyBlur(el) {
+  if (!el) return;
+  const raw = el.value;
+  if (raw === '' || raw == null) return;
+  const c = clampQty(raw);
+  el.value = Number.isFinite(c) ? String(c) : '';
 }
 
 /* ================================================================
@@ -6569,16 +6584,24 @@ function openGuidedEntry(masterId) {
 
 function adjustGuidedQty(delta) {
   const input = document.getElementById('guidedQty');
-  const current = parseFloat(input.value) || 0;
-  const next = Math.max(0, current + delta);
-  input.value = next % 1 === 0 ? String(next) : next.toFixed(2);
+  // Read the current value via clampQty so a stray 3-decimal entry the
+  // user typed gets normalized into the increment math, then re-display
+  // through clampQty so the field never visibly holds an out-of-spec value.
+  const current = clampQty(input.value);
+  const base = Number.isFinite(current) ? current : 0;
+  const next = clampQty(Math.max(0, base + delta));
+  input.value = String(Number.isFinite(next) ? next : 0);
   input.focus();
 }
 
 function setPartial(value) {
   const input = document.getElementById('guidedQty');
-  const base = Math.floor(parseFloat(input.value) || 0);
-  input.value = base + value;
+  // Same normalization as adjustGuidedQty — the partial buttons should
+  // never produce a >2-decimal value or inherit one the user typed.
+  const current = clampQty(input.value);
+  const base = Math.floor(Number.isFinite(current) ? current : 0);
+  const next = clampQty(base + value);
+  input.value = String(Number.isFinite(next) ? next : value);
   document.querySelectorAll('#guidedPartialBtns .partial-btn').forEach(btn => btn.classList.remove('active'));
 }
 
@@ -6633,7 +6656,9 @@ function submitGuidedEntry() {
       rec.auditResult = auditResult;
       rec.auditReason = auditReason;
       // Stamp the counter's initials for the admin Reports column. Falls
-      // back to the email's local-part if user.name isn't set.
+      // back to the email's local-part if user.name isn't set, then to
+      // a literal "??" so the Reports CSV never shows a blank counter
+      // column for an otherwise-recorded recount.
       const u = appState.user || {};
       rec.counterInitials = (function() {
         const name = (u.name || '').trim();
@@ -6642,7 +6667,12 @@ function submitGuidedEntry() {
           if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
           return parts[0].slice(0, 2).toUpperCase();
         }
-        return (u.email || '').split('@')[0].slice(0, 2).toUpperCase();
+        const email = (u.email || '').trim();
+        if (email) {
+          const local = email.split('@')[0];
+          if (local) return local.slice(0, 2).toUpperCase();
+        }
+        return '??';
       })();
     }
 
@@ -7106,7 +7136,7 @@ function addLocationRow(containerId) {
 
   row.innerHTML =
     '<select class="form-input extra-loc-zone" style="flex:1;margin-bottom:0">' + options + '</select>' +
-    '<input class="form-input extra-loc-qty" type="number" min="0" step="0.01" max="999999" value="1" inputmode="decimal" ' +
+    '<input class="form-input extra-loc-qty" type="number" min="0" step="0.01" max="999999" value="1" inputmode="decimal" onblur="qtyBlur(this)" ' +
     'style="width:70px;margin-bottom:0;text-align:center;font-family:var(--mono)">' +
     '<button type="button" class="extra-loc-remove" ' +
     'style="width:32px;height:38px;border-radius:var(--radius-sm);background:var(--surface3);border:1px solid var(--border);' +
@@ -9449,12 +9479,22 @@ function openRecountEntry(key) {
   if (heroMeta) {
     // Lead with Count 1 since that's the operator's anchor for the recount.
     // Zone + category surface here too so they don't have to jump back to the list.
+    // If the row was already decided in a prior session, surface that
+    // explicitly so the manager has to re-confirm rather than defaulting
+    // through a stale "corrected/verified" pre-fill silently.
+    const prior = rec.auditResult === 'corrected' ? 'Count Corrected'
+                : rec.auditResult === 'verified'  ? 'Count Verified'
+                : '';
+    const priorLine = prior
+      ? '<br><span style="color:var(--warning);font-weight:600">⚠ Previously recorded as ' + prior + ' — re-check before confirming</span>'
+      : '';
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
       ' · Variance $' + rec.varianceValue.toFixed(2) +
       (rec.zone ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>' : '') +
       (rec.category ? ' · ' + esc(rec.category) : '') +
-      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>';
+      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>' +
+      priorLine;
   }
   const dupe = document.getElementById('guidedDupeWarning');
   if (dupe) dupe.innerHTML = '';
