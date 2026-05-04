@@ -10882,14 +10882,142 @@ async function parseLabelWithOpenAI(imageDataUrl) {
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
+/* ---------- populatePhotoFormFromParsed ---------- */
+/* Shared form-population logic for vision-based label parsers (Claude +
+   OpenAI both feed through this). Mirrors the field shapes the rest of the
+   photo flow expects so submitPhotoEntry() picks up the right masterId. */
+function populatePhotoFormFromParsed(parsed, statusEl) {
+  var nameInput = document.getElementById('photoName');
+  var catSelect = document.getElementById('photoCategory');
+  var detailsInput = document.getElementById('photoDetails');
+
+  var matchedItem = null;
+  if (parsed.matchedId) {
+    matchedItem = itemMaster.find(function (x) { return String(x.id) === String(parsed.matchedId); });
+  }
+
+  if (matchedItem) {
+    nameInput.value = matchedItem.name;
+    catSelect.value = matchedItem.category || parsed.category || 'other';
+    nameInput.dataset.masterId = matchedItem.id;
+    var detailBits = [];
+    if (parsed.vintage) detailBits.push(parsed.vintage);
+    if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
+    if (parsed.details) detailBits.push(parsed.details);
+    detailsInput.value = detailBits.join(' · ');
+
+    statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')';
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--success)';
+  } else {
+    var displayName = parsed.name || '';
+    if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
+      displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
+    }
+    nameInput.value = displayName;
+    delete nameInput.dataset.masterId;
+    if (parsed.category) catSelect.value = parsed.category;
+    var bits2 = [];
+    if (parsed.vintage) bits2.push(parsed.vintage);
+    if (parsed.size) bits2.push(parsed.size);
+    if (parsed.details) bits2.push(parsed.details);
+    detailsInput.value = bits2.join(' · ');
+
+    statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.';
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--warning)';
+
+    if (displayName && typeof onPhotoSearch === 'function') {
+      try { onPhotoSearch(displayName); } catch (e) {}
+    }
+  }
+
+  // Raw extraction summary, useful for debugging and for the user to see
+  // what the model thought was on the label.
+  var existingRaw = document.getElementById('ocrRawText');
+  if (existingRaw) existingRaw.remove();
+  var rawDiv = document.createElement('div');
+  rawDiv.id = 'ocrRawText';
+  rawDiv.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--surface2);padding:8px;border-radius:6px;margin-top:6px;max-height:80px;overflow-y:auto;font-family:var(--mono);line-height:1.4;word-break:break-word';
+  rawDiv.textContent = 'AI: ' + JSON.stringify({
+    name: parsed.name, brand: parsed.brand, vintage: parsed.vintage,
+    size: parsed.size, category: parsed.category,
+  });
+  statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
+}
+
+/* ---------- parseLabelWithClaude ---------- */
+/* Calls the parse-bottle-label Edge Function, which holds the Anthropic key
+   server-side and runs claude-haiku-4-5 with a cached system prompt + catalog.
+   Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on error. */
+async function parseLabelWithClaude(imageDataUrl) {
+  // Send the first 400 catalog items, alphabetized by name. Deterministic
+  // order is critical for the Edge Function's prompt cache to hit — any
+  // reorder invalidates the cached prefix and re-pays the full input cost.
+  const catalog = (itemMaster || [])
+    .slice()
+    .sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); })
+    .slice(0, 400)
+    .map(function (it) {
+      return {
+        id: String(it.id || ''),
+        name: String(it.name || ''),
+        brand: it.brand ? String(it.brand) : null,
+        size: it.size ? String(it.size) : null,
+      };
+    });
+
+  const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // Edge Functions require an apikey or Authorization header. The
+      // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
+      // secret, not on Supabase auth.
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+    },
+    body: JSON.stringify({ image: imageDataUrl, catalog: catalog }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(function () { return ''; });
+    throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
+  }
+  return await res.json();
+}
+
 /* ---------- parsePhotoLabel WRAPPER ---------- */
-/* If an OpenAI key is set → use GPT-4o mini Vision.
-   Otherwise → fall back to the original Tesseract-based parser. */
+/* Order of preference:
+   1. Claude (via Edge Function) — server-side key, best accuracy, no client setup
+   2. OpenAI — only if user pasted a personal key (legacy path)
+   3. Tesseract — on-device fallback for offline / both APIs failing
+   The wrapper falls down the chain on each failure, so a flaky network or a
+   transient Anthropic 5xx won't leave the user stuck — Tesseract still runs. */
 async function parsePhotoLabel(imageDataUrl) {
   var statusEl = document.getElementById('parsingStatus');
 
+  // Prefer Claude when the Supabase client is initialized (which means the
+  // Edge Function URL is reachable in principle). No client-side key check
+  // needed — the key lives in supabase secrets.
+  if (typeof supabaseClient !== 'undefined' && supabaseClient) {
+    try {
+      statusEl.textContent = 'Analyzing with Claude…';
+      statusEl.style.animation = 'pulse 1s infinite';
+      statusEl.style.color = 'var(--text-muted)';
+
+      const parsed = await parseLabelWithClaude(imageDataUrl);
+      return populatePhotoFormFromParsed(parsed, statusEl);
+    } catch (err) {
+      console.warn('[Claude Vision] parse failed, falling back:', err);
+      statusEl.textContent = 'Claude failed (' + (err.message || 'unknown') + ') — trying fallback…';
+      statusEl.style.color = 'var(--warning)';
+      // fall through to OpenAI / Tesseract below
+    }
+  }
+
   if (!hasOpenAIKey()) {
-    // No key — use the original Tesseract flow exactly as before
+    // No OpenAI key either — use the original Tesseract flow as a final fallback
     return parsePhotoLabelTesseract(imageDataUrl);
   }
 
@@ -10899,68 +11027,7 @@ async function parsePhotoLabel(imageDataUrl) {
     statusEl.style.color = 'var(--text-muted)';
 
     var parsed = await parseLabelWithOpenAI(imageDataUrl);
-
-    // Populate fields
-    var nameInput = document.getElementById('photoName');
-    var catSelect = document.getElementById('photoCategory');
-    var detailsInput = document.getElementById('photoDetails');
-
-    // Prefer catalog-match if provided
-    var matchedItem = null;
-    if (parsed.matchedId) {
-      matchedItem = itemMaster.find(function(x) { return String(x.id) === String(parsed.matchedId); });
-    }
-
-    if (matchedItem) {
-      nameInput.value = matchedItem.name;
-      catSelect.value = matchedItem.category || parsed.category || 'other';
-      nameInput.dataset.masterId = matchedItem.id;
-      var detailBits = [];
-      if (parsed.vintage) detailBits.push(parsed.vintage);
-      if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
-      if (parsed.details) detailBits.push(parsed.details);
-      detailsInput.value = detailBits.join(' · ');
-
-      statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')';
-      statusEl.style.animation = 'none';
-      statusEl.style.color = 'var(--success)';
-    } else {
-      // No catalog match — fill in what AI extracted so user can pick/edit
-      var displayName = parsed.name || '';
-      if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
-        displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
-      }
-      nameInput.value = displayName;
-      delete nameInput.dataset.masterId;
-      if (parsed.category) catSelect.value = parsed.category;
-      var bits2 = [];
-      if (parsed.vintage) bits2.push(parsed.vintage);
-      if (parsed.size) bits2.push(parsed.size);
-      if (parsed.details) bits2.push(parsed.details);
-      detailsInput.value = bits2.join(' · ');
-
-      statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.';
-      statusEl.style.animation = 'none';
-      statusEl.style.color = 'var(--warning)';
-
-      // Auto-run a local search with the extracted name to surface close matches
-      if (displayName && typeof onPhotoSearch === 'function') {
-        try { onPhotoSearch(displayName); } catch (e) {}
-      }
-    }
-
-    // Show raw AI summary for reference
-    var existingRaw = document.getElementById('ocrRawText');
-    if (existingRaw) existingRaw.remove();
-    var rawDiv = document.createElement('div');
-    rawDiv.id = 'ocrRawText';
-    rawDiv.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--surface2);padding:8px;border-radius:6px;margin-top:6px;max-height:80px;overflow-y:auto;font-family:var(--mono);line-height:1.4;word-break:break-word';
-    rawDiv.textContent = 'AI: ' + JSON.stringify({
-      name: parsed.name, brand: parsed.brand, vintage: parsed.vintage,
-      size: parsed.size, category: parsed.category
-    });
-    statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
-
+    populatePhotoFormFromParsed(parsed, statusEl);
   } catch (err) {
     console.error('[OpenAI Vision] parse failed, falling back to OCR:', err);
     statusEl.textContent = 'AI failed (' + (err.message || 'unknown') + ') — using OCR fallback…';
