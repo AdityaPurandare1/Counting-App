@@ -8129,17 +8129,21 @@ async function submitPhotoEntry() {
   const photoId = 'P' + Date.now();
   try { await savePhoto(photoId, capturedPhotoData); } catch (e) {}
 
-  // Get masterId if OCR matched an item
+  // Get masterId if OCR matched an item, plus UPC if Claude / the matched
+  // catalog row supplied one (parseLabelWithClaude → populatePhotoFormFromParsed
+  // stores it on the input's dataset). Falls through to null on the legacy
+  // Tesseract path, which doesn't populate UPC.
   const masterId = document.getElementById('photoName').dataset.masterId || null;
+  const upc      = document.getElementById('photoName').dataset.upc      || null;
   const category = document.getElementById('photoCategory').value;
   const qty = document.getElementById('photoQty').value;
   const details = document.getElementById('photoDetails').value.trim();
 
-  addCountEntry(name, category, qty, 'photo', null, details, 'none', photoId, null, masterId);
+  addCountEntry(name, category, qty, 'photo', upc, details, 'none', photoId, null, masterId);
 
   // Extras: other zones chosen via "+ Location"
   applyExtraLocations('photoExtraLocations', function(zone, extraQty) {
-    addCountEntryToZone(zone, name, category, extraQty, 'photo', null, details, 'none', photoId, null, masterId);
+    addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, details, 'none', photoId, null, masterId);
   });
 
   closePhotoReview();
@@ -10896,17 +10900,29 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     matchedItem = itemMaster.find(function (x) { return String(x.id) === String(parsed.matchedId); });
   }
 
+  // Resolve a UPC for this entry. Preference order:
+  //   1. UPC from the matched catalog row (most reliable — already known good)
+  //   2. UPC the model reported back from the label or echoed from the catalog
+  // Stored on the input's dataset so submitPhotoEntry can pass it through to
+  // addCountEntry as the sku/upc field.
+  var resolvedUpc = '';
+  if (matchedItem && matchedItem.upc) resolvedUpc = String(matchedItem.upc);
+  else if (parsed && parsed.upc)      resolvedUpc = String(parsed.upc).trim();
+
   if (matchedItem) {
     nameInput.value = matchedItem.name;
     catSelect.value = matchedItem.category || parsed.category || 'other';
     nameInput.dataset.masterId = matchedItem.id;
+    if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
+    else delete nameInput.dataset.upc;
     var detailBits = [];
     if (parsed.vintage) detailBits.push(parsed.vintage);
     if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
     if (parsed.details) detailBits.push(parsed.details);
     detailsInput.value = detailBits.join(' · ');
 
-    statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')';
+    var matchSuffix = resolvedUpc ? ' · UPC ' + resolvedUpc : '';
+    statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')' + matchSuffix;
     statusEl.style.animation = 'none';
     statusEl.style.color = 'var(--success)';
   } else {
@@ -10916,6 +10932,8 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     }
     nameInput.value = displayName;
     delete nameInput.dataset.masterId;
+    if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
+    else delete nameInput.dataset.upc;
     if (parsed.category) catSelect.value = parsed.category;
     var bits2 = [];
     if (parsed.vintage) bits2.push(parsed.vintage);
@@ -10923,7 +10941,7 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     if (parsed.details) bits2.push(parsed.details);
     detailsInput.value = bits2.join(' · ');
 
-    statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.';
+    statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.' + (resolvedUpc ? ' UPC: ' + resolvedUpc : '');
     statusEl.style.animation = 'none';
     statusEl.style.color = 'var(--warning)';
 
@@ -10954,6 +10972,9 @@ async function parseLabelWithClaude(imageDataUrl) {
   // Send the first 400 catalog items, alphabetized by name. Deterministic
   // order is critical for the Edge Function's prompt cache to hit — any
   // reorder invalidates the cached prefix and re-pays the full input cost.
+  // UPC is included so Claude can match by barcode when the label shows
+  // one and a catalog row has the same code (exact match beats name
+  // fuzziness).
   const catalog = (itemMaster || [])
     .slice()
     .sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); })
@@ -10964,6 +10985,7 @@ async function parseLabelWithClaude(imageDataUrl) {
         name: String(it.name || ''),
         brand: it.brand ? String(it.brand) : null,
         size: it.size ? String(it.size) : null,
+        upc: it.upc ? String(it.upc) : null,
       };
     });
 

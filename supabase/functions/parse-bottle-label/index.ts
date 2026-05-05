@@ -61,33 +61,53 @@ const RESPONSE_SCHEMA = {
       // even though it's valid per the JSON Schema spec. anyOf is the
       // documented-supported way to express nullability.
       anyOf: [{ type: 'string' }, { type: 'null' }],
-      description: 'Catalog id of the matching row if you are confident. Null otherwise.',
+      description: 'Catalog id of the matching row. Be liberal: missing-word matches like "818 Reposado" → "818 Tequila Reposado" should set this. Only null if no catalog row is plausible.',
+    },
+    upc: {
+      type: 'string',
+      description: 'UPC/barcode for the matched catalog row. If matchedId is set and that row has a [UPC ...] entry, copy the digits exactly. If you can read a UPC from the label itself, return that. Empty string when neither is available.',
     },
     confidence: {
       type: 'string',
       enum: ['high', 'medium', 'low'],
-      description: 'How confident you are in the extraction overall.',
+      description: 'How confident you are in the match. high = UPC or near-exact name match, medium = fuzzy/partial name match, low = guess.',
     },
   },
-  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'matchedId', 'confidence'],
+  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'matchedId', 'upc', 'confidence'],
   additionalProperties: false,
 };
 
 const SYSTEM_PROMPT =
   'You are a bar/restaurant inventory assistant. Given a photo of a wine, ' +
-  'liquor, or beer label/bottle, extract the key fields and try to match ' +
-  'against the provided catalog. ' +
-  'Prefer the exact spelling on the label over the catalog spelling for the ' +
-  'name and brand fields, but still return matchedId when you are confident ' +
-  'the photo corresponds to a catalog row. ' +
-  "Use empty strings (not null) for fields you can't see on the label. " +
-  'Use null for matchedId only when no catalog row is a confident match.';
+  'liquor, or beer label/bottle, extract the key fields AND match against ' +
+  'the provided catalog. ' +
+  '\n\n' +
+  'MATCHING RULES — be liberal here, not conservative:\n' +
+  '1. Match aggressively across abbreviations, missing words, and reordering. ' +
+  '"818 Reposado" on a label MUST match "818 Tequila Reposado" in the catalog ' +
+  '— the missing "Tequila" is implicit from the bottle. Same for "Don Julio ' +
+  '1942" matching "Don Julio Anejo 1942".\n' +
+  '2. If a UPC is visible on the label and any catalog row has the same UPC, ' +
+  'that is a definitive match. UPC match overrides name/brand differences.\n' +
+  '3. Size on the label should match the catalog row\'s size if both are known. ' +
+  '"750ml" and "750 ml" and "0.75L" all match.\n' +
+  '4. Use confidence "high" for UPC matches or near-exact name matches. ' +
+  '"medium" for fuzzy / partial-name matches where brand and product type ' +
+  'clearly align. Only return matchedId=null if NO catalog row plausibly ' +
+  'matches — withholding a match the user can clearly see costs them an ' +
+  'inventory entry.\n' +
+  '5. Prefer the exact spelling on the label for the name and brand output ' +
+  'fields, but still set matchedId to the catalog row when you find one.\n' +
+  '\n' +
+  "Use empty strings (not null) for label fields you can't see. " +
+  'Use null for matchedId only when no catalog row is even a plausible match.';
 
 interface CatalogItem {
   id: string;
   name: string;
   brand?: string | null;
   size?: string | null;
+  upc?: string | null;
 }
 
 interface RequestBody {
@@ -113,13 +133,17 @@ function buildCatalogText(catalog: CatalogItem[] | undefined): string {
   }
   // Cap at 400 to bound token usage. The mobile client is responsible for
   // ranking which 400 to send (typically alphabetical or recently-counted).
+  // Include UPC inline so Claude can match by UPC when the label shows a
+  // barcode region and a catalog row has the same code — that's an exact
+  // match that beats name fuzziness.
   const lines = catalog.slice(0, 400).map((item) => {
     const parts = [item.id, '|', item.name];
     if (item.brand) parts.push(' — ', item.brand);
-    if (item.size) parts.push(' (', item.size, ')');
+    if (item.size)  parts.push(' (', item.size, ')');
+    if (item.upc)   parts.push(' [UPC ', item.upc, ']');
     return parts.join('');
   });
-  return 'Catalog (id|name — brand (size)):\n' + lines.join('\n');
+  return 'Catalog (id|name — brand (size) [UPC code]):\n' + lines.join('\n');
 }
 
 Deno.serve(async (req) => {
