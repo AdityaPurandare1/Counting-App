@@ -80,27 +80,36 @@ const RESPONSE_SCHEMA = {
 const SYSTEM_PROMPT =
   'You are a bar/restaurant inventory assistant. Given a photo of a wine, ' +
   'liquor, or beer label/bottle, extract the key fields AND match against ' +
-  'the provided catalog. ' +
-  '\n\n' +
-  'MATCHING RULES — be liberal here, not conservative:\n' +
-  '1. Match aggressively across abbreviations, missing words, and reordering. ' +
-  '"818 Reposado" on a label MUST match "818 Tequila Reposado" in the catalog ' +
-  '— the missing "Tequila" is implicit from the bottle. Same for "Don Julio ' +
-  '1942" matching "Don Julio Anejo 1942".\n' +
-  '2. If a UPC is visible on the label and any catalog row has the same UPC, ' +
-  'that is a definitive match. UPC match overrides name/brand differences.\n' +
-  '3. Size on the label should match the catalog row\'s size if both are known. ' +
-  '"750ml" and "750 ml" and "0.75L" all match.\n' +
-  '4. Use confidence "high" for UPC matches or near-exact name matches. ' +
-  '"medium" for fuzzy / partial-name matches where brand and product type ' +
-  'clearly align. Only return matchedId=null if NO catalog row plausibly ' +
-  'matches — withholding a match the user can clearly see costs them an ' +
-  'inventory entry.\n' +
-  '5. Prefer the exact spelling on the label for the name and brand output ' +
-  'fields, but still set matchedId to the catalog row when you find one.\n' +
-  '\n' +
-  "Use empty strings (not null) for label fields you can't see. " +
-  'Use null for matchedId only when no catalog row is even a plausible match.';
+  'the provided catalog.\n\n' +
+  'MATCHING PRIORITY (try in order, stop at first hit):\n' +
+  '1. CARRIED ITEMS — the venue\'s stocked list. Always preferred. If the ' +
+  'label plausibly matches a carried item, that is the match — even if ' +
+  'something in "Other catalog" looks like a closer name match.\n' +
+  '2. OTHER CATALOG — broader inventory the venue could carry but doesn\'t ' +
+  'currently. Only consider these when no carried item plausibly matches.\n' +
+  '3. NO MATCH — set matchedId to null. The mobile app will route this to a ' +
+  'pending-items review queue. Still extract every label field you can read.\n\n' +
+  'MATCHING RULES — be liberal, not conservative:\n' +
+  '- Match across abbreviations, missing words, reordering. "818 Reposado" ' +
+  'MUST match "818 Tequila Reposado" — the missing "Tequila" is implicit ' +
+  'from the bottle. Same for "Don Julio 1942" matching "Don Julio Anejo 1942".\n' +
+  '- UPC match (label barcode == catalog UPC) is definitive and overrides ' +
+  'name/brand differences.\n' +
+  '- SIZE COMES FROM THE LABEL, NOT THE CATALOG. If the label clearly shows ' +
+  '"1.5L" or "3L" or "1L", return that exact value in the size field even ' +
+  'when the matched catalog row says "750ml". DO NOT substitute the ' +
+  'catalog\'s size onto the size field. The catalog size only helps you ' +
+  'pick the right SKU when multiple sizes exist for the same product.\n' +
+  '- When multiple catalog rows differ only by size (e.g. a 750ml SKU and ' +
+  'a 1.5L SKU of the same wine), match the SKU whose size matches the label.\n' +
+  '- Confidence: "high" for UPC matches or near-exact name matches; ' +
+  '"medium" for fuzzy/partial matches where brand and product type clearly ' +
+  'align; "low" for guesses. Withholding a match the counter can clearly ' +
+  'see costs them an inventory row — err on the side of matching.\n' +
+  '- Output `name` and `brand` using the LABEL\'s spelling, not the ' +
+  'catalog\'s. matchedId still points to the catalog row.\n\n' +
+  "Use empty strings (not null) for label fields you can't read.\n" +
+  'Use null for matchedId only when no row in either list plausibly matches.';
 
 interface CatalogItem {
   id: string;
@@ -112,7 +121,8 @@ interface CatalogItem {
 
 interface RequestBody {
   image: string; // base64 string OR data URL ("data:image/jpeg;base64,...")
-  catalog?: CatalogItem[];
+  carried?: CatalogItem[]; // venue-specific stocked items, matched first
+  catalog?: CatalogItem[]; // broader inventory, matched second
 }
 
 // Strip the optional "data:image/...;base64," prefix off whatever the client
@@ -127,23 +137,41 @@ function parseImage(input: string): { mediaType: string; data: string } {
   return { mediaType: 'image/jpeg', data: input };
 }
 
-function buildCatalogText(catalog: CatalogItem[] | undefined): string {
-  if (!catalog || catalog.length === 0) {
-    return '(catalog empty — return matchedId: null)';
-  }
-  // Cap at 400 to bound token usage. The mobile client is responsible for
-  // ranking which 400 to send (typically alphabetical or recently-counted).
-  // Include UPC inline so Claude can match by UPC when the label shows a
-  // barcode region and a catalog row has the same code — that's an exact
-  // match that beats name fuzziness.
-  const lines = catalog.slice(0, 400).map((item) => {
+function renderCatalogLines(items: CatalogItem[], cap: number): string {
+  return items.slice(0, cap).map((item) => {
     const parts = [item.id, '|', item.name];
     if (item.brand) parts.push(' — ', item.brand);
     if (item.size)  parts.push(' (', item.size, ')');
     if (item.upc)   parts.push(' [UPC ', item.upc, ']');
     return parts.join('');
-  });
-  return 'Catalog (id|name — brand (size) [UPC code]):\n' + lines.join('\n');
+  }).join('\n');
+}
+
+function buildCatalogText(carried: CatalogItem[] | undefined, other: CatalogItem[] | undefined): string {
+  const sections: string[] = [];
+  // Two-tier rendering so Claude knows which list to try first. The
+  // venue's carried items get the full payload; the broader catalog is
+  // capped harder to bound prompt size. Include UPC inline so a label
+  // barcode can short-circuit name fuzziness.
+  if (carried && carried.length > 0) {
+    sections.push(
+      '=== CARRIED ITEMS (this venue stocks these — match these FIRST) ===\n' +
+      'Format: id|name — brand (size) [UPC code]\n' +
+      renderCatalogLines(carried, 250),
+    );
+  } else {
+    sections.push('=== CARRIED ITEMS ===\n(none — this venue\'s carried list is empty)');
+  }
+  if (other && other.length > 0) {
+    sections.push(
+      '=== OTHER CATALOG (broader inventory — match only when no carried item fits) ===\n' +
+      renderCatalogLines(other, 250),
+    );
+  }
+  if (sections.length === 0) {
+    return '(catalog empty — return matchedId: null)';
+  }
+  return sections.join('\n\n');
 }
 
 Deno.serve(async (req) => {
@@ -180,7 +208,7 @@ Deno.serve(async (req) => {
   }
 
   const { mediaType, data } = parseImage(body.image);
-  const catalogText = buildCatalogText(body.catalog);
+  const catalogText = buildCatalogText(body.carried, body.catalog);
 
   // Cache placement: render order is tools → system → messages. We put the
   // system prompt + catalog both in the system array, and put the

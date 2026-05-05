@@ -2704,6 +2704,26 @@ html, body {
       <label>Vintage / Details</label>
       <input class="form-input" id="photoDetails" placeholder="e.g. 2019, Napa Valley">
     </div>
+    <div class="form-group">
+      <label>Issue (select if applicable)</label>
+      <div class="issue-chips" id="photoIssueChips">
+        <span class="issue-chip selected" data-issue="none" onclick="selectPhotoIssue(this)">None</span>
+        <span class="issue-chip" data-issue="no-sticker" onclick="selectPhotoIssue(this)">No sticker</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectPhotoIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="no-upc" onclick="selectPhotoIssue(this)">No UPC/barcode</span>
+        <span class="issue-chip" data-issue="wrong-location" onclick="selectPhotoIssue(this)">Wrong location</span>
+        <span class="issue-chip" data-issue="damaged" onclick="selectPhotoIssue(this)">Damaged</span>
+        <span class="issue-chip" data-issue="misplaced" onclick="selectPhotoIssue(this)">Misplaced</span>
+        <span class="issue-chip" data-issue="expired" onclick="selectPhotoIssue(this)">Expired</span>
+        <span class="issue-chip" data-issue="wrong-vintage" onclick="selectPhotoIssue(this)">Wrong vintage</span>
+        <span class="issue-chip" data-issue="no-label" onclick="selectPhotoIssue(this)">No label</span>
+        <span class="issue-chip" data-issue="other" onclick="selectPhotoIssue(this)">Other</span>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Issue notes (optional)</label>
+      <input class="form-input" id="photoIssueNotes" placeholder="e.g. found behind shelf, torn label...">
+    </div>
     <div class="form-group" style="border-top:1px solid var(--border);padding-top:10px">
       <label style="display:flex;align-items:center;justify-content:space-between">
         <span>Also count in other locations</span>
@@ -8101,9 +8121,19 @@ function capturePhoto() {
   document.getElementById('photoPreviewImg').src = capturedPhotoData;
   document.getElementById('photoName').value = '';
   document.getElementById('photoName').dataset.masterId = '';
+  delete document.getElementById('photoName').dataset.upc;
   document.getElementById('photoDetails').value = '';
   document.getElementById('photoQty').value = '1';
   document.getElementById('photoDupeWarning').innerHTML = '';
+  // Reset issue chips back to "None" so a previous photo's selection
+  // doesn't carry over to the new bottle. populatePhotoFormFromParsed
+  // overrides this to "not-in-craftable" when Claude can't match.
+  appState.photoIssue = 'none';
+  document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
+    chip.classList.toggle('selected', chip.dataset.issue === 'none');
+  });
+  var photoIssueNotes = document.getElementById('photoIssueNotes');
+  if (photoIssueNotes) photoIssueNotes.value = '';
 
   // Remove previous OCR raw text if present
   const existingRaw = document.getElementById('ocrRawText');
@@ -8138,12 +8168,20 @@ async function submitPhotoEntry() {
   const category = document.getElementById('photoCategory').value;
   const qty = document.getElementById('photoQty').value;
   const details = document.getElementById('photoDetails').value.trim();
+  // Issue: counter can pick from chips after the photo is parsed; if the
+  // AI couldn't match a catalog row, populatePhotoFormFromParsed pre-
+  // selects 'not-in-craftable' so the entry surfaces on the Issues page.
+  // Notes free-text rides alongside in the entry's notes field so the
+  // admin sees context.
+  const issue = appState.photoIssue || 'none';
+  const issueNotesEl = document.getElementById('photoIssueNotes');
+  const issueNotes = (issueNotesEl && issueNotesEl.value.trim()) || details || null;
 
-  addCountEntry(name, category, qty, 'photo', upc, details, 'none', photoId, null, masterId);
+  addCountEntry(name, category, qty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
 
   // Extras: other zones chosen via "+ Location"
   applyExtraLocations('photoExtraLocations', function(zone, extraQty) {
-    addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, details, 'none', photoId, null, masterId);
+    addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
   });
 
   closePhotoReview();
@@ -8282,6 +8320,13 @@ function selectIssue(element) {
   appState.selectedIssue = element.dataset.issue;
   document.querySelectorAll('#issueChips .issue-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.issue === appState.selectedIssue);
+  });
+}
+
+function selectPhotoIssue(element) {
+  appState.photoIssue = element.dataset.issue;
+  document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
+    chip.classList.toggle('selected', chip.dataset.issue === appState.photoIssue);
   });
 }
 
@@ -10948,6 +10993,14 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     if (displayName && typeof onPhotoSearch === 'function') {
       try { onPhotoSearch(displayName); } catch (e) {}
     }
+
+    // No catalog match → flag the entry so admin sees it on the Issues
+    // page and can add it to the catalog. Counter can still override the
+    // chip selection before saving.
+    appState.photoIssue = 'not-in-craftable';
+    document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
+      chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
+    });
   }
 
   // Raw extraction summary, useful for debugging and for the user to see
@@ -10969,25 +11022,34 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
    server-side and runs claude-haiku-4-5 with a cached system prompt + catalog.
    Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on error. */
 async function parseLabelWithClaude(imageDataUrl) {
-  // Send the first 400 catalog items, alphabetized by name. Deterministic
-  // order is critical for the Edge Function's prompt cache to hit — any
-  // reorder invalidates the cached prefix and re-pays the full input cost.
-  // UPC is included so Claude can match by barcode when the label shows
-  // one and a catalog row has the same code (exact match beats name
-  // fuzziness).
-  const catalog = (itemMaster || [])
-    .slice()
-    .sort(function (a, b) { return String(a.name || '').localeCompare(String(b.name || '')); })
-    .slice(0, 400)
-    .map(function (it) {
-      return {
-        id: String(it.id || ''),
-        name: String(it.name || ''),
-        brand: it.brand ? String(it.brand) : null,
-        size: it.size ? String(it.size) : null,
-        upc: it.upc ? String(it.upc) : null,
-      };
-    });
+  // Split the catalog into "carried" (this venue actually stocks it,
+  // tracked in carriedSet) and "other" (broader inventory). Claude is
+  // instructed to try carried first — that's where almost every match
+  // should land for a real audit. Both lists are alphabetized by name so
+  // the prompt prefix is byte-stable and the Edge Function's cache hits.
+  const toPayload = function (it) {
+    return {
+      id: String(it.id || ''),
+      name: String(it.name || ''),
+      brand: it.brand ? String(it.brand) : null,
+      size: it.size ? String(it.size) : null,
+      upc: it.upc ? String(it.upc) : null,
+    };
+  };
+  const sortByName = function (a, b) {
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  };
+
+  const carriedSetRef = (typeof carriedSet !== 'undefined' && carriedSet) ? carriedSet : new Set();
+  const allItems = (itemMaster || []).slice();
+  const carried = [];
+  const other = [];
+  for (const it of allItems) {
+    if (carriedSetRef.has(String(it.id))) carried.push(it);
+    else other.push(it);
+  }
+  const carriedPayload = carried.sort(sortByName).slice(0, 250).map(toPayload);
+  const otherPayload   = other.sort(sortByName).slice(0, 250).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
   const res = await fetch(url, {
@@ -11000,7 +11062,11 @@ async function parseLabelWithClaude(imageDataUrl) {
       'apikey': SUPABASE_ANON_KEY,
       'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
     },
-    body: JSON.stringify({ image: imageDataUrl, catalog: catalog }),
+    body: JSON.stringify({
+      image: imageDataUrl,
+      carried: carriedPayload,
+      catalog: otherPayload,
+    }),
   });
   if (!res.ok) {
     const errText = await res.text().catch(function () { return ''; });
