@@ -3117,12 +3117,19 @@ function searchItemMaster(query, limit) {
         if (match(item)) results.push(item);
       }
     }
-    if (results.length > 0) return results;
+    // Strict carried-only when the venue HAS uploaded inventory: never
+    // fall through to the full 20k catalog for typed search. If a
+    // counter's query doesn't match anything carried, surfacing
+    // visually-similar non-carried items just adds noise — the user
+    // would have to manually verify each one isn't actually stocked.
+    // The fallback below only runs when carriedSet is empty (no
+    // inventory uploaded yet), so the app still works pre-onboarding.
+    return results;
   }
 
-  // Fallback — only reached when carried set is empty OR no carried item
-  // matched the query. Matches the old pre-v1.14 behaviour so counters
-  // can still find items that simply haven't been marked carried yet.
+  // Fallback — only reached when this venue has no carried set at all
+  // (carriedSet.size === 0). Searches the full master so a brand-new
+  // venue with nothing uploaded yet can still count.
   for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
     const item = itemMaster[i];
     if (match(item)) results.push(item);
@@ -7944,20 +7951,24 @@ function detectCategoryFromText(text) {
 
 /* Photo search fallback — lets user search item master from photo review modal */
 function onPhotoSearch(value) {
-  const query = value.toLowerCase().trim();
   const resultsEl = document.getElementById('photoSearchResults');
+  const query = String(value || '').trim();
 
   if (query.length < 2) {
     resultsEl.innerHTML = '';
     return;
   }
 
-  const matches = [];
-  for (let i = 0; i < itemMaster.length && matches.length < 8; i++) {
-    const item = itemMaster[i];
-    if ((item.name + ' ' + item.brand).toLowerCase().includes(query)) {
-      matches.push(item);
-    }
+  // Route through searchItemMaster so this honors the carried-items
+  // priority (and now strict-carried mode). The previous direct loop over
+  // itemMaster bypassed carriedSet entirely — typing in the photo
+  // override field would surface results from the full 20k catalog
+  // even when the venue's carried list had perfectly good matches.
+  const matches = searchItemMaster(query, 8);
+
+  if (matches.length === 0) {
+    resultsEl.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">No items in this venue\'s inventory match. Type the full name to add as a new item.</div>';
+    return;
   }
 
   resultsEl.innerHTML = matches.map(item =>
