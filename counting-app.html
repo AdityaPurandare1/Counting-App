@@ -2102,15 +2102,18 @@ html, body {
     </div>
     <div class="form-group">
       <label>Email</label>
-      <input class="form-input" id="loginEmail" placeholder="your@email.com" type="email">
+      <input class="form-input" id="loginEmail" placeholder="your@email.com" type="email" autocomplete="username">
     </div>
     <div class="form-group">
-      <label>Name</label>
-      <input class="form-input" id="loginName" placeholder="Your name">
+      <label>Password</label>
+      <input class="form-input" id="loginPassword" placeholder="Your password" type="password" autocomplete="current-password">
     </div>
     <button class="submit-btn" onclick="handleLogin()">Sign in</button>
     <p id="loginError" style="font-size:12px;color:var(--danger);text-align:center;margin-top:10px;display:none"></p>
-    <p style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:10px">Access is restricted to authorized emails only.</p>
+    <p style="font-size:12px;text-align:center;margin-top:14px">
+      <a href="#" onclick="handleForgotPassword();return false" style="color:var(--accent);text-decoration:none">Forgot your password?</a>
+    </p>
+    <p style="font-size:11px;color:var(--text-dim);text-align:center;margin-top:10px">Access is restricted to invited users. Ask an admin if you need an account.</p>
   </div>
 
   <!-- ========== VENUES PAGE ========== -->
@@ -2850,7 +2853,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.29';
+const APP_VERSION = '1.31';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -2859,22 +2862,90 @@ const SUPABASE_URL = 'https://mnraeesscqsaappkaldb.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
 // ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
 
-/* Supabase JS client — only used for Realtime subscriptions. All reads/writes
-   still go through the minimal supabaseRest wrapper below so the write-queue
-   fallback for offline/flaky network keeps working. */
+/* Supabase JS client — used for Realtime subscriptions AND auth (Phase 1
+   migration to Supabase Auth). All reads/writes still go through the
+   supabaseRest wrapper below; that wrapper now picks the user JWT when
+   we have one (post-sign-in) and falls back to the anon key for
+   pre-auth/bootstrap calls. */
 const supabaseClient = (window.supabase && window.supabase.createClient)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       realtime: { params: { eventsPerSecond: 2 } },
-      auth: { persistSession: false },
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,  // catches password-reset / invite redirects
+      },
     })
   : null;
+
+/* Currently-signed-in user's JWT, refreshed by Supabase's onAuthStateChange.
+   Read at the top of every supabaseRest call so a token rotation
+   (autoRefreshToken) is picked up without restarting the app. Null while
+   the user is signed out OR signed in via the legacy ACCESS_LIST path. */
+let currentSupabaseJwt = null;
+if (supabaseClient) {
+  supabaseClient.auth.getSession().then(function (resp) {
+    var session = resp && resp.data && resp.data.session;
+    currentSupabaseJwt = session ? session.access_token : null;
+  });
+  supabaseClient.auth.onAuthStateChange(function (event, session) {
+    currentSupabaseJwt = session ? session.access_token : null;
+    // PASSWORD_RECOVERY fires when the user lands on the page via a
+    // reset-password email link. We surface a prompt so they can set
+    // a new password right there instead of being silently signed in.
+    if (event === 'PASSWORD_RECOVERY') {
+      handlePasswordRecoveryFlow();
+    }
+    // SIGNED_IN fires on every login — including the FIRST time after
+    // clicking an invite email. Supabase doesn't expose a dedicated
+    // "INVITED" event; we detect it by checking whether last_sign_in_at
+    // matches created_at (within a small slop), which only happens on
+    // the user's very first session. In that case the account exists in
+    // auth.users but has no password set — route through the same
+    // password-prompt flow as PASSWORD_RECOVERY so the user can set
+    // one before their session expires and locks them out.
+    if (event === 'SIGNED_IN' && session && session.user && _isFirstLoginSession(session)) {
+      handlePasswordRecoveryFlow();
+    }
+    // SIGNED_OUT fires not just from explicit signOut() but also when a
+    // session is revoked server-side (admin disabled the user) or expires
+    // past the refresh window. Treat it as a forced logout: clear local
+    // state so the app doesn't keep rendering with a stale identity.
+    if (event === 'SIGNED_OUT' && typeof appState !== 'undefined' && appState && appState.user) {
+      // Don't clobber legacy ACCESS_LIST users (they have no Supabase
+      // session by definition, so SIGNED_OUT for them is a no-op anyway).
+      // But if a Supabase-authed user was just revoked, force re-login.
+      console.warn('[auth] SIGNED_OUT received — clearing local user state');
+      appState.user = null;
+      appState.currentVenue = null;
+      appState.currentZone = null;
+      try { saveState(); } catch (e) {}
+      try { showPage('login'); } catch (e) {}
+    }
+  });
+}
+
+// Build the Authorization header. When a user is signed in via Supabase
+// Auth, we send their JWT — Postgres RLS policies will see them as a
+// real authenticated user. When nobody is signed in (boot, login screen,
+// legacy ACCESS_LIST users), we fall back to the anon key so the
+// dev-mode `to anon using (true)` policies still allow reads/writes.
+// Phase 4 (RLS flip) will lock the anon path down.
+function _supabaseAuthHeaders(extra) {
+  const headers = {
+    'apikey': SUPABASE_ANON_KEY,
+    'Authorization': 'Bearer ' + (currentSupabaseJwt || SUPABASE_ANON_KEY),
+  };
+  if (extra) for (const k in extra) headers[k] = extra[k];
+  return headers;
+}
 
 const supabaseRest = {
   async query(table, params) {
     const qs = params ? '?' + params : '';
     try {
       const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + qs, {
-        headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
+        headers: _supabaseAuthHeaders(),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       return { data: await resp.json(), error: null };
@@ -2884,12 +2955,10 @@ const supabaseRest = {
     try {
       const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
         method: 'PATCH',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        headers: _supabaseAuthHeaders({
           'Content-Type': 'application/json',
           'Prefer': 'return=representation',
-        },
+        }),
         body: JSON.stringify(body),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
@@ -2900,12 +2969,10 @@ const supabaseRest = {
     try {
       const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table, {
         method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        headers: _supabaseAuthHeaders({
           'Content-Type': 'application/json',
           'Prefer': 'return=representation',
-        },
+        }),
         body: JSON.stringify(body),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
@@ -2916,11 +2983,9 @@ const supabaseRest = {
     try {
       const resp = await fetch(SUPABASE_URL + '/rest/v1/rpc/' + functionName, {
         method: 'POST',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+        headers: _supabaseAuthHeaders({
           'Content-Type': 'application/json',
-        },
+        }),
         body: JSON.stringify(args || {}),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
@@ -2931,10 +2996,7 @@ const supabaseRest = {
     try {
       const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
         method: 'DELETE',
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-        },
+        headers: _supabaseAuthHeaders(),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
       return { data: null, error: null };
@@ -4164,6 +4226,37 @@ if (appState.user && !appState.user.venueIds) {
   saveState();
 }
 
+// Reconcile cached appState.user with the live Supabase session. Two
+// cases this catches:
+//   - Cached user but session expired/revoked → force re-login.
+//   - Live session but no cached user (e.g. localStorage cleared) →
+//     re-hydrate from the JWT instead of dumping them on the login screen
+//     for nothing.
+// Legacy ACCESS_LIST users have no Supabase session and skip this whole
+// block — they keep their localStorage-only state until Phase 5
+// migrates them.
+if (supabaseClient) {
+  setTimeout(async function () {
+    try {
+      const resp = await supabaseClient.auth.getSession();
+      const session = resp && resp.data && resp.data.session;
+      if (session && session.user) {
+        // Live session — pull fresh role/venue from app_users so an
+        // admin's mid-session demote takes effect immediately. Don't
+        // navigate: the user may have reloaded mid-audit and we don't
+        // want to yank them off their current page.
+        await _hydrateUserProfileFromSession({ redirect: false });
+      } else if (appState.user && currentSupabaseJwt === null) {
+        // Don't auto-clear here: we can't tell yet if this user signed in
+        // via Supabase or via legacy ACCESS_LIST. The first authenticated
+        // REST call will fail loudly if they're a stale Supabase user;
+        // legacy users never had a session in the first place. Phase 4
+        // RLS flip will tighten this up.
+      }
+    } catch (e) { console.warn('[auth] boot session check failed:', e); }
+  }, 0);
+}
+
 /* ================================================================
    UPC CACHE + LEARNED UPCs
    upcCache: temporary API lookup cache (session-level)
@@ -4705,10 +4798,23 @@ async function joinNetworkedAudit(rawCode) {
   if (!data || data.length === 0) { showToast('No active audit for code ' + code, 'error'); return null; }
   const audit = data[0];
 
+  // Authorization: a join code alone is not enough — the user must also be
+  // assigned to this audit's venue (corporate role gets all venues). Without
+  // this check, any counter holding any active code could join an audit at
+  // a venue they have no access to. Corporate ('all') and assigned-list
+  // checks mirror getVisibleVenues so we stay consistent with the venue
+  // picker the user already sees.
+  const isCorporate = appState.user.role === 'corporate' || appState.user.venueIds === 'all';
+  const assignedIds = Array.isArray(appState.user.venueIds) ? appState.user.venueIds : [];
+  if (!isCorporate && !assignedIds.includes(audit.venue_id)) {
+    showToast('You are not assigned to ' + audit.venue_name + ' — ask a manager.', 'error');
+    return null;
+  }
+
   // We must have the venue locally to render zones
   const matchingVenue = appState.venues.find(v => v.id === audit.venue_id);
   if (!matchingVenue) {
-    showToast('You do not have access to ' + audit.venue_name, 'error');
+    showToast('Venue ' + audit.venue_name + ' is not loaded — refresh and retry.', 'error');
     return null;
   }
   appState.currentVenue = matchingVenue;
@@ -4897,15 +5003,24 @@ async function flushPendingRecountSyncs() {
    write fails. */
 async function syncAuditMetaToSupabase(patch) {
   if (!appState.audit || !appState.audit.supabaseId) return;
+  const filter = 'id=eq.' + encodeURIComponent(appState.audit.supabaseId);
+  let lastError = null;
   try {
-    const { error } = await supabaseRest.update(
-      'kount_audits',
-      'id=eq.' + encodeURIComponent(appState.audit.supabaseId),
-      patch
-    );
-    if (error) console.warn('[audit] sync meta failed:', error);
+    const { error } = await supabaseRest.update('kount_audits', filter, patch);
+    if (!error) return;
+    lastError = error;
   } catch (e) {
-    console.warn('[audit] sync meta threw:', e);
+    lastError = e;
+  }
+  console.warn('[audit] sync meta failed:', lastError);
+  if (isRetryableError(lastError)) {
+    enqueuePendingMutation('rest-update', {
+      table: 'kount_audits',
+      filter: filter,
+      body: patch,
+    }, { label: 'audit meta patch (' + Object.keys(patch || {}).join(',') + ')' });
+  } else {
+    console.error('[audit] sync meta non-retryable, dropping:', lastError);
   }
 }
 
@@ -4964,11 +5079,18 @@ async function syncEntryToSupabase(entry, zone, opts) {
     timestamp: entry.timestamp || new Date().toISOString(),
   };
 
+  // Track the most informative failure across insert + merge steps so the
+  // retry-queue decision at the bottom uses the actual blocker (lookup or
+  // merge-update error), not the stale initial 23505 that's expected on
+  // collision.
+  let lastError = null;
+
   const { data, error } = await supabaseRest.insert('kount_entries', payload);
   if (!error && data && data[0]) {
     entry.supabaseId = data[0].id;
     return data[0];
   }
+  lastError = error;
 
   // Unique-key collision — merge with the existing row
   if (error && /duplicate key|23505/i.test(error.message || '')) {
@@ -4980,7 +5102,9 @@ async function syncEntryToSupabase(entry, zone, opts) {
                '&is_recount=eq.' + isRecount +
                '&' + idFilter + '&select=*';
     const lookup = await supabaseRest.query('kount_entries', qs);
-    if (lookup.data && lookup.data[0]) {
+    if (lookup.error) {
+      lastError = lookup.error;
+    } else if (lookup.data && lookup.data[0]) {
       const existing = lookup.data[0];
       const mergedQty = Number(existing.qty) + Number(payload.qty);
       const upd = await supabaseRest.update('kount_entries', 'id=eq.' + existing.id, {
@@ -4990,13 +5114,178 @@ async function syncEntryToSupabase(entry, zone, opts) {
         timestamp: new Date().toISOString(),
       });
       if (!upd.error) { entry.supabaseId = existing.id; return upd.data && upd.data[0]; }
+      lastError = upd.error;
     }
   }
 
-  console.warn('[audit] sync entry failed:', error);
+  console.warn('[audit] sync entry failed:', lastError);
   updateOfflineBannerState('error');
+
+  // Hand off to the retry queue if the failure looks transient. The queue
+  // replays on `online`, channel re-subscribe, and a periodic ticker, so
+  // a flaky network or 5xx blip eventually heals without the user
+  // noticing. 4xx and 23505-style hard failures are dropped — those are
+  // bugs we want to surface, not paper over.
+  if (appState.audit && appState.audit.supabaseId && isRetryableError(lastError)) {
+    enqueuePendingMutation('entry-sync', {
+      entry: snapshotEntry(entry),
+      zone: zone,
+      opts: opts || null,
+    }, { label: 'entry sync (' + (entry.name || 'unknown') + ')' });
+  } else if (lastError) {
+    console.error('[audit] entry sync non-retryable, dropping:', lastError);
+  }
   return null;
 }
+
+/* ================================================================
+   SYNC RETRY QUEUE
+   Mutations (entry inserts/updates, audit meta patches, etc.) used
+   to console.warn-and-forget on transient failures. The desktop
+   would diverge from the phone until the user did something else
+   that triggered a fresh sync. The queue persists failed ops to
+   localStorage and replays them on:
+     - the browser firing 'online'
+     - the audit realtime channel re-subscribing
+     - a 30s ticker (belt-and-braces)
+   We DON'T retry on 4xx / 23505 / known-bad shapes — those are
+   bugs we want to surface, not paper over with infinite retries.
+   ================================================================ */
+const PENDING_MUTATIONS_KEY = 'hwood_pending_mutations_v1';
+const PENDING_MUTATIONS_MAX = 500;
+const PENDING_REPLAY_INTERVAL_MS = 30000;
+
+let pendingMutations = [];
+try {
+  const _raw = localStorage.getItem(PENDING_MUTATIONS_KEY);
+  if (_raw) pendingMutations = JSON.parse(_raw) || [];
+  if (!Array.isArray(pendingMutations)) pendingMutations = [];
+} catch (e) { pendingMutations = []; }
+
+function persistPendingMutations() {
+  try { localStorage.setItem(PENDING_MUTATIONS_KEY, JSON.stringify(pendingMutations)); }
+  catch (e) { console.warn('[sync-queue] persist failed:', e); }
+}
+
+// Used when storing an entry in the queue — strip volatile/large fields and
+// avoid sharing references with the live entry, which the caller may mutate
+// before the queued op is replayed.
+function snapshotEntry(entry) {
+  if (!entry || typeof entry !== 'object') return entry;
+  return {
+    id: entry.id,
+    supabaseId: entry.supabaseId,
+    name: entry.name,
+    category: entry.category,
+    qty: entry.qty,
+    method: entry.method,
+    sku: entry.sku,
+    notes: entry.notes,
+    issue: entry.issue,
+    photoId: entry.photoId,
+    masterId: entry.masterId,
+    timestamp: entry.timestamp,
+  };
+}
+
+function isRetryableError(err) {
+  if (!err) return false;
+  const msg = String(err.message || err);
+  // 23505 is a hard collision — by the time we land here the merge path
+  // already had its shot. Replaying the same op won't change the answer.
+  if (/duplicate key|23505/i.test(msg)) return false;
+  // 4xx is non-retryable: validation, RLS, not-found. Replaying just keeps
+  // the queue full of zombie ops.
+  if (/HTTP 4\d\d/.test(msg)) return false;
+  return true;
+}
+
+function enqueuePendingMutation(kind, args, opts) {
+  if (pendingMutations.length >= PENDING_MUTATIONS_MAX) {
+    console.warn('[sync-queue] queue at cap (' + PENDING_MUTATIONS_MAX + ') — dropping oldest');
+    pendingMutations.shift();
+  }
+  pendingMutations.push({
+    id: 'Q' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    kind: kind,
+    args: args,
+    label: (opts && opts.label) || kind,
+    attempts: 0,
+    createdAt: new Date().toISOString(),
+  });
+  persistPendingMutations();
+  updateOfflineBannerState();
+}
+
+let _replayInFlight = false;
+async function replayPendingMutations() {
+  if (_replayInFlight) return;
+  if (pendingMutations.length === 0) return;
+  if (navigator.onLine === false) return;
+  _replayInFlight = true;
+  try {
+    // FIFO so dependent ops (insert before update on the same row) replay
+    // in their original order. Stop on the first retryable failure to
+    // avoid spinning — the next trigger will pick up where we left off.
+    while (pendingMutations.length > 0) {
+      const op = pendingMutations[0];
+      op.attempts += 1;
+      let succeeded = false;
+      let opError = null;
+      try {
+        if (op.kind === 'entry-sync') {
+          const result = await syncEntryToSupabase(op.args.entry, op.args.zone, op.args.opts);
+          // syncEntryToSupabase re-enqueues itself on its own retryable
+          // failures (and returns null). If it returned null, the new
+          // queue entry is at the tail; we still shift the old one off so
+          // the queue doesn't double-count this op forever.
+          succeeded = result !== null;
+          if (!succeeded) opError = new Error('entry-sync replay returned null');
+        } else if (op.kind === 'rest-update') {
+          const r = await supabaseRest.update(op.args.table, op.args.filter, op.args.body);
+          if (r && r.error) opError = r.error; else succeeded = true;
+        } else if (op.kind === 'rest-delete') {
+          const r = await supabaseRest.deleteRows(op.args.table, op.args.filter);
+          if (r && r.error) opError = r.error; else succeeded = true;
+        } else if (op.kind === 'rest-insert') {
+          const r = await supabaseRest.insert(op.args.table, op.args.body);
+          if (r && r.error) opError = r.error; else succeeded = true;
+        } else {
+          console.warn('[sync-queue] unknown kind, dropping:', op.kind);
+          succeeded = true;
+        }
+      } catch (e) { opError = e; }
+
+      if (succeeded) {
+        pendingMutations.shift();
+        persistPendingMutations();
+      } else if (op.kind === 'entry-sync' && !succeeded) {
+        // The recursive enqueue inside syncEntryToSupabase already added a
+        // fresh op (or dropped it as non-retryable). Either way, retire
+        // this slot.
+        pendingMutations.shift();
+        persistPendingMutations();
+      } else if (!isRetryableError(opError)) {
+        console.error('[sync-queue] non-retryable, dropping op:', op.label, opError);
+        pendingMutations.shift();
+        persistPendingMutations();
+      } else {
+        if (op.attempts % 10 === 0) {
+          console.warn('[sync-queue] op stuck after ' + op.attempts + ' attempts:', op.label, opError);
+        }
+        // Persist the bumped attempts counter so the next replay sees it.
+        persistPendingMutations();
+        break;
+      }
+    }
+  } finally {
+    _replayInFlight = false;
+    updateOfflineBannerState();
+  }
+}
+
+window.addEventListener('online', function () { replayPendingMutations(); });
+setInterval(function () { replayPendingMutations(); }, PENDING_REPLAY_INTERVAL_MS);
 
 /* ---------- Realtime channel ---------- */
 function subscribeToAuditRealtime(auditId) {
@@ -5012,7 +5301,7 @@ function subscribeToAuditRealtime(auditId) {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_audits',   filter: 'id=eq.' + auditId },       onAuditMetaRealtime)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_recounts', filter: 'audit_id=eq.' + auditId }, onAuditRecountRealtime)
     .subscribe((status) => {
-      if (status === 'SUBSCRIBED')            { auditChannelState = 'connected'; updateOfflineBannerState(); }
+      if (status === 'SUBSCRIBED')            { auditChannelState = 'connected'; updateOfflineBannerState(); replayPendingMutations(); }
       else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED')
                                               { auditChannelState = 'error';     updateOfflineBannerState(); }
     });
@@ -5152,10 +5441,13 @@ function updateOfflineBannerState(forcedState) {
   const networked = !!(appState.audit && appState.audit.supabaseId);
   if (!networked) { hideOfflineBanner(); return; }
   const online = navigator.onLine !== false;
-  if (forcedState === 'error')    { showOfflineBanner('Database error — changes paused'); return; }
-  if (!online)                    { showOfflineBanner('Offline — changes paused until reconnected'); return; }
-  if (auditChannelState === 'connecting') { showOfflineBanner('Reconnecting to audit…'); return; }
-  if (auditChannelState === 'error')      { showOfflineBanner('Disconnected — reconnect to continue'); return; }
+  const pending = (typeof pendingMutations !== 'undefined' && pendingMutations.length) || 0;
+  const pendSuffix = pending > 0 ? ' · ' + pending + ' queued' : '';
+  if (forcedState === 'error')    { showOfflineBanner('Database error — changes paused' + pendSuffix); return; }
+  if (!online)                    { showOfflineBanner('Offline — changes queued' + pendSuffix); return; }
+  if (auditChannelState === 'connecting') { showOfflineBanner('Reconnecting to audit…' + pendSuffix); return; }
+  if (auditChannelState === 'error')      { showOfflineBanner('Disconnected — reconnect to continue' + pendSuffix); return; }
+  if (pending > 0) { showOfflineBanner('Syncing ' + pending + ' queued change' + (pending === 1 ? '' : 's') + '…'); return; }
   hideOfflineBanner();
 }
 
@@ -5568,15 +5860,23 @@ const ACCESS_LIST = [
 const APP_USERS_CACHE_KEY = 'hwood_app_users_cache_v1';
 
 function applyAccessList(list) {
-  if (!Array.isArray(list) || list.length === 0) return;
+  if (!Array.isArray(list)) return;
+  // Empty array IS a valid state — admin cleared the active list and
+  // we must lock everyone out. Only a non-array (defensive) is ignored.
   // Mutate in place so the `const ACCESS_LIST` binding remains valid.
   ACCESS_LIST.splice(0, ACCESS_LIST.length, ...list);
 }
 
 // 1) Hydrate synchronously from cache (if any) so login is instant.
+//    A cached empty array means "admin has explicitly cleared everyone" —
+//    honor it. Absence of the key (cachedRaw === null) falls through to
+//    the hardcoded baseline so first-ever boots aren't locked out.
 try {
-  const cached = JSON.parse(localStorage.getItem(APP_USERS_CACHE_KEY) || 'null');
-  if (Array.isArray(cached) && cached.length > 0) applyAccessList(cached);
+  const cachedRaw = localStorage.getItem(APP_USERS_CACHE_KEY);
+  if (cachedRaw !== null) {
+    const cached = JSON.parse(cachedRaw);
+    if (Array.isArray(cached)) applyAccessList(cached);
+  }
 } catch (e) { /* ignore */ }
 
 // 2) Async refresh from Supabase. Swallows errors — baseline / cache keeps us running.
@@ -5604,10 +5904,13 @@ async function loadAppUsersFromSupabase() {
         venueIds: r.role === 'corporate' ? 'all' : (r.venue_ids || []),
       };
     });
-    if (mapped.length > 0) {
-      applyAccessList(mapped);
-      try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
-    }
+    // Empty success (admin cleared everyone) is DIFFERENT from a fetch
+    // error: it must propagate as a real "lock everyone out" state, not
+    // silently keep the stale cache + hardcoded baseline. We always write
+    // the result — including [] — so a re-opened session honors the
+    // revoked list even before Supabase responds again.
+    applyAccessList(mapped);
+    try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
     console.log('[app_users] loaded ' + mapped.length + ' rows from Supabase');
 
     // v1.27: if the currently-signed-in user's role / venue access changed
@@ -5669,13 +5972,20 @@ async function stopAppUsersRealtime() {
 }
 
 /* ================================================================
-   AUTHENTICATION
-   Validates email against ACCESS_LIST.
-   Role and venue access are determined by the list, not the user.
+   AUTHENTICATION (Phase 1: dual-path)
+     1. If the user typed a password, try Supabase Auth first. Success
+        means a real JWT and server-enforced identity going forward.
+     2. On auth failure OR no-password-typed, try the legacy ACCESS_LIST
+        path so users we haven't migrated to Supabase Auth yet keep
+        working through the transition. Phase 5 migrates everyone and
+        deletes the legacy branch.
+     3. Either path resolves the user's role + venueIds before signing
+        them into appState — auth path pulls from app_users (live),
+        legacy path pulls from the hardcoded list.
    ================================================================ */
-function handleLogin() {
+async function handleLogin() {
   const email = document.getElementById('loginEmail').value.trim().toLowerCase();
-  const nameInput = document.getElementById('loginName').value.trim();
+  const password = document.getElementById('loginPassword').value;
   const errorEl = document.getElementById('loginError');
 
   if (!email) {
@@ -5684,22 +5994,120 @@ function handleLogin() {
     return;
   }
 
-  // Look up email in access list
-  const accessEntry = ACCESS_LIST.find(entry => entry.email.toLowerCase() === email);
+  errorEl.style.display = 'none';
 
-  if (!accessEntry) {
-    errorEl.textContent = 'Access denied. Your email is not authorized. Contact your admin.';
+  // Identify legacy candidates up front. We need this BEFORE handling auth
+  // failure so a legacy user who accidentally typed a password (their
+  // muscle memory says "passwords go in password fields") still gets in,
+  // rather than being told their credentials are wrong on an account they
+  // don't yet have.
+  const legacyEntry = ACCESS_LIST.find(function (entry) {
+    return entry.email.toLowerCase() === email;
+  });
+
+  let authedUser = null;
+  let authInvalidCredentials = false;
+  if (supabaseClient && password) {
+    try {
+      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (!error && data && data.user) {
+        authedUser = data.user;
+        // Set the JWT immediately from the response so the very next REST
+        // call (the app_users lookup below) carries it. Without this we
+        // race onAuthStateChange — the callback fires as a microtask and
+        // may not have set currentSupabaseJwt before our next fetch goes
+        // out, which falls back to the anon key. Under dev RLS that
+        // accidentally works; once Phase 4 locks RLS down, the
+        // anon-fallback fetch would 401. Fix the race here by setting
+        // explicitly; onAuthStateChange will fire shortly with the same
+        // value (idempotent).
+        if (data.session && data.session.access_token) {
+          currentSupabaseJwt = data.session.access_token;
+        }
+      } else if (error && /invalid login|invalid_credentials|invalid grant/i.test(error.message || '')) {
+        // Wrong password OR no auth account exists. We can't tell which
+        // (Supabase intentionally hides that to avoid leaking account
+        // existence). Defer the error decision until after the legacy
+        // check below: if this email IS a legacy user we plan to migrate,
+        // the typed password was just a confused user — let them in via
+        // legacy. If they're NOT a legacy user, surface the real error.
+        authInvalidCredentials = true;
+      } else if (error) {
+        // Network/5xx — log and fall through to legacy.
+        console.warn('[auth] signInWithPassword failed (transient), trying legacy:', error);
+      }
+    } catch (e) {
+      console.warn('[auth] signInWithPassword threw, trying legacy:', e);
+    }
+  }
+
+  // If auth said "invalid credentials" AND this email isn't a legacy
+  // candidate, the user really did mistype — show the error and stop.
+  if (authInvalidCredentials && !authedUser && !legacyEntry) {
+    errorEl.textContent = 'Email or password incorrect. If you don\'t have a password yet, ask admin for an invite.';
     errorEl.style.display = 'block';
     return;
   }
 
-  errorEl.style.display = 'none';
+  let resolvedRole = null;
+  let resolvedVenueIds = null;
+  let resolvedName = null;
+
+  if (authedUser) {
+    // Look up role + venue assignments in app_users. Joined by email so the
+    // existing admin Security screen keeps working unchanged.
+    try {
+      const profile = await supabaseRest.query(
+        'app_users',
+        'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
+      );
+      const row = profile.data && profile.data[0];
+      if (!row) {
+        errorEl.textContent = 'Signed in but no app profile found. Ask admin to set your role.';
+        errorEl.style.display = 'block';
+        try { await supabaseClient.auth.signOut(); } catch (e) {}
+        return;
+      }
+      if (row.is_active === false) {
+        errorEl.textContent = 'Your account is disabled. Contact your admin.';
+        errorEl.style.display = 'block';
+        try { await supabaseClient.auth.signOut(); } catch (e) {}
+        return;
+      }
+      resolvedName = row.name || email;
+      resolvedRole = row.role;
+      resolvedVenueIds = row.role === 'corporate' ? 'all' : (row.venue_ids || []);
+    } catch (e) {
+      console.warn('[auth] app_users lookup failed:', e);
+      errorEl.textContent = 'Signed in but profile fetch failed. Try again in a moment.';
+      errorEl.style.display = 'block';
+      try { await supabaseClient.auth.signOut(); } catch (e2) {}
+      return;
+    }
+  } else {
+    // Legacy ACCESS_LIST fallback — reached when:
+    //   (a) no password was typed (legacy users by definition have none),
+    //   (b) the auth call failed transiently (network/5xx), or
+    //   (c) auth said "invalid credentials" but the email IS a legacy
+    //       candidate (the early-return above only fires when neither
+    //       legacyEntry nor authedUser exists).
+    // Once Phase 5 migrates everyone and ACCESS_LIST is deleted, this
+    // whole branch goes away.
+    if (!legacyEntry) {
+      errorEl.textContent = 'Access denied. Your email is not authorized. Contact your admin.';
+      errorEl.style.display = 'block';
+      return;
+    }
+    resolvedName = legacyEntry.name;
+    resolvedRole = legacyEntry.role;
+    resolvedVenueIds = legacyEntry.venueIds;
+  }
 
   appState.user = {
-    email: accessEntry.email,
-    name: nameInput || accessEntry.name,
-    role: accessEntry.role,
-    venueIds: accessEntry.venueIds,
+    email: email,
+    name: resolvedName,
+    role: resolvedRole,
+    venueIds: resolvedVenueIds,
   };
 
   saveState();
@@ -5811,7 +6219,7 @@ function renderVenues() {
 }
 
 function handleLogout() {
-  showConfirm('Sign out? You will need to sign in again.', () => {
+  showConfirm('Sign out? You will need to sign in again.', async () => {
     stopUpcRealtime();
     stopPendingItemsRealtime();
     stopAvtReportsRealtime();
@@ -5826,8 +6234,156 @@ function handleLogout() {
     document.getElementById('headerAuditBadge').style.display = 'none';
     if (timerInterval) clearInterval(timerInterval);
     saveState();
+    // Invalidate the JWT server-side too so a stolen device can't keep
+    // using it. signOut also clears localStorage's supabase auth keys
+    // and fires an onAuthStateChange that nulls currentSupabaseJwt.
+    if (supabaseClient) {
+      try { await supabaseClient.auth.signOut(); } catch (e) { console.warn('[auth] signOut failed:', e); }
+    }
     showPage('login');
   });
+}
+
+/* Triggered from the "Forgot your password?" link on the sign-in screen.
+   Sends a password-reset email via Supabase. The email contains a magic
+   link that, when clicked, lands on this app with a recovery token in
+   the URL fragment — onAuthStateChange catches it and routes to
+   handlePasswordRecoveryFlow below. */
+async function handleForgotPassword() {
+  const email = (document.getElementById('loginEmail').value || '').trim().toLowerCase();
+  const errorEl = document.getElementById('loginError');
+  if (!email) {
+    errorEl.textContent = 'Type your email above first, then tap Forgot password.';
+    errorEl.style.display = 'block';
+    return;
+  }
+  if (!supabaseClient) {
+    errorEl.textContent = 'Auth not available — check your connection and try again.';
+    errorEl.style.display = 'block';
+    return;
+  }
+  try {
+    const { error } = await supabaseClient.auth.resetPasswordForEmail(email, {
+      // Land back on this app with a recovery token so the user can pick
+      // a new password without leaving the install.
+      redirectTo: window.location.origin + window.location.pathname,
+    });
+    if (error) {
+      console.warn('[auth] resetPasswordForEmail failed:', error);
+      // Still show generic success — never leak which emails exist.
+    }
+  } catch (e) {
+    console.warn('[auth] resetPasswordForEmail threw:', e);
+  }
+  // Generic confirmation (intentionally vague — don't disclose account
+  // existence to scrapers).
+  errorEl.style.color = 'var(--text-muted)';
+  errorEl.textContent = 'If that email is registered, a reset link is on its way.';
+  errorEl.style.display = 'block';
+  setTimeout(function () { errorEl.style.color = ''; }, 6000);
+}
+
+/* Heuristic: is this the user's first session (i.e. they just clicked an
+   invite link)? Supabase populates last_sign_in_at on every sign-in
+   including this one. On the very first login the value lands within a
+   handful of seconds of created_at; on every later login it diverges
+   meaningfully. The 5-minute slop covers clock skew between Postgres
+   and the user's device, plus the few seconds between user-creation and
+   the user actually clicking the email link.
+   Returns false if either timestamp is missing — better to silently
+   proceed with a normal SIGNED_IN than to spuriously prompt an existing
+   user for a new password. */
+function _isFirstLoginSession(session) {
+  if (!session || !session.user) return false;
+  const createdAt    = session.user.created_at;
+  const lastSignInAt = session.user.last_sign_in_at;
+  if (!createdAt || !lastSignInAt) return false;
+  const created = new Date(createdAt).getTime();
+  const last    = new Date(lastSignInAt).getTime();
+  if (!Number.isFinite(created) || !Number.isFinite(last)) return false;
+  return Math.abs(last - created) < 5 * 60 * 1000;  // 5 minutes
+}
+
+/* Fires when the user clicks a password-reset OR invite-link email and
+   lands on the app. Supabase has already established a temporary session;
+   we prompt for a new password and call updateUser to lock it in. */
+async function handlePasswordRecoveryFlow() {
+  const newPassword = window.prompt(
+    'Welcome — set a password to finish signing in. Minimum 8 characters.'
+  );
+  // Cancel or too-short → sign the temporary session out. Otherwise the
+  // user appears "signed in" but with no usable password set, and would
+  // be locked out next time. Forcing sign-out here means they can re-
+  // click the invite/reset email and try again with a valid password.
+  if (!newPassword || newPassword.length < 8) {
+    showToast('Password not set — signing out. Re-open your email link to try again.', 'warn');
+    try { await supabaseClient.auth.signOut(); } catch (e) {}
+    return;
+  }
+  try {
+    const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+    if (error) {
+      showToast('Couldn\'t set password: ' + (error.message || 'unknown'), 'error');
+      // Same reasoning — leave them signed out so the link is re-usable.
+      try { await supabaseClient.auth.signOut(); } catch (e2) {}
+      return;
+    }
+    showToast('Password set — you are now signed in.', 'success');
+    // The session that came in via the recovery link is already active;
+    // route through the post-login app_users lookup so role/venue are
+    // populated just like a normal login. Recovery is a fresh sign-in
+    // with no current page, so navigate to venues on success.
+    await _hydrateUserProfileFromSession({ redirect: true });
+  } catch (e) {
+    showToast('Couldn\'t set password (threw): ' + (e.message || 'unknown'), 'error');
+    try { await supabaseClient.auth.signOut(); } catch (e2) {}
+  }
+}
+
+/* Pulls role + venue assignments for the currently-authenticated session
+   and sets appState.user. The `redirect` option controls navigation:
+     - true  → after success, navigate to the venue picker. Used by the
+               post-login flow (handlePasswordRecoveryFlow), where the
+               user just authenticated and has no current page.
+     - false → leave navigation alone. Used by boot-time reconciliation,
+               where we just want to refresh role/venue without yanking
+               the user off whatever page they were on (e.g. mid-audit).
+   Sign-out on revoked/missing profile always navigates to login because
+   there's nothing safe to keep showing. */
+async function _hydrateUserProfileFromSession(opts) {
+  const redirect = !!(opts && opts.redirect);
+  if (!supabaseClient) return;
+  let session = null;
+  try {
+    const resp = await supabaseClient.auth.getSession();
+    session = resp && resp.data && resp.data.session;
+  } catch (e) { return; }
+  if (!session || !session.user || !session.user.email) return;
+  const email = session.user.email.toLowerCase();
+  const profile = await supabaseRest.query(
+    'app_users',
+    'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
+  );
+  const row = profile.data && profile.data[0];
+  if (!row || row.is_active === false) {
+    // Session is valid but profile is missing or revoked — sign out so
+    // the user lands on the login screen instead of a half-loaded app.
+    // Always navigate here regardless of `redirect`: there's nothing
+    // safe to keep showing.
+    try { await supabaseClient.auth.signOut(); } catch (e) {}
+    appState.user = null;
+    saveState();
+    showPage('login');
+    return;
+  }
+  appState.user = {
+    email: email,
+    name: row.name || email,
+    role: row.role,
+    venueIds: row.role === 'corporate' ? 'all' : (row.venue_ids || []),
+  };
+  saveState();
+  if (redirect) showPage('venues');
 }
 
 function selectVenue(id) {
@@ -6746,14 +7302,91 @@ function submitGuidedEntry() {
     return;
   }
 
-  // Remove existing entry for this item in any zone
-  Object.values(appState.audit.counts).forEach(zoneItems => {
+  const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
+  const issue = appState.guidedIssue;
+
+  // Two cases to handle:
+  //   (a) Same-zone edit — user is fixing the qty on an item already
+  //       counted in this zone. The OLD code did splice + addCountEntry,
+  //       which fired a server-side INSERT that 23505-collided with the
+  //       existing remote row and SUM-merged old + new qty (double-count).
+  //       Fix: edit in place locally + remote, no delete/insert dance.
+  //   (b) Move — user picked the item from a zone where it was previously
+  //       counted, then chose a different zone. Old rows in other zones
+  //       become orphans on the desktop unless we delete them server-side.
+  const currentZoneItems = appState.audit.counts[appState.currentZone] || [];
+  const sameZoneEntry = currentZoneItems.find(i => i.masterId === item.id);
+
+  // Collect old entries from OTHER zones to remove (move case).
+  const movedFromSupabaseIds = [];
+  Object.entries(appState.audit.counts).forEach(([zone, zoneItems]) => {
+    if (zone === appState.currentZone) return;
     const index = zoneItems.findIndex(i => i.masterId === item.id);
-    if (index > -1) zoneItems.splice(index, 1);
+    if (index > -1) {
+      const removed = zoneItems[index];
+      if (removed && removed.supabaseId) movedFromSupabaseIds.push(removed.supabaseId);
+      zoneItems.splice(index, 1);
+    }
   });
 
-  const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
-  addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, appState.guidedIssue, null, null, item.id);
+  if (sameZoneEntry) {
+    // Edit-in-place: replace fields, mirror as direct UPDATE on supabaseId.
+    sameZoneEntry.qty = qty;
+    sameZoneEntry.notes = issueNotes;
+    sameZoneEntry.issue = issue || 'none';
+    sameZoneEntry.timestamp = new Date().toISOString();
+    logActivity('Edited ' + item.name + ' to ' + formatQty(qty) + ' in ' + appState.currentZone);
+    saveState();
+    showToast('Updated: ' + item.name + ' (' + formatQty(qty) + ')', 'success');
+
+    if (appState.audit && appState.audit.supabaseId && sameZoneEntry.supabaseId) {
+      const _filter = 'id=eq.' + encodeURIComponent(sameZoneEntry.supabaseId);
+      const _body = {
+        qty: Number(qty) || 0,
+        issue: issue || 'none',
+        issue_notes: issueNotes || null,
+        timestamp: sameZoneEntry.timestamp,
+      };
+      const _enqueue = function (err) {
+        if (isRetryableError(err)) {
+          enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: _filter, body: _body },
+            { label: 'guided edit-in-place (' + (item.name || 'unknown') + ')' });
+        } else {
+          console.error('[audit] guided edit-in-place non-retryable, dropping:', err);
+        }
+        updateOfflineBannerState('error');
+      };
+      supabaseRest.update('kount_entries', _filter, _body)
+        .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+        .catch(_enqueue);
+    }
+  } else {
+    // No existing entry in current zone — fresh insert via addCountEntry,
+    // which fires its own sync. The merge_key insert won't collide because
+    // any same-item rows in OTHER zones use a different key (zone differs).
+    addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, issue, null, null, item.id);
+  }
+
+  // Move-cleanup: delete the orphan rows from other zones server-side.
+  // Fire-and-forget; ordering vs the insert/update above doesn't affect
+  // correctness (different merge_keys), only data hygiene timing.
+  if (appState.audit && appState.audit.supabaseId && movedFromSupabaseIds.length > 0) {
+    const idsList = movedFromSupabaseIds.map(id => encodeURIComponent(id)).join(',');
+    const _filter = 'id=in.(' + idsList + ')';
+    const _enqueue = function (err) {
+      if (isRetryableError(err)) {
+        enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: _filter },
+          { label: 'guided move-cleanup (' + (item.name || 'unknown') + ')' });
+      } else {
+        console.error('[audit] guided move-cleanup non-retryable, dropping:', err);
+      }
+      updateOfflineBannerState('error');
+    };
+    supabaseRest.deleteRows('kount_entries', _filter)
+      .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+      .catch(_enqueue);
+  }
+
   closeGuidedEntry();
   renderCountPage();
 }
@@ -6843,7 +7476,7 @@ function renderQuickMode() {
       return '<div class="quick-tile has-count' + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + masterId + '\')">' +
         '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
         '<div class="qt-count">' + qty + '</div>' +
-        '<div class="qt-cat">' + item.category + '</div>' +
+        '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
       '</div>';
     }).join('');
     html += '</div>';
@@ -6897,7 +7530,7 @@ function doQuickSearch(value) {
     return '<div class="quick-tile ' + (count > 0 ? 'has-count' : '') + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + item.id + '\')">' +
       '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
       '<div class="qt-count">' + count + '</div>' +
-      '<div class="qt-cat">' + item.category + '</div>' +
+      '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
     '</div>';
   }).join('') + '</div>';
 }
@@ -6914,6 +7547,24 @@ function quickTap(masterId) {
   if (existing) {
     existing.qty += 1;
     logActivity('+1 ' + item.name + ' (' + existing.qty + ' total)');
+
+    // Mirror the +1 to Supabase as a delta. Same delta-semantics rationale
+    // as the duplicate-count path (yesterday's fix): the 23505/merge path
+    // computes existing.qty + payload.qty, which correctly accumulates
+    // across both the local race (first insert still in flight) and
+    // cross-device concurrent counts (another phone +1ing the same row).
+    if (appState.audit && appState.audit.supabaseId) {
+      const deltaEntry = Object.assign({}, existing, { qty: 1 });
+      syncEntryToSupabase(deltaEntry, appState.currentZone).then(function () {
+        if (!existing.supabaseId && deltaEntry.supabaseId) {
+          existing.supabaseId = deltaEntry.supabaseId;
+          saveState();
+        }
+      }).catch(function (err) {
+        console.warn('[audit] quickTap delta sync failed:', err);
+        updateOfflineBannerState('error');
+      });
+    }
   } else {
     addCountEntry(item.name, item.category, 1, 'guided', item.sku, null, 'none', null, null, masterId);
   }
@@ -7064,6 +7715,32 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
       showToast('Updated: ' + name + ' (' + formatQty(duplicateInZone.qty) + ' total)', 'warn');
       logActivity('Updated ' + name + ' to ' + formatQty(duplicateInZone.qty) + ' in ' + appState.currentZone);
       saveState();
+
+      // Sync the increment to Supabase. We send parsedQty (the DELTA), not
+      // the running total — the 23505/merge path inside syncEntryToSupabase
+      // computes existing.qty + payload.qty, which is the correct answer
+      // for both:
+      //   (a) the local race where the original insert is still in-flight
+      //       when the user taps again (an absolute total would have it
+      //       added on top of the in-flight qty=1, double-counting), and
+      //   (b) cross-device concurrent increments — another phone counting
+      //       the same item via realtime would lose its +1 if we wrote an
+      //       absolute total here.
+      // We pass a transient "delta entry" object so duplicateInZone keeps
+      // its running total locally; supabaseId is propagated back so future
+      // realtime echoes can match.
+      if (appState.audit && appState.audit.supabaseId) {
+        const deltaEntry = Object.assign({}, duplicateInZone, { qty: parsedQty });
+        syncEntryToSupabase(deltaEntry, appState.currentZone).then(function () {
+          if (!duplicateInZone.supabaseId && deltaEntry.supabaseId) {
+            duplicateInZone.supabaseId = deltaEntry.supabaseId;
+            saveState();
+          }
+        }).catch(function (err) {
+          console.warn('[audit] duplicate-count delta sync failed:', err);
+          updateOfflineBannerState('error');
+        });
+      }
       return;
     }
 
@@ -7228,6 +7905,7 @@ function adjustQuantity(itemId, delta) {
 
   if (newQty === 0) {
     showConfirm('Remove "' + item.name + '" from count?', () => {
+      const supabaseId = item.supabaseId;
       const index = items.indexOf(item);
       if (index > -1) items.splice(index, 1);
       logActivity('Removed ' + item.name + ' from ' + appState.currentZone);
@@ -7235,6 +7913,25 @@ function adjustQuantity(itemId, delta) {
       renderFreeList();
       updateHeaderCount();
       renderProgress();
+
+      // Mirror the delete to Supabase. Without this, the desktop keeps
+      // showing the row even though the phone removed it. No supabaseId
+      // means the row never synced, so nothing to delete remotely.
+      if (appState.audit && appState.audit.supabaseId && supabaseId) {
+        const _filter = 'id=eq.' + encodeURIComponent(supabaseId);
+        const _enqueue = function (err) {
+          if (isRetryableError(err)) {
+            enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: _filter },
+              { label: 'adjustQuantity delete' });
+          } else {
+            console.error('[audit] adjustQuantity delete non-retryable, dropping:', err);
+          }
+          updateOfflineBannerState('error');
+        };
+        supabaseRest.deleteRows('kount_entries', _filter)
+          .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+          .catch(_enqueue);
+      }
     });
     return;
   }
@@ -7243,6 +7940,31 @@ function adjustQuantity(itemId, delta) {
   saveState();
   renderFreeList();
   updateHeaderCount();
+
+  // Mirror the absolute qty to Supabase by direct update on supabaseId.
+  // Trade-off: a concurrent +1 from another phone via realtime would be
+  // overwritten by this absolute write; realtime echo will reconcile
+  // within seconds. We use absolute (not delta) here because adjust ±
+  // can produce a negative delta, and delta-sync would either INSERT a
+  // negative-qty row when no remote exists or risk a merge_key insert
+  // that fails CHECK semantics in future schema changes. Direct UPDATE
+  // is the natural model for an absolute setter.
+  if (appState.audit && appState.audit.supabaseId && item.supabaseId) {
+    const _filter = 'id=eq.' + encodeURIComponent(item.supabaseId);
+    const _body = { qty: Number(item.qty) || 0, timestamp: new Date().toISOString() };
+    const _enqueue = function (err) {
+      if (isRetryableError(err)) {
+        enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: _filter, body: _body },
+          { label: 'adjustQuantity update' });
+      } else {
+        console.error('[audit] adjustQuantity update non-retryable, dropping:', err);
+      }
+      updateOfflineBannerState('error');
+    };
+    supabaseRest.update('kount_entries', _filter, _body)
+      .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+      .catch(_enqueue);
+  }
 }
 
 /* ================================================================
@@ -10619,6 +11341,21 @@ function submitAudit() {
     });
 
     saveState();
+
+    // Mirror the submission to Supabase so admin/desktop sees the audit
+    // move from Active to Historic. finalizeCount2 already does this for
+    // count2 closure; submitAudit was the asymmetric path that left the
+    // shared row in 'active' status while the phone showed 'submitted'.
+    if (appState.audit && appState.audit.supabaseId) {
+      syncAuditMetaToSupabase({
+        status: 'submitted',
+        completed_at: appState.audit.completedAt,
+      }).catch(err => {
+        console.warn('[audit] submitAudit sync failed:', err);
+        updateOfflineBannerState('error');
+      });
+    }
+
     showToast('Audit submitted', 'success');
     renderSummaryPage();
   });
@@ -11108,9 +11845,15 @@ async function parsePhotoLabel(imageDataUrl) {
       const parsed = await parseLabelWithClaude(imageDataUrl);
       return populatePhotoFormFromParsed(parsed, statusEl);
     } catch (err) {
-      console.warn('[Claude Vision] parse failed, falling back:', err);
+      console.error('[Claude Vision] parse failed, falling back:', err);
       statusEl.textContent = 'Claude failed (' + (err.message || 'unknown') + ') — trying fallback…';
       statusEl.style.color = 'var(--warning)';
+      // Surface in audit log so an admin reviewing the audit can see a
+      // sustained Claude outage instead of inferring it from "OCR feels
+      // slow" complaints. Wrapped in try/catch because logActivity is a
+      // no-op when there's no active audit and we don't want a logging
+      // miss to derail the fallback chain.
+      try { logActivity('Claude label parse failed: ' + (err.message || 'unknown')); } catch (e) {}
       // fall through to OpenAI / Tesseract below
     }
   }
