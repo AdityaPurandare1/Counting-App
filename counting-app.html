@@ -11285,9 +11285,18 @@ function renderAuditHistory() {
 /* ================================================================
    EXPORT CSV
    FIX #7: Proper RFC 4180 quote escaping
+   FIX (review): formula-injection guard. Cells starting with
+     =, +, -, @, tab, or carriage return can execute as Excel
+     formulas when the CSV is opened in a spreadsheet app — prefix
+     those with a single quote so the spreadsheet treats them as
+     text. Other cells are still always quoted (the original RFC
+     4180 behavior, kept for compatibility with downstream parsers).
    ================================================================ */
 function csvEscape(value) {
-  const str = String(value || '');
+  let str = String(value || '');
+  if (str.length > 0 && /^[=+\-@\t\r]/.test(str)) {
+    str = "'" + str;
+  }
   return '"' + str.replace(/"/g, '""') + '"';
 }
 
