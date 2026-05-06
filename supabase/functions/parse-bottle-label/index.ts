@@ -8,21 +8,22 @@
 //
 //   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
 //
-// Why Haiku 4.5: label extraction is a structured-output task with vision
-// input, not a reasoning-heavy job. Sonnet 4.6 would be ~3x the cost for
-// roughly the same accuracy on this workload, and Haiku 4.5 supports both
-// vision and structured outputs.
+// Why Sonnet 4.6: tradeoff chosen in favor of accuracy on harder labels
+// (faded print, partial views, ambiguous catalog matches) where Haiku 4.5
+// was producing too many low-confidence or wrong matchedIds. Sonnet 4.6
+// supports vision + structured outputs the same way; the request shape
+// below is unchanged.
 //
 // Why prompt caching: the system prompt + catalog are stable across calls
 // within a session (the catalog is sorted deterministically client-side and
 // only changes when the user syncs new items). With 4592-item catalogs we
 // only send the first 400 to stay well under context limits while still
-// crossing Haiku 4.5's 4096-token cache minimum.
+// crossing Sonnet 4.6's 1024-token cache minimum.
 
 import { corsHeaders } from '../_shared/cors.ts';
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-haiku-4-5';
+const MODEL = 'claude-sonnet-4-6';
 
 // Structured output schema. Mirrors the field shape the mobile app's
 // parsePhotoLabel wrapper already expects from the OpenAI path so we can
