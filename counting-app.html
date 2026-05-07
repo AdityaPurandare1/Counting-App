@@ -2394,6 +2394,17 @@ html, body {
       <button class="mode-btn" data-rf="high" onclick="setRecountFilter('high', this)">High</button>
       <button class="mode-btn" data-rf="pending" onclick="setRecountFilter('pending', this)">Pending</button>
     </div>
+    <!-- Zone filter (v1.41) — dropdown of zones present in the recount list.
+         Counter picks their zone to focus; "All zones" is the default so
+         a counter who's helping across the venue isn't forced to filter.
+         Populated by renderRecountPage based on the actual zones in the
+         per-zone recount rows. -->
+    <div style="margin-bottom:10px;display:flex;gap:8px;align-items:center">
+      <label style="font-size:11px;color:var(--text-muted);font-weight:600;letter-spacing:0.04em;text-transform:uppercase">Zone</label>
+      <select class="form-input" id="recountZoneFilter" style="flex:1;padding:6px 10px;font-size:13px" onchange="setRecountZoneFilter(this.value)">
+        <option value="all">All zones</option>
+      </select>
+    </div>
     <div id="recountList"></div>
     <button class="submit-btn hide" id="recountCloseBtn" style="margin-top:12px" onclick="submitRecount()">Close recount and generate final report</button>
   </div>
@@ -2856,7 +2867,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.40';
+const APP_VERSION = '1.41';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4920,24 +4931,17 @@ async function syncRecountsToSupabase() {
 
     const payloads = keys.map(function(k) {
       const rec = recounts[k];
-      // v1.40: include zone + category so counters' phones can SHOW the
-      // counter where to find each item. Migration 0014 added these
-      // columns; the prior payload silently omitted them, so when the
-      // counter's phone refreshed the recount list the zone/category
-      // came back as empty strings — every wine grouped under "—" with
-      // no location hint at all.
-      // allZones is rendered locally on the manager's device (closeCount1
-      // computes it) but isn't yet a column on kount_recounts. We pack
-      // it into notes as a "Also in: X, Y" hint so cross-zone visibility
-      // survives the round trip without a schema change.
-      const allZones = Array.isArray(rec.allZones) ? rec.allZones : [];
-      const multiZoneNote = allZones.length > 1
-        ? 'Also counted in: ' + allZones.slice(1).join(', ')
-        : '';
+      // v1.41: per-zone recount rows. Recount dict key is "<name>|<zone>"
+      // to allow multiple rows per item. The clean item name lives on
+      // rec.itemName; fall through to avtItem or the key prefix for
+      // safety against legacy rows.
+      const cleanName = rec.itemName
+        || (rec.avtItem && rec.avtItem.itemName)
+        || (typeof k === 'string' ? k.split('|')[0] : k);
       return {
         audit_id: auditId,
         item_id: null,                                // AVT flow doesn't have a purchase_items id today
-        item_name: (rec.avtItem && rec.avtItem.itemName) || k,
+        item_name: cleanName,
         severity: String(rec.severity || 'MEDIUM').toUpperCase(),
         variance_value: Number(rec.varianceValue || 0),
         count1_qty: rec.count1Qty != null ? Number(rec.count1Qty) : null,
@@ -4945,7 +4949,8 @@ async function syncRecountsToSupabase() {
         status: rec.status || 'pending',
         zone: rec.zone || null,
         category: rec.category || null,
-        notes: multiZoneNote || null,
+        // notes left null — zone-list packing is no longer needed since
+        // each (item, zone) is its own row.
       };
     });
 
@@ -4955,11 +4960,16 @@ async function syncRecountsToSupabase() {
 
     // Stash the returned ids back into local state so the per-row update path
     // can target by id without re-matching on name.
+    // v1.41: match on (item_name, zone) — same item in different zones now
+    // produces distinct rows that need distinct supabaseIds.
     if (Array.isArray(data)) {
       data.forEach(function(row) {
+        const rowZone = row.zone || '';
         const key = Object.keys(recounts).find(function(k) {
-          const name = (recounts[k].avtItem && recounts[k].avtItem.itemName) || k;
-          return name === row.item_name;
+          const r = recounts[k];
+          const name = r.itemName || (r.avtItem && r.avtItem.itemName) ||
+                       (typeof k === 'string' ? k.split('|')[0] : k);
+          return name === row.item_name && (r.zone || '') === rowZone;
         });
         if (key) recounts[key].supabaseId = row.id;
       });
@@ -5005,9 +5015,17 @@ async function syncRecountUpdateToSupabase(key) {
     if (rec.supabaseId) {
       match = 'id=eq.' + encodeURIComponent(rec.supabaseId);
     } else {
-      const name = (rec.avtItem && rec.avtItem.itemName) || key;
+      // v1.41: with per-zone rows, item_name alone matches multiple rows.
+      // Narrow by zone too. rec.zone may be empty string for unzoned legacy
+      // rows — those map to zone is null in the DB.
+      const name = rec.itemName || (rec.avtItem && rec.avtItem.itemName) ||
+                   (typeof key === 'string' ? key.split('|')[0] : key);
+      const zoneClause = rec.zone
+        ? '&zone=eq.' + encodeURIComponent(rec.zone)
+        : '&zone=is.null';
       match = 'audit_id=eq.' + encodeURIComponent(appState.audit.supabaseId) +
-              '&item_name=eq.' + encodeURIComponent(name);
+              '&item_name=eq.' + encodeURIComponent(name) +
+              zoneClause;
     }
     const { error } = await supabaseRest.update('kount_recounts', match, patch);
     if (error) {
@@ -5466,23 +5484,14 @@ async function refreshRecountsFromSupabase() {
     if (error) { console.warn('[recounts] refresh failed:', error); return; }
     const remote = {};
     (data || []).forEach(function(r) {
-      const key = r.item_name;
-      // Reconstruct allZones from the multi-zone hint we packed into
-      // notes during syncRecountsToSupabase. Format: "Also counted in: X, Y"
-      // → primary zone + the comma-list. Lets counters see every zone an
-      // item lives in even though kount_recounts only has a single zone
-      // column.
-      let allZones = r.zone ? [r.zone] : [];
-      const noteText = String(r.notes || '');
-      const m = noteText.match(/^Also counted in:\s*(.+)$/i);
-      if (m && m[1]) {
-        m[1].split(',').map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (z) {
-          if (!allZones.includes(z)) allZones.push(z);
-        });
-      }
-
+      // v1.41: composite key matches what closeCount1 generates locally.
+      // Each (item, zone) is its own row. Legacy rows (pre-v1.41) had
+      // r.zone null — they collapse into a single "<name>|" key, which
+      // matches how those audits were generated locally.
+      const key = String(r.item_name) + '|' + String(r.zone || '');
       remote[key] = {
         supabaseId: r.id,
+        itemName: r.item_name,
         // Keep the avtItem key so renderRecountPage / submitGuidedEntry pick the new format
         avtItem: { itemName: r.item_name },
         severity: String(r.severity || 'MEDIUM').toUpperCase(),
@@ -5495,7 +5504,6 @@ async function refreshRecountsFromSupabase() {
         status: r.status || 'pending',
         notes: '',
         zone: r.zone || '',
-        allZones: allZones,
         category: r.category || '',
         auditResult: r.audit_result || null,
         auditReason: r.audit_reason || '',
@@ -10139,47 +10147,54 @@ function closeCount1() {
     // Generate recount list
     appState.audit.recounts = {};
 
+    // v1.41: per-zone recount rows. closeCount1 generates one recount entry
+    // per (item, zone) instead of one per item with a multi-zone hint. Each
+    // zone independently tracks count1Qty / recountQty / auditResult, so
+    // multiple counters can recount the same item in different zones.
+    // Recounts dict key is `<itemName>|<zone>` to allow multiple rows per
+    // item; rec.itemName carries the clean name for sync to kount_recounts.
+    const recountKey = function (name, zone) { return String(name) + '|' + String(zone || ''); };
+
     if (hasAvt) {
       // AVT-based recount: flag items with high variance from Craftable data
       const recountItems = generateRecountFromAvt();
+      let totalRows = 0;
       recountItems.forEach(item => {
-        // Multi-zone awareness: an item counted in both Back Bar (5) and
-        // VIP (3) gets primary zone = Back Bar (highest qty leads the
-        // recount sweep) and allZones = ['Back Bar (5)', 'VIP (3)'] for
-        // the row hint + modal hero. allZones is derived locally — the
-        // DB only stores the primary in `zone`.
         const zoneTotals = findCountedZonesForAvtItem(item.avt);
-        const primaryZone = zoneTotals[0]?.zone || '';
-        const allZonesLabels = zoneTotals.map(z => z.zone + ' (' + z.qty + ')');
-        appState.audit.recounts[item.avt.itemName] = {
-          avtItem: item.avt,
-          severity: item.severity,
-          varianceValue: item.avt.varianceValue,
-          variance: item.avt.variance,
-          actual: item.avt.actual,
-          theo: item.avt.theo,
-          count1Qty: item.counted,
-          recountQty: null,
-          status: 'pending',
-          notes: '',
-          // New: zone + category drive the recount-page sort and the
-          // admin Reports table. auditResult/auditReason stay null until
-          // the counter records a recount decision.
-          zone: primaryZone,
-          allZones: allZonesLabels,
-          category: item.avt.category || '',
-          auditResult: null,
-          auditReason: '',
-        };
+        // No counted zones → still create one row with zone='' so the item
+        // doesn't disappear from the recount list. User answer #3: items
+        // should always be in a zone, but we surface the unzoned ones
+        // explicitly rather than hiding them — counter notices and fixes.
+        const zonesList = zoneTotals.length > 0
+          ? zoneTotals
+          : [{ zone: '', qty: 0 }];
+        zonesList.forEach(({ zone, qty }) => {
+          appState.audit.recounts[recountKey(item.avt.itemName, zone)] = {
+            itemName: item.avt.itemName,
+            avtItem: item.avt,
+            severity: item.severity,
+            varianceValue: item.avt.varianceValue,
+            variance: item.avt.variance,
+            actual: item.avt.actual,
+            theo: item.avt.theo,
+            count1Qty: qty,                  // per-zone qty
+            recountQty: null,                // per-zone recount qty
+            status: 'pending',
+            notes: '',
+            zone: zone,
+            category: item.avt.category || '',
+            auditResult: null,
+            auditReason: '',
+          };
+          totalRows++;
+        });
       });
-      logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items flagged for recount.');
-      showToast('Count 1 closed. ' + recountItems.length + ' items need recount.', 'success');
+      logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items / ' + totalRows + ' zone rows flagged for recount.');
+      showToast('Count 1 closed. ' + totalRows + ' rows need recount across ' + recountItems.length + ' items.', 'success');
     } else {
-      // No AVT: create recount list from ALL counted items so counters can verify.
-      // We aggregate by item.name across zones so an item counted in two
-      // zones produces ONE recount row (with summed qty + primary zone +
-      // multi-zone hint) instead of two rows where the second overwrites
-      // the first via the recounts-dict key collision.
+      // No AVT: create recount rows from ALL counted items so counters can verify.
+      // One row per (item, zone) so the same item across zones gets multiple
+      // independent recount targets.
       const byName = {};
       allItems.forEach(item => {
         const key = item.name;
@@ -10188,37 +10203,36 @@ function closeCount1() {
             name: item.name,
             category: item.category || '',
             zoneQtys: {},
-            totalQty: 0,
           };
         }
         const zone = item.zone || '';
         byName[key].zoneQtys[zone] = (byName[key].zoneQtys[zone] || 0) + (Number(item.qty) || 0);
-        byName[key].totalQty += (Number(item.qty) || 0);
       });
+      let totalRows = 0;
       Object.values(byName).forEach(entry => {
-        const zoneTotals = Object.entries(entry.zoneQtys)
-          .map(([zone, qty]) => ({ zone, qty }))
-          .sort((a, b) => b.qty - a.qty);
-        appState.audit.recounts[entry.name] = {
-          avtItem: null,
-          severity: 'MEDIUM',
-          varianceValue: 0,
-          variance: 0,
-          actual: entry.totalQty,
-          theo: 0,
-          count1Qty: entry.totalQty,
-          recountQty: null,
-          status: 'pending',
-          notes: 'No AVT data — verify count',
-          zone: zoneTotals[0]?.zone || '',
-          allZones: zoneTotals.map(z => z.zone + ' (' + z.qty + ')'),
-          category: entry.category,
-          auditResult: null,
-          auditReason: '',
-        };
+        Object.entries(entry.zoneQtys).forEach(([zone, qty]) => {
+          appState.audit.recounts[recountKey(entry.name, zone)] = {
+            itemName: entry.name,
+            avtItem: null,
+            severity: 'MEDIUM',
+            varianceValue: 0,
+            variance: 0,
+            actual: qty,
+            theo: 0,
+            count1Qty: qty,                  // per-zone qty
+            recountQty: null,
+            status: 'pending',
+            notes: 'No AVT data — verify count',
+            zone: zone,
+            category: entry.category,
+            auditResult: null,
+            auditReason: '',
+          };
+          totalRows++;
+        });
       });
-      logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items listed for verification.');
-      showToast('Count 1 closed. All ' + allItems.length + ' items listed for recount verification.', 'success');
+      logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
+      showToast('Count 1 closed. ' + totalRows + ' rows listed for recount verification.', 'success');
     }
 
     saveState();
@@ -10289,13 +10303,13 @@ function closeCount2() {
   const entries = Object.entries(recounts);
   const missingResult = entries.filter(([, r]) => !r.auditResult);
   if (missingResult.length > 0) {
-    const sample = missingResult.slice(0, 3).map(([k]) => k).join(', ') + (missingResult.length > 3 ? '…' : '');
+    const sample = missingResult.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingResult.length > 3 ? '…' : '');
     showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
     return;
   }
   const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
   if (missingReason.length > 0) {
-    const sample = missingReason.slice(0, 3).map(([k]) => k).join(', ') + (missingReason.length > 3 ? '…' : '');
+    const sample = missingReason.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingReason.length > 3 ? '…' : '');
     showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
     return;
   }
@@ -10305,7 +10319,7 @@ function closeCount2() {
   // the affected rows and the admin Reports CSV shows a blank quantity.
   const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
   if (missingQty.length > 0) {
-    const sample = missingQty.slice(0, 3).map(([k]) => k).join(', ') + (missingQty.length > 3 ? '…' : '');
+    const sample = missingQty.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingQty.length > 3 ? '…' : '');
     showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
     return;
   }
@@ -10320,6 +10334,14 @@ function closeCount2() {
    Shows items flagged from Count 1 with severity and variance info.
    ================================================================ */
 let recountFilter = 'all';
+// v1.41: per-zone recount filter. 'all' = every zone; otherwise a specific
+// zone string. Counter on Main Bar picks "Main Bar" to focus their work.
+// No assigned-zone enforcement — onsite manager decides who counts what.
+let recountZoneFilter = 'all';
+function setRecountZoneFilter(value) {
+  recountZoneFilter = value || 'all';
+  renderRecountPage();
+}
 
 function setRecountFilter(filter, element) {
   recountFilter = filter;
@@ -10357,11 +10379,45 @@ function renderRecountPage() {
     '</div>' +
     '<div class="progress-bar"><div class="progress-fill" style="width:' + (totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0) + '%"></div></div>';
 
-  // Filter
+  // Populate the zone dropdown with whichever zones actually have recount
+  // rows. Sorted alpha; "—" used for unzoned rows so the counter can see
+  // they exist (per user direction: items should always have a zone, but
+  // surface the unzoned ones explicitly rather than hiding them).
+  const zonesPresent = Array.from(new Set(entries.map(function ([, r]) {
+    return r.zone || '—';
+  }))).sort(function (a, b) {
+    if (a === '—') return 1;
+    if (b === '—') return -1;
+    return a.localeCompare(b);
+  });
+  const zoneSelect = document.getElementById('recountZoneFilter');
+  if (zoneSelect) {
+    const prior = zoneSelect.value || 'all';
+    zoneSelect.innerHTML =
+      '<option value="all">All zones</option>' +
+      zonesPresent.map(function (z) {
+        return '<option value="' + esc(z) + '">' + esc(z) + '</option>';
+      }).join('');
+    // Preserve the user's selection across re-renders if the zone is still
+    // present; otherwise fall back to "all".
+    zoneSelect.value = (prior === 'all' || zonesPresent.indexOf(prior) !== -1)
+      ? prior
+      : 'all';
+    if (zoneSelect.value !== recountZoneFilter) {
+      recountZoneFilter = zoneSelect.value;
+    }
+  }
+
+  // Filter — severity AND zone compose
   let filtered = entries;
-  if (recountFilter === 'critical') filtered = entries.filter(([, r]) => r.severity === 'CRITICAL');
-  if (recountFilter === 'high') filtered = entries.filter(([, r]) => r.severity === 'HIGH');
-  if (recountFilter === 'pending') filtered = entries.filter(([, r]) => r.status === 'pending');
+  if (recountFilter === 'critical') filtered = filtered.filter(([, r]) => r.severity === 'CRITICAL');
+  if (recountFilter === 'high')     filtered = filtered.filter(([, r]) => r.severity === 'HIGH');
+  if (recountFilter === 'pending')  filtered = filtered.filter(([, r]) => r.status === 'pending');
+  if (recountZoneFilter !== 'all') {
+    filtered = filtered.filter(function ([, r]) {
+      return (r.zone || '—') === recountZoneFilter;
+    });
+  }
 
   // Sort: zone (alpha) → category (alpha) → severity (CRITICAL first as a
   // tie-breaker so within a (zone, category) the most urgent item leads).
@@ -10412,7 +10468,9 @@ function renderRecountPage() {
       'data-recount-key="' + esc(key) + '" ' +
       'onclick="openRecountEntryFromCard(this)" style="cursor:pointer">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;gap:6px">' +
-        '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(key) + '</div>' +
+        // v1.41: display the clean item name, not the composite "name|zone"
+        // dict key. itemName is set in closeCount1 + refreshRecountsFromSupabase.
+        '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(rec.itemName || key.split('|')[0]) + '</div>' +
         '<span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
       '</div>' +
       '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">' +
@@ -10420,13 +10478,10 @@ function renderRecountPage() {
         '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' +
         '<span><strong style="color:var(--text)">Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
         (rec.recountQty != null ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '') +
-        // Multi-zone hint: when an item was counted in more than one
-        // zone, the row shows the primary zone in its group header but
-        // the counter still needs to know about the other zones to
-        // recount accurately.
-        (Array.isArray(rec.allZones) && rec.allZones.length > 1
-          ? '<span style="color:var(--accent)">+' + (rec.allZones.length - 1) + ' more zone' + (rec.allZones.length === 2 ? '' : 's') + '</span>'
-          : '') +
+        // v1.41: each row IS one zone, so there's no "+N more zones" hint
+        // on this row. Items that lived in multiple zones now appear as
+        // multiple recount rows (one per zone), each grouped under its
+        // own zone header.
       '</div>' +
       '<div>' + resultBadge + (rec.auditReason ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;font-style:italic">' + esc(rec.auditReason) + '</span>' : '') + '</div>' +
     '</div>';
@@ -10446,13 +10501,18 @@ function openRecountEntry(key) {
   const rec = appState.audit?.recounts?.[key];
   if (!rec) return;
 
+  // v1.41: key is now "<itemName>|<zone>". The clean display name lives on
+  // rec.itemName; fall back to splitting the key for legacy rows.
+  const displayName = rec.itemName ||
+                      (typeof key === 'string' ? key.split('|')[0] : key);
+
   // Reuse the guided entry modal for recount
-  appState.guidedCurrentItem = { name: key, id: key };
-  document.getElementById('guidedItemTitle').childNodes[0].textContent = 'Recount: ' + key + ' ';
+  appState.guidedCurrentItem = { name: displayName, id: key };
+  document.getElementById('guidedItemTitle').childNodes[0].textContent = 'Recount: ' + displayName + ' ';
 
   const heroTitle = document.getElementById('guidedHeroTitle');
   const heroMeta = document.getElementById('guidedHeroMeta');
-  if (heroTitle) heroTitle.textContent = key;
+  if (heroTitle) heroTitle.textContent = displayName;
   if (heroMeta) {
     // Lead with Count 1 since that's the operator's anchor for the recount.
     // Zone + category surface here too so they don't have to jump back to the list.
@@ -10465,13 +10525,14 @@ function openRecountEntry(key) {
     const priorLine = prior
       ? '<br><span style="color:var(--warning);font-weight:600">⚠ Previously recorded as ' + prior + ' — re-check before confirming</span>'
       : '';
-    // When the item lives in multiple zones, list every zone's qty so the
-    // counter knows where to look. Primary zone is bolded as the lead.
-    const allZones = Array.isArray(rec.allZones) ? rec.allZones : [];
-    const zoneLine = allZones.length > 1
-      ? '<br>📍 <strong style="color:var(--text)">' + esc(allZones[0]) + '</strong>' +
-        ' <span style="color:var(--text-muted);font-size:11px">also in: ' + esc(allZones.slice(1).join(', ')) + '</span>'
-      : (rec.zone ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>' : '');
+    // v1.41: each recount row IS one zone. Show that zone prominently —
+    // the modal hero is the counter's anchor for "where am I counting".
+    // No more multi-zone hint — the recount LIST shows the same item
+    // multiple times if it lives in multiple zones, so the counter sees
+    // every zone they need to visit at the list level.
+    const zoneLine = rec.zone
+      ? '<br>📍 <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>'
+      : '<br><span style="color:var(--warning);font-size:11px">⚠ This item has no zone — flag for admin</span>';
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
       ' · Variance $' + rec.varianceValue.toFixed(2) +
@@ -10528,13 +10589,13 @@ function submitRecount() {
   const entries = Object.entries(appState.audit.recounts);
   const missingResult = entries.filter(([, r]) => !r.auditResult);
   if (missingResult.length > 0) {
-    const sample = missingResult.slice(0, 3).map(([k]) => k).join(', ') + (missingResult.length > 3 ? '…' : '');
+    const sample = missingResult.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingResult.length > 3 ? '…' : '');
     showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
     return;
   }
   const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
   if (missingReason.length > 0) {
-    const sample = missingReason.slice(0, 3).map(([k]) => k).join(', ') + (missingReason.length > 3 ? '…' : '');
+    const sample = missingReason.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingReason.length > 3 ? '…' : '');
     showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
     return;
   }
@@ -10544,7 +10605,7 @@ function submitRecount() {
   // the affected rows and the admin Reports CSV shows a blank quantity.
   const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
   if (missingQty.length > 0) {
-    const sample = missingQty.slice(0, 3).map(([k]) => k).join(', ') + (missingQty.length > 3 ? '…' : '');
+    const sample = missingQty.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingQty.length > 3 ? '…' : '');
     showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
     return;
   }
