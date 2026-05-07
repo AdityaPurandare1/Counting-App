@@ -2856,7 +2856,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.39';
+const APP_VERSION = '1.40';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4920,6 +4920,20 @@ async function syncRecountsToSupabase() {
 
     const payloads = keys.map(function(k) {
       const rec = recounts[k];
+      // v1.40: include zone + category so counters' phones can SHOW the
+      // counter where to find each item. Migration 0014 added these
+      // columns; the prior payload silently omitted them, so when the
+      // counter's phone refreshed the recount list the zone/category
+      // came back as empty strings — every wine grouped under "—" with
+      // no location hint at all.
+      // allZones is rendered locally on the manager's device (closeCount1
+      // computes it) but isn't yet a column on kount_recounts. We pack
+      // it into notes as a "Also in: X, Y" hint so cross-zone visibility
+      // survives the round trip without a schema change.
+      const allZones = Array.isArray(rec.allZones) ? rec.allZones : [];
+      const multiZoneNote = allZones.length > 1
+        ? 'Also counted in: ' + allZones.slice(1).join(', ')
+        : '';
       return {
         audit_id: auditId,
         item_id: null,                                // AVT flow doesn't have a purchase_items id today
@@ -4929,6 +4943,9 @@ async function syncRecountsToSupabase() {
         count1_qty: rec.count1Qty != null ? Number(rec.count1Qty) : null,
         count2_qty: rec.recountQty != null ? Number(rec.recountQty) : null,
         status: rec.status || 'pending',
+        zone: rec.zone || null,
+        category: rec.category || null,
+        notes: multiZoneNote || null,
       };
     });
 
@@ -5450,6 +5467,20 @@ async function refreshRecountsFromSupabase() {
     const remote = {};
     (data || []).forEach(function(r) {
       const key = r.item_name;
+      // Reconstruct allZones from the multi-zone hint we packed into
+      // notes during syncRecountsToSupabase. Format: "Also counted in: X, Y"
+      // → primary zone + the comma-list. Lets counters see every zone an
+      // item lives in even though kount_recounts only has a single zone
+      // column.
+      let allZones = r.zone ? [r.zone] : [];
+      const noteText = String(r.notes || '');
+      const m = noteText.match(/^Also counted in:\s*(.+)$/i);
+      if (m && m[1]) {
+        m[1].split(',').map(function (s) { return s.trim(); }).filter(Boolean).forEach(function (z) {
+          if (!allZones.includes(z)) allZones.push(z);
+        });
+      }
+
       remote[key] = {
         supabaseId: r.id,
         // Keep the avtItem key so renderRecountPage / submitGuidedEntry pick the new format
@@ -5464,6 +5495,7 @@ async function refreshRecountsFromSupabase() {
         status: r.status || 'pending',
         notes: '',
         zone: r.zone || '',
+        allZones: allZones,
         category: r.category || '',
         auditResult: r.audit_result || null,
         auditReason: r.audit_reason || '',
@@ -10368,7 +10400,17 @@ function renderRecountPage() {
       : '<span style="font-size:10px;font-weight:700;background:var(--warning-dim,rgba(255,180,0,0.18));color:var(--warning);padding:2px 6px;border-radius:4px">⚠ Awaiting recount decision</span>';
     return zoneHeader +
       '<div class="focus-item ' + (isRecorded ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
-      'onclick="openRecountEntry(\'' + esc(key).replace(/'/g, "\\'") + '\')" style="cursor:pointer">' +
+      // BUG FIX (v1.40): wines have single quotes in their names
+      // ('Special Selection', 'Yellow Label', etc). The previous inline
+      // onclick passed the key as a JS string literal — esc() turned `'`
+      // into `&#39;`, the browser decoded that back to `'` when reading
+      // the attribute, and the resulting JS string had unescaped quotes
+      // that broke the parse. Wine click silently no-op'd.
+      // Switching to data-key + a delegated handler bypasses the JS-string
+      // escape problem entirely — the browser stores the key on the
+      // dataset, and we read it via el.dataset.key with no string parsing.
+      'data-recount-key="' + esc(key) + '" ' +
+      'onclick="openRecountEntryFromCard(this)" style="cursor:pointer">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;gap:6px">' +
         '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(key) + '</div>' +
         '<span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
@@ -10389,6 +10431,15 @@ function renderRecountPage() {
       '<div>' + resultBadge + (rec.auditReason ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;font-style:italic">' + esc(rec.auditReason) + '</span>' : '') + '</div>' +
     '</div>';
   }).join('');
+}
+
+/* Delegated click handler for recount cards. Reads the row's data-recount-key
+   instead of receiving the key inline as a JS string — avoids the wine-quote
+   parse bug where names like "Caymus, 'Special Selection'" broke onclick. */
+function openRecountEntryFromCard(el) {
+  if (!el) return;
+  const key = el.dataset && el.dataset.recountKey;
+  if (key) openRecountEntry(key);
 }
 
 function openRecountEntry(key) {
