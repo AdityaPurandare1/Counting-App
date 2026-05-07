@@ -62,7 +62,24 @@ const RESPONSE_SCHEMA = {
       // even though it's valid per the JSON Schema spec. anyOf is the
       // documented-supported way to express nullability.
       anyOf: [{ type: 'string' }, { type: 'null' }],
-      description: 'Catalog id of the matching row. Be liberal: missing-word matches like "818 Reposado" → "818 Tequila Reposado" should set this. Only null if no catalog row is plausible.',
+      description: 'Catalog id of your single best match (= candidates[0].id when candidates is non-empty). null when no catalog row is plausible.',
+    },
+    candidates: {
+      type: 'array',
+      description: 'Up to 5 plausible catalog rows ranked by confidence (best first). Empty array when nothing matches. The phone uses this for ambiguity resolution: if 2+ have UPCs the counter picks; if 0 have UPCs the counter picks. Be liberal — when a label could plausibly be one of two SKUs (e.g. 750ml vs 1.5L of the same wine), include both.',
+      maxItems: 5,
+      items: {
+        type: 'object',
+        properties: {
+          id:    { type: 'string',  description: 'Catalog id (must be one from the lists above).' },
+          name:  { type: 'string',  description: 'Catalog name.' },
+          brand: { type: 'string',  description: 'Catalog brand. Empty string if not in the catalog row.' },
+          size:  { type: 'string',  description: 'Catalog size. Empty string if not in the catalog row.' },
+          upc:   { type: 'string',  description: 'Catalog UPC. Empty string when the catalog row has none.' },
+        },
+        required: ['id', 'name', 'brand', 'size', 'upc'],
+        additionalProperties: false,
+      },
     },
     upc: {
       type: 'string',
@@ -74,22 +91,34 @@ const RESPONSE_SCHEMA = {
       description: 'How confident you are in the match. high = UPC or near-exact name match, medium = fuzzy/partial name match, low = guess.',
     },
   },
-  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'matchedId', 'upc', 'confidence'],
+  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'matchedId', 'candidates', 'upc', 'confidence'],
   additionalProperties: false,
 };
 
 const SYSTEM_PROMPT =
-  'You are a bar/restaurant inventory assistant. Given a photo of a wine, ' +
-  'liquor, or beer label/bottle, extract the key fields AND match against ' +
-  'the provided catalog.\n\n' +
+  'You are a bar/restaurant inventory assistant. Given one or more photos of ' +
+  'a wine, liquor, or beer label/bottle, extract the key fields AND match ' +
+  'against the provided catalog.\n\n' +
+  'MULTIPLE PHOTOS: You may receive 1–3 photos of the SAME bottle taken from ' +
+  'different angles (e.g. front label + back label + neck/seal). Combine ' +
+  'information across all photos before deciding — vintage, UPC, importer ' +
+  'text, varietal, and size frequently appear on only one face.\n\n' +
   'MATCHING PRIORITY (try in order, stop at first hit):\n' +
   '1. CARRIED ITEMS — the venue\'s stocked list. Always preferred. If the ' +
   'label plausibly matches a carried item, that is the match — even if ' +
   'something in "Other catalog" looks like a closer name match.\n' +
   '2. OTHER CATALOG — broader inventory the venue could carry but doesn\'t ' +
   'currently. Only consider these when no carried item plausibly matches.\n' +
-  '3. NO MATCH — set matchedId to null. The mobile app will route this to a ' +
-  'pending-items review queue. Still extract every label field you can read.\n\n' +
+  '3. NO MATCH — set matchedId to null AND candidates to []. The mobile app ' +
+  'will route this to a pending-items review queue. Still extract every ' +
+  'label field you can read.\n\n' +
+  'CANDIDATES (the array): include up to 5 catalog rows you considered ' +
+  'plausible, ranked best-first. matchedId MUST equal candidates[0].id when ' +
+  'candidates is non-empty. The phone disambiguates downstream — if 2+ ' +
+  'candidates have UPCs the counter picks; if 0 have UPCs the counter picks. ' +
+  'So when in doubt between two near-equal SKUs (especially same-name ' +
+  'different-size, e.g. 750ml vs 1.5L), include BOTH in candidates rather ' +
+  'than guessing — the counter can see the bottle.\n\n' +
   'MATCHING RULES — be liberal, not conservative:\n' +
   '- Match across abbreviations, missing words, reordering. "818 Reposado" ' +
   'MUST match "818 Tequila Reposado" — the missing "Tequila" is implicit ' +
@@ -102,7 +131,8 @@ const SYSTEM_PROMPT =
   'catalog\'s size onto the size field. The catalog size only helps you ' +
   'pick the right SKU when multiple sizes exist for the same product.\n' +
   '- When multiple catalog rows differ only by size (e.g. a 750ml SKU and ' +
-  'a 1.5L SKU of the same wine), match the SKU whose size matches the label.\n' +
+  'a 1.5L SKU of the same wine), match the SKU whose size matches the label. ' +
+  'If you cannot tell from the photos, include both in candidates.\n' +
   '- Confidence: "high" for UPC matches or near-exact name matches; ' +
   '"medium" for fuzzy/partial matches where brand and product type clearly ' +
   'align; "low" for guesses. Withholding a match the counter can clearly ' +
@@ -110,7 +140,7 @@ const SYSTEM_PROMPT =
   '- Output `name` and `brand` using the LABEL\'s spelling, not the ' +
   'catalog\'s. matchedId still points to the catalog row.\n\n' +
   "Use empty strings (not null) for label fields you can't read.\n" +
-  'Use null for matchedId only when no row in either list plausibly matches.';
+  'Use null for matchedId AND empty array for candidates only when no row in either list plausibly matches.';
 
 interface CatalogItem {
   id: string;
@@ -121,10 +151,16 @@ interface CatalogItem {
 }
 
 interface RequestBody {
-  image: string; // base64 string OR data URL ("data:image/jpeg;base64,...")
+  // Either pass a single `image` (legacy, single-shot capture) OR an `images`
+  // array (new multi-photo capture, up to 3 photos of the same bottle from
+  // different angles). When both are provided, `images` wins.
+  image?: string;    // base64 string OR data URL ("data:image/jpeg;base64,...")
+  images?: string[]; // up to 3 entries; same encoding as `image`
   carried?: CatalogItem[]; // venue-specific stocked items, matched first
-  catalog?: CatalogItem[]; // broader inventory, matched second
+  catalog?: CatalogItem[]; // broader inventory, matched second (omit/empty for carried-only first pass)
 }
+
+const MAX_IMAGES = 3;
 
 // Strip the optional "data:image/...;base64," prefix off whatever the client
 // sent, and pull the media type out so we can pass it to the Anthropic
@@ -201,14 +237,36 @@ Deno.serve(async (req) => {
     });
   }
 
-  if (!body.image || typeof body.image !== 'string') {
-    return new Response(JSON.stringify({ error: 'image is required (base64 string or data URL)' }), {
+  // Normalize input into an array. `images` wins when both are sent so a
+  // client retrying with multi-photo support after a partial rollout doesn't
+  // accidentally fall back to the legacy single-shot path.
+  let rawImages: string[];
+  if (Array.isArray(body.images) && body.images.length > 0) {
+    rawImages = body.images.filter((s) => typeof s === 'string' && s.length > 0);
+  } else if (typeof body.image === 'string' && body.image.length > 0) {
+    rawImages = [body.image];
+  } else {
+    rawImages = [];
+  }
+
+  if (rawImages.length === 0) {
+    return new Response(JSON.stringify({ error: 'image or images is required (base64 string or data URL)' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
   }
+  if (rawImages.length > MAX_IMAGES) {
+    rawImages = rawImages.slice(0, MAX_IMAGES);
+  }
 
-  const { mediaType, data } = parseImage(body.image);
+  const imageBlocks = rawImages.map((raw) => {
+    const { mediaType, data } = parseImage(raw);
+    return {
+      type: 'image' as const,
+      source: { type: 'base64' as const, media_type: mediaType, data },
+    };
+  });
+
   const catalogText = buildCatalogText(body.carried, body.catalog);
 
   // Cache placement: render order is tools → system → messages. We put the
@@ -238,13 +296,12 @@ Deno.serve(async (req) => {
       {
         role: 'user',
         content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data },
-          },
+          ...imageBlocks,
           {
             type: 'text',
-            text: 'Analyze this label and return JSON matching the schema. Use the catalog above to set matchedId when confident.',
+            text: imageBlocks.length > 1
+              ? 'Analyze these ' + imageBlocks.length + ' photos of the same bottle (different angles/labels) and return JSON matching the schema. Combine information across the photos. Use the catalog above to populate candidates and matchedId when confident.'
+              : 'Analyze this label and return JSON matching the schema. Use the catalog above to populate candidates and matchedId when confident.',
           },
         ],
       },

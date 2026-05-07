@@ -1295,6 +1295,163 @@ html, body {
   border-color: var(--primary);
 }
 
+/* ---------- PHOTO CANDIDATE PICKER ---------- */
+/* Shown in the photo review modal when the AI returns multiple plausible
+   matches for the same bottle (e.g. 750ml vs 1.5L of the same wine). The
+   counter taps one to disambiguate. */
+.photo-candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  margin-bottom: 6px;
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s;
+}
+.photo-candidate:hover,
+.photo-candidate:active {
+  border-color: var(--primary);
+  background: var(--surface2);
+}
+.photo-candidate-main { flex: 1; min-width: 0; }
+.photo-candidate-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.photo-candidate-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.photo-candidate-upc { flex-shrink: 0; }
+
+/* ---------- UPC BADGE ---------- */
+.upc-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono, monospace);
+  letter-spacing: 0.02em;
+}
+.upc-badge.upc-yes {
+  background: var(--success-dim, rgba(34, 197, 94, 0.15));
+  color: var(--success, #22c55e);
+  border: 1px solid var(--success-dim, rgba(34, 197, 94, 0.3));
+}
+.upc-badge.upc-no {
+  background: var(--surface2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+}
+.upc-display-row {
+  padding: 8px 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+}
+
+/* ---------- PHOTO THUMBNAIL STRIP (multi-capture) ---------- */
+.photo-thumb-strip {
+  display: flex;
+  gap: 6px;
+  padding: 6px 0 10px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.photo-thumb {
+  position: relative;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  cursor: pointer;
+  background: var(--surface2);
+}
+.photo-thumb.active { border-color: var(--primary); }
+.photo-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---------- CAMERA CAPTURE COUNTER + DONE BUTTON ---------- */
+.camera-capture-counter {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.65);
+  color: white;
+  padding: 6px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  z-index: 5;
+  pointer-events: none;
+}
+.camera-controls-multi {
+  /* Override the centered single-button layout in .camera-controls.
+     Inherits padding (incl. safe-area) and background from .camera-controls. */
+  justify-content: space-between;
+  gap: 12px;
+}
+.camera-thumbs-inline {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  align-items: center;
+  height: 56px;
+}
+.camera-thumbs-inline .photo-thumb { width: 44px; height: 44px; }
+.camera-done-btn {
+  background: var(--primary);
+  color: var(--bg);
+  border: none;
+  border-radius: 24px;
+  padding: 12px 22px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  font-family: var(--font);
+  flex-shrink: 0;
+}
+.camera-done-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* ---------- SUMMARY CARD ---------- */
 /* Summary / stats card — 1px border, no drop shadow, 16px radius. */
 .summary-card {
@@ -2451,7 +2608,10 @@ html, body {
   </div>
 </div>
 
-<!-- ========== CAMERA MODAL: PHOTO ========== -->
+<!-- ========== CAMERA MODAL: PHOTO ==========
+     Multi-photo capture: counter takes up to 3 shots of the same bottle
+     (front label, back label, neck/seal). Tap "Done" to send all of them
+     to the AI for combined analysis. -->
 <div class="camera-modal hide" id="photoModal">
   <div class="camera-header">
     <h3>Capture label</h3>
@@ -2459,9 +2619,12 @@ html, body {
   </div>
   <div class="camera-viewfinder">
     <video id="photoVideo" autoplay playsinline></video>
+    <div id="photoCaptureCounter" class="camera-capture-counter hide">0 / 3</div>
   </div>
-  <div class="camera-controls">
-    <button class="capture-btn" onclick="capturePhoto()"></button>
+  <div class="camera-controls camera-controls-multi">
+    <div id="cameraThumbsInline" class="camera-thumbs-inline"></div>
+    <button class="capture-btn" id="photoCaptureBtn" onclick="capturePhoto()"></button>
+    <button class="camera-done-btn" id="photoDoneBtn" onclick="finishPhotoCapture()" disabled>Done</button>
   </div>
 </div>
 
@@ -2681,14 +2844,29 @@ html, body {
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>Review capture <button class="close-x" onclick="closePhotoReview()">X</button></h3>
     <div id="photoDupeWarning"></div>
-    <div style="border-radius:var(--radius);overflow:hidden;margin-bottom:12px">
+    <div style="border-radius:var(--radius);overflow:hidden;margin-bottom:8px">
       <img id="photoPreviewImg" style="width:100%;display:block">
     </div>
+    <!-- Multi-photo thumbnail strip — only shown when 2+ photos captured.
+         Tap a thumb to swap it into the main preview. -->
+    <div id="photoThumbStrip" class="photo-thumb-strip hide"></div>
     <div id="parsingStatus" style="text-align:center;color:var(--text-muted);font-size:12px;margin-bottom:12px">Analyzing label...</div>
+
+    <!-- Candidate picker — shown when AI returns 2+ ambiguous matches.
+         Hidden by default; populated by showPhotoCandidatePicker(). -->
+    <div id="photoCandidatePicker" class="hide" style="margin-bottom:12px">
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:6px">AI found multiple matches — tap one</label>
+      <div id="photoCandidateList"></div>
+    </div>
+
     <div class="form-group">
       <label>Item name (search or use OCR result)</label>
       <input class="form-input" id="photoName" placeholder="Search inventory or type name..." autocomplete="off" oninput="onPhotoSearch(this.value)">
       <div id="photoSearchResults" style="max-height:150px;overflow-y:auto"></div>
+    </div>
+    <div class="form-group">
+      <label>UPC</label>
+      <div id="photoUpcDisplay" class="upc-display-row"><span class="upc-badge upc-no">(pending)</span></div>
     </div>
     <div class="form-row">
       <div class="form-group">
@@ -2856,7 +3034,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.31';
+const APP_VERSION = '1.32';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8600,10 +8778,23 @@ function submitBarcodeEntry() {
    PHOTO CAPTURE
    ================================================================ */
 let photoStream = null;
-let capturedPhotoData = null;
+// Multi-photo capture: counter can take up to MAX_PHOTOS shots of the same
+// bottle (front + back labels, neck/seal). All shots get sent to Claude
+// together for a combined extraction. capturedPhotoData (singular) is kept
+// as an alias of capturedPhotos[0] so legacy code paths (e.g. the OpenAI
+// fallback in parseLabelWithOpenAI) keep working without rewrites.
+const MAX_PHOTOS = 3;
+let capturedPhotos = [];
+let capturedPhotoData = null; // back-compat alias for capturedPhotos[0]
 
 function openPhotoCapture() {
   if (isAuditLocked()) return; // FIX #1
+
+  // Reset capture array on every open so a new bottle starts clean.
+  capturedPhotos = [];
+  capturedPhotoData = null;
+  renderCameraThumbs();
+  updateCaptureUI();
 
   document.getElementById('photoModal').classList.remove('hide');
 
@@ -8626,6 +8817,49 @@ function closePhotoCapture() {
     photoStream = null;
   }
   document.getElementById('photoModal').classList.add('hide');
+}
+
+// Reflect current capture state in the camera modal: counter pill, Done
+// button enable/disable, capture button disable when at MAX_PHOTOS.
+function updateCaptureUI() {
+  var counterEl = document.getElementById('photoCaptureCounter');
+  var captureBtn = document.getElementById('photoCaptureBtn');
+  var doneBtn = document.getElementById('photoDoneBtn');
+  var n = capturedPhotos.length;
+  if (counterEl) {
+    counterEl.textContent = n + ' / ' + MAX_PHOTOS;
+    counterEl.classList.toggle('hide', n === 0);
+  }
+  if (captureBtn) {
+    captureBtn.disabled = n >= MAX_PHOTOS;
+    captureBtn.style.opacity = n >= MAX_PHOTOS ? '0.4' : '';
+  }
+  if (doneBtn) doneBtn.disabled = n === 0;
+}
+
+function renderCameraThumbs() {
+  var stripEl = document.getElementById('cameraThumbsInline');
+  if (!stripEl) return;
+  if (capturedPhotos.length === 0) {
+    stripEl.innerHTML = '';
+    return;
+  }
+  stripEl.innerHTML = capturedPhotos.map(function (dataUrl, idx) {
+    return (
+      '<div class="photo-thumb">' +
+        '<img src="' + dataUrl + '" alt="capture ' + (idx + 1) + '">' +
+        '<button class="photo-thumb-remove" type="button" onclick="removeCapturedPhoto(' + idx + ')" aria-label="Remove">x</button>' +
+      '</div>'
+    );
+  }).join('');
+}
+
+function removeCapturedPhoto(idx) {
+  if (idx < 0 || idx >= capturedPhotos.length) return;
+  capturedPhotos.splice(idx, 1);
+  capturedPhotoData = capturedPhotos[0] || null;
+  renderCameraThumbs();
+  updateCaptureUI();
 }
 
 /* ================================================================
@@ -8750,15 +8984,25 @@ function selectPhotoItem(id) {
   const item = itemMaster.find(i => i.id === id);
   if (!item) return;
 
-  document.getElementById('photoName').value = item.name;
+  var nameInput = document.getElementById('photoName');
+  nameInput.value = item.name;
   document.getElementById('photoCategory').value = item.category;
-  document.getElementById('photoName').dataset.masterId = item.id;
+  nameInput.dataset.masterId = item.id;
+  // Mirror the UPC into the dataset + visible display so the typed-search
+  // path matches the AI-match path. UPC guarantees the SKU.
+  if (item.upc) nameInput.dataset.upc = String(item.upc);
+  else delete nameInput.dataset.upc;
+  updatePhotoUpcDisplay(item.upc || '');
+
   document.getElementById('photoSearchResults').innerHTML = '';
   document.getElementById('parsingStatus').textContent = 'Selected: ' + item.name;
   document.getElementById('parsingStatus').style.color = 'var(--success)';
   document.getElementById('parsingStatus').style.animation = 'none';
   document.getElementById('photoDupeWarning').innerHTML =
-    renderDupeWarning(item.id, item.sku);
+    renderDupeWarning(item.id, item.upc || item.sku);
+  // If the picker was open from an ambiguous AI result, hide it — a manual
+  // selection supersedes the AI's candidates.
+  if (typeof hidePhotoCandidatePicker === 'function') hidePhotoCandidatePicker();
 }
 
 /* Preprocess image for better OCR — increase contrast, convert to grayscale */
@@ -8885,24 +9129,49 @@ async function parsePhotoLabelTesseract(imageDataUrl) {
 }
 
 function capturePhoto() {
+  if (capturedPhotos.length >= MAX_PHOTOS) return;
+
   const video = document.getElementById('photoVideo');
   const canvas = document.getElementById('photoCanvas');
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0);
-  capturedPhotoData = canvas.toDataURL('image/jpeg', 0.7);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+  capturedPhotos.push(dataUrl);
+  capturedPhotoData = capturedPhotos[0]; // first shot becomes the cover/preview
+
+  renderCameraThumbs();
+  updateCaptureUI();
+  // Counter taps Done explicitly when ready. Auto-closing on first shot
+  // would defeat multi-photo (once the review modal opens you can't keep
+  // shooting). The Done button is enabled the moment one photo is captured,
+  // so quick single-shot flows are still 1 tap shutter + 1 tap Done.
+}
+
+/* Closes the camera and opens the review modal with all captured photos.
+   Sends them all to the parser as an array — Claude combines info across
+   the photos (front + back + neck) for a single extraction. */
+function finishPhotoCapture() {
+  if (capturedPhotos.length === 0) return;
 
   closePhotoCapture();
 
-  // Show review modal
+  // Show review modal with the first photo as the main preview, plus the
+  // thumbnail strip if 2+ photos.
   document.getElementById('photoReviewModal').classList.remove('hide');
-  document.getElementById('photoPreviewImg').src = capturedPhotoData;
+  document.getElementById('photoPreviewImg').src = capturedPhotos[0];
+
+  renderReviewThumbStrip();
+
   document.getElementById('photoName').value = '';
   document.getElementById('photoName').dataset.masterId = '';
   delete document.getElementById('photoName').dataset.upc;
   document.getElementById('photoDetails').value = '';
   document.getElementById('photoQty').value = '1';
   document.getElementById('photoDupeWarning').innerHTML = '';
+  if (typeof updatePhotoUpcDisplay === 'function') updatePhotoUpcDisplay('');
+  if (typeof hidePhotoCandidatePicker === 'function') hidePhotoCandidatePicker();
+
   // Reset issue chips back to "None" so a previous photo's selection
   // doesn't carry over to the new bottle. populatePhotoFormFromParsed
   // overrides this to "not-in-craftable" when Claude can't match.
@@ -8917,8 +9186,37 @@ function capturePhoto() {
   const existingRaw = document.getElementById('ocrRawText');
   if (existingRaw) existingRaw.remove();
 
-  // Run real OCR parsing
-  parsePhotoLabel(capturedPhotoData);
+  // Send all captured photos to the parser. parseLabelWithClaude accepts
+  // either a single dataUrl or an array.
+  parsePhotoLabel(capturedPhotos.length > 1 ? capturedPhotos.slice() : capturedPhotos[0]);
+}
+
+/* Render the in-modal thumbnail strip (visible only when 2+ photos).
+   Tap a thumb to swap it as the main preview. */
+function renderReviewThumbStrip() {
+  var stripEl = document.getElementById('photoThumbStrip');
+  if (!stripEl) return;
+  if (capturedPhotos.length < 2) {
+    stripEl.classList.add('hide');
+    stripEl.innerHTML = '';
+    return;
+  }
+  stripEl.classList.remove('hide');
+  stripEl.innerHTML = capturedPhotos.map(function (dataUrl, idx) {
+    var activeClass = idx === 0 ? ' active' : '';
+    return (
+      '<div class="photo-thumb' + activeClass + '" onclick="setReviewPreview(' + idx + ')">' +
+        '<img src="' + dataUrl + '" alt="capture ' + (idx + 1) + '">' +
+      '</div>'
+    );
+  }).join('');
+}
+
+function setReviewPreview(idx) {
+  if (idx < 0 || idx >= capturedPhotos.length) return;
+  document.getElementById('photoPreviewImg').src = capturedPhotos[idx];
+  var thumbs = document.querySelectorAll('#photoThumbStrip .photo-thumb');
+  thumbs.forEach(function (t, i) { t.classList.toggle('active', i === idx); });
 }
 
 function closePhotoReview(event) {
@@ -11736,106 +12034,287 @@ async function parseLabelWithOpenAI(imageDataUrl) {
 /* ---------- populatePhotoFormFromParsed ---------- */
 /* Shared form-population logic for vision-based label parsers (Claude +
    OpenAI both feed through this). Mirrors the field shapes the rest of the
-   photo flow expects so submitPhotoEntry() picks up the right masterId. */
+   photo flow expects so submitPhotoEntry() picks up the right masterId.
+
+   Match resolution rules (Claude path returns a `candidates` array):
+     - 0 candidates → no-match path (free-text + flag for admin)
+     - 1 candidate → auto-pick
+     - 2+ candidates: filter to those whose catalog row has a UPC
+         · 1 with UPC → auto-pick that one (UPC guarantees the SKU)
+         · 0 with UPC → counter picks (showCandidatePicker)
+         · 2+ with UPC → counter picks (e.g. 750ml vs 1.5L same name —
+           both have UPCs but the counter sees the bottle, we don't)
+   The OpenAI fallback path doesn't return candidates; it falls back to the
+   single-match branch via parsed.matchedId. */
 function populatePhotoFormFromParsed(parsed, statusEl) {
+  var nameInput = document.getElementById('photoName');
+
+  // Normalize candidates. OpenAI/Tesseract paths skip this field, so build
+  // a synthetic single-element list from matchedId for shape parity.
+  var candidates = Array.isArray(parsed && parsed.candidates) ? parsed.candidates.slice() : [];
+  if (candidates.length === 0 && parsed && parsed.matchedId) {
+    var legacyItem = itemMaster.find(function (x) { return String(x.id) === String(parsed.matchedId); });
+    if (legacyItem) {
+      candidates = [{
+        id: String(legacyItem.id),
+        name: legacyItem.name || '',
+        brand: legacyItem.brand || '',
+        size: legacyItem.size || '',
+        upc: legacyItem.upc || '',
+      }];
+    }
+  }
+
+  // Resolve which candidate (if any) to apply automatically.
+  var autoChoice = null;
+  var needsPicker = false;
+  if (candidates.length === 1) {
+    autoChoice = candidates[0];
+  } else if (candidates.length >= 2) {
+    var withUpc = candidates.filter(function (c) { return c && c.upc && String(c.upc).trim(); });
+    if (withUpc.length === 1) {
+      autoChoice = withUpc[0];
+    } else {
+      // 0 or 2+ with UPC → ambiguous, counter picks.
+      needsPicker = true;
+    }
+  }
+
+  // Stash the raw extraction (vintage, size on label, etc.) so the picker's
+  // selectCandidate() can apply it after the counter chooses.
+  appState._photoParsed = parsed;
+
+  // Reset previous picker state regardless of branch — keeps the modal
+  // clean across consecutive photos.
+  hidePhotoCandidatePicker();
+
+  if (needsPicker) {
+    showPhotoCandidatePicker(candidates, parsed, statusEl);
+    // Don't pre-fill the name — counter must choose. Fields populated by
+    // selectPhotoCandidate() once they tap a row.
+    nameInput.value = '';
+    delete nameInput.dataset.masterId;
+    delete nameInput.dataset.upc;
+    updatePhotoUpcDisplay('');
+    statusEl.textContent = 'Multiple matches — tap one to pick';
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--warning)';
+    appendPhotoRawDebug(parsed, statusEl);
+    return;
+  }
+
+  if (autoChoice) {
+    applyPhotoCandidate(autoChoice, parsed, statusEl);
+    appendPhotoRawDebug(parsed, statusEl);
+    return;
+  }
+
+  // No candidates → free-text + flag for admin queue.
+  var displayName = parsed && parsed.name ? parsed.name : '';
+  if (parsed && parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
+    displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
+  }
+  nameInput.value = displayName;
+  delete nameInput.dataset.masterId;
+  // Even with no catalog match, Claude may have read a UPC off the label.
+  // Surface it — that UPC alone can be the key to admin linking later.
+  var labelUpc = parsed && parsed.upc ? String(parsed.upc).trim() : '';
+  if (labelUpc) nameInput.dataset.upc = labelUpc;
+  else delete nameInput.dataset.upc;
+  updatePhotoUpcDisplay(labelUpc);
+  if (parsed && parsed.category) document.getElementById('photoCategory').value = parsed.category;
+
+  var bits = [];
+  if (parsed && parsed.vintage) bits.push(parsed.vintage);
+  if (parsed && parsed.size) bits.push(parsed.size);
+  if (parsed && parsed.details) bits.push(parsed.details);
+  document.getElementById('photoDetails').value = bits.join(' · ');
+
+  statusEl.textContent = 'AI extracted — no catalog match. Edit/search below.' + (labelUpc ? ' UPC: ' + labelUpc : '');
+  statusEl.style.animation = 'none';
+  statusEl.style.color = 'var(--warning)';
+
+  if (displayName && typeof onPhotoSearch === 'function') {
+    try { onPhotoSearch(displayName); } catch (e) {}
+  }
+
+  // Flag for admin Issues page so a brand-new bottle gets reviewed.
+  appState.photoIssue = 'not-in-craftable';
+  document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
+    chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
+  });
+
+  appendPhotoRawDebug(parsed, statusEl);
+}
+
+/* Apply a single candidate to the form. Used by both the auto-pick branch
+   and selectPhotoCandidate() when the counter taps a row in the picker. */
+function applyPhotoCandidate(cand, parsed, statusEl) {
+  if (!cand) return;
+  var matchedItem = itemMaster.find(function (x) { return String(x.id) === String(cand.id); });
+  // If the catalog row vanished (shouldn't happen, but defensive) fall back
+  // to the candidate's own fields.
+  var resolved = matchedItem || {
+    id: cand.id,
+    name: cand.name,
+    brand: cand.brand,
+    size: cand.size,
+    upc: cand.upc,
+    category: (parsed && parsed.category) || 'other',
+  };
+
   var nameInput = document.getElementById('photoName');
   var catSelect = document.getElementById('photoCategory');
   var detailsInput = document.getElementById('photoDetails');
 
-  var matchedItem = null;
-  if (parsed.matchedId) {
-    matchedItem = itemMaster.find(function (x) { return String(x.id) === String(parsed.matchedId); });
-  }
-
-  // Resolve a UPC for this entry. Preference order:
-  //   1. UPC from the matched catalog row (most reliable — already known good)
-  //   2. UPC the model reported back from the label or echoed from the catalog
-  // Stored on the input's dataset so submitPhotoEntry can pass it through to
-  // addCountEntry as the sku/upc field.
+  // UPC preference order: catalog row's canonical upc → candidate's upc as
+  // returned by Claude → label-read upc from parsed. Catalog wins because
+  // it survives admin curation; the candidate echoes it; label is last
+  // resort and may be misread digits.
   var resolvedUpc = '';
   if (matchedItem && matchedItem.upc) resolvedUpc = String(matchedItem.upc);
-  else if (parsed && parsed.upc)      resolvedUpc = String(parsed.upc).trim();
+  else if (cand.upc) resolvedUpc = String(cand.upc).trim();
+  else if (parsed && parsed.upc) resolvedUpc = String(parsed.upc).trim();
 
-  if (matchedItem) {
-    nameInput.value = matchedItem.name;
-    catSelect.value = matchedItem.category || parsed.category || 'other';
-    nameInput.dataset.masterId = matchedItem.id;
-    if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
-    else delete nameInput.dataset.upc;
-    var detailBits = [];
-    if (parsed.vintage) detailBits.push(parsed.vintage);
-    if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
-    if (parsed.details) detailBits.push(parsed.details);
-    detailsInput.value = detailBits.join(' · ');
+  nameInput.value = resolved.name || '';
+  catSelect.value = resolved.category || (parsed && parsed.category) || 'other';
+  nameInput.dataset.masterId = String(resolved.id || '');
+  if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
+  else delete nameInput.dataset.upc;
 
-    var matchSuffix = resolvedUpc ? ' · UPC ' + resolvedUpc : '';
-    statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')' + matchSuffix;
-    statusEl.style.animation = 'none';
-    statusEl.style.color = 'var(--success)';
-  } else {
-    var displayName = parsed.name || '';
-    if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
-      displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
-    }
-    nameInput.value = displayName;
-    delete nameInput.dataset.masterId;
-    if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
-    else delete nameInput.dataset.upc;
-    if (parsed.category) catSelect.value = parsed.category;
-    var bits2 = [];
-    if (parsed.vintage) bits2.push(parsed.vintage);
-    if (parsed.size) bits2.push(parsed.size);
-    if (parsed.details) bits2.push(parsed.details);
-    detailsInput.value = bits2.join(' · ');
+  updatePhotoUpcDisplay(resolvedUpc);
 
-    statusEl.textContent = 'AI extracted — no exact catalog match. Edit/search below.' + (resolvedUpc ? ' UPC: ' + resolvedUpc : '');
-    statusEl.style.animation = 'none';
-    statusEl.style.color = 'var(--warning)';
+  var bits = [];
+  if (parsed && parsed.vintage) bits.push(parsed.vintage);
+  if (parsed && parsed.size && parsed.size !== resolved.size) bits.push(parsed.size);
+  if (parsed && parsed.details) bits.push(parsed.details);
+  detailsInput.value = bits.join(' · ');
 
-    if (displayName && typeof onPhotoSearch === 'function') {
-      try { onPhotoSearch(displayName); } catch (e) {}
-    }
-
-    // No catalog match → flag the entry so admin sees it on the Issues
-    // page and can add it to the catalog. Counter can still override the
-    // chip selection before saving.
-    appState.photoIssue = 'not-in-craftable';
+  // Reset the no-match flag so a successful pick clears the prior
+  // "not-in-craftable" issue chip from a previous round.
+  if (appState.photoIssue === 'not-in-craftable') {
+    appState.photoIssue = 'none';
     document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
-      chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
+      chip.classList.toggle('selected', chip.dataset.issue === 'none');
     });
   }
 
-  // Raw extraction summary, useful for debugging and for the user to see
-  // what the model thought was on the label.
+  if (statusEl) {
+    var conf = (parsed && parsed.confidence) ? parsed.confidence : 'AI';
+    statusEl.textContent = 'Matched: ' + (resolved.name || '') + ' (' + conf + ')' + (resolvedUpc ? ' · UPC ' + resolvedUpc : '');
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--success)';
+  }
+
+  // Dupe warning is keyed off the matched master id.
+  var dupeEl = document.getElementById('photoDupeWarning');
+  if (dupeEl && typeof renderDupeWarning === 'function') {
+    dupeEl.innerHTML = renderDupeWarning(String(resolved.id || ''), resolvedUpc);
+  }
+}
+
+/* Render the candidate picker inside the photo review modal. Counter taps
+   a row → selectPhotoCandidate(idx) → applyPhotoCandidate. */
+function showPhotoCandidatePicker(candidates, parsed, statusEl) {
+  var pickerEl = document.getElementById('photoCandidatePicker');
+  var listEl   = document.getElementById('photoCandidateList');
+  if (!pickerEl || !listEl) return;
+  appState._photoCandidates = candidates;
+  appState._photoParsed = parsed;
+  appState._photoStatusEl = statusEl;
+  listEl.innerHTML = candidates.map(function (c, idx) {
+    var hasUpc = !!(c && c.upc && String(c.upc).trim());
+    var subline = [c.brand || '', c.size || ''].filter(Boolean).join(' · ');
+    return (
+      '<div class="photo-candidate" onclick="selectPhotoCandidate(' + idx + ')">' +
+        '<div class="photo-candidate-main">' +
+          '<div class="photo-candidate-name">' + esc(c.name || '(unnamed)') + '</div>' +
+          (subline ? '<div class="photo-candidate-sub">' + esc(subline) + '</div>' : '') +
+        '</div>' +
+        '<div class="photo-candidate-upc">' +
+          (hasUpc
+            ? '<span class="upc-badge upc-yes">UPC ' + esc(String(c.upc)) + '</span>'
+            : '<span class="upc-badge upc-no">no UPC</span>') +
+        '</div>' +
+      '</div>'
+    );
+  }).join('');
+  pickerEl.classList.remove('hide');
+}
+
+function hidePhotoCandidatePicker() {
+  var pickerEl = document.getElementById('photoCandidatePicker');
+  if (pickerEl) pickerEl.classList.add('hide');
+  appState._photoCandidates = null;
+}
+
+function selectPhotoCandidate(idx) {
+  var list = appState._photoCandidates || [];
+  var cand = list[idx];
+  if (!cand) return;
+  applyPhotoCandidate(cand, appState._photoParsed || {}, appState._photoStatusEl || document.getElementById('parsingStatus'));
+  hidePhotoCandidatePicker();
+}
+
+/* Visible UPC display row in the photo review modal. Empty UPC hides the
+   "(none)" pill so the row collapses gracefully. */
+function updatePhotoUpcDisplay(upc) {
+  var el = document.getElementById('photoUpcDisplay');
+  if (!el) return;
+  var trimmed = upc ? String(upc).trim() : '';
+  if (trimmed) {
+    el.innerHTML = '<span class="upc-badge upc-yes">' + esc(trimmed) + '</span>';
+  } else {
+    el.innerHTML = '<span class="upc-badge upc-no">(no UPC — admin will need to add one)</span>';
+  }
+}
+
+function appendPhotoRawDebug(parsed, statusEl) {
   var existingRaw = document.getElementById('ocrRawText');
   if (existingRaw) existingRaw.remove();
+  if (!parsed) return;
   var rawDiv = document.createElement('div');
   rawDiv.id = 'ocrRawText';
   rawDiv.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--surface2);padding:8px;border-radius:6px;margin-top:6px;max-height:80px;overflow-y:auto;font-family:var(--mono);line-height:1.4;word-break:break-word';
   rawDiv.textContent = 'AI: ' + JSON.stringify({
     name: parsed.name, brand: parsed.brand, vintage: parsed.vintage,
     size: parsed.size, category: parsed.category,
+    candidates: (parsed.candidates || []).length,
   });
-  statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
+  if (statusEl && statusEl.parentNode) statusEl.parentNode.insertBefore(rawDiv, statusEl.nextSibling);
 }
 
 /* ---------- parseLabelWithClaude ---------- */
 /* Calls the parse-bottle-label Edge Function, which holds the Anthropic key
-   server-side and runs claude-haiku-4-5 with a cached system prompt + catalog.
-   Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on error. */
-async function parseLabelWithClaude(imageDataUrl) {
-  // Split the catalog into "carried" (this venue actually stocks it,
-  // tracked in carriedSet) and "other" (broader inventory). Claude is
-  // instructed to try carried first — that's where almost every match
-  // should land for a real audit. Both lists are alphabetized by name so
-  // the prompt prefix is byte-stable and the Edge Function's cache hits.
+   server-side and runs Sonnet with a cached system prompt + catalog.
+
+   Two-pass strategy:
+     Pass 1: send ONLY the carried items (what the venue actually stocks).
+             ~99% of labels resolve here, with a smaller prompt and a
+             stable cache prefix.
+     Pass 2: only fires when Pass 1 returns no candidates AND null
+             matchedId. Sends the broader catalog so genuinely-novel
+             items still resolve. Slower path, rare hit.
+
+   Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on
+   network/upstream errors (NOT on a clean "no match" — that's a valid
+   result, the picker UI handles it).
+
+   Accepts either a single dataUrl or an array (multi-photo capture).
+*/
+async function parseLabelWithClaude(imagesInput) {
+  const images = Array.isArray(imagesInput) ? imagesInput : [imagesInput];
+
+  // Catalog row → wire payload. brand/size/upc default to '' rather than
+  // null so the Edge Function's strict JSON schema (required fields) accepts
+  // every row without per-row branching.
   const toPayload = function (it) {
     return {
       id: String(it.id || ''),
       name: String(it.name || ''),
-      brand: it.brand ? String(it.brand) : null,
-      size: it.size ? String(it.size) : null,
-      upc: it.upc ? String(it.upc) : null,
+      brand: it.brand ? String(it.brand) : '',
+      size: it.size ? String(it.size) : '',
+      upc: it.upc ? String(it.upc) : '',
     };
   };
   const sortByName = function (a, b) {
@@ -11850,31 +12329,55 @@ async function parseLabelWithClaude(imageDataUrl) {
     if (carriedSetRef.has(String(it.id))) carried.push(it);
     else other.push(it);
   }
-  const carriedPayload = carried.sort(sortByName).slice(0, 250).map(toPayload);
-  const otherPayload   = other.sort(sortByName).slice(0, 250).map(toPayload);
+  const carriedPayload = carried.sort(sortByName).slice(0, 500).map(toPayload);
+  const otherPayload   = other.sort(sortByName).slice(0, 500).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      // Edge Functions require an apikey or Authorization header. The
-      // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
-      // secret, not on Supabase auth.
-      'apikey': SUPABASE_ANON_KEY,
-      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-    },
-    body: JSON.stringify({
-      image: imageDataUrl,
-      carried: carriedPayload,
-      catalog: otherPayload,
-    }),
-  });
-  if (!res.ok) {
-    const errText = await res.text().catch(function () { return ''; });
-    throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
-  }
-  return await res.json();
+
+  const callEdge = async function (carriedArr, catalogArr) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // Edge Functions require an apikey or Authorization header. The
+        // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
+        // secret, not on Supabase auth.
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+      },
+      body: JSON.stringify({
+        // Send BOTH fields so this works against either Edge Function
+        // version during a deploy gap. Old function reads `image` and
+        // ignores `images`; new function reads `images` and ignores
+        // `image`. Either order of (push HTML / redeploy function) is safe.
+        image: images[0],
+        images: images,
+        carried: carriedArr,
+        catalog: catalogArr,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(function () { return ''; });
+      throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
+    }
+    return await res.json();
+  };
+
+  // Pass 1: carried-only. Catalog field is omitted so the Edge Function
+  // renders only the carried section in the prompt — smaller, faster,
+  // stable cache prefix.
+  const pass1 = await callEdge(carriedPayload, []);
+  const pass1HasMatch = !!(pass1 && (
+    (pass1.candidates && pass1.candidates.length > 0) ||
+    pass1.matchedId
+  ));
+  if (pass1HasMatch) return pass1;
+
+  // Pass 2 only on a true miss. Send the broader catalog. Carried still
+  // included so Claude sees the same priority ordering and can flip to a
+  // carried row if it second-guesses itself.
+  const pass2 = await callEdge(carriedPayload, otherPayload);
+  return pass2;
 }
 
 /* ---------- parsePhotoLabel WRAPPER ---------- */
@@ -11884,19 +12387,25 @@ async function parseLabelWithClaude(imageDataUrl) {
    3. Tesseract — on-device fallback for offline / both APIs failing
    The wrapper falls down the chain on each failure, so a flaky network or a
    transient Anthropic 5xx won't leave the user stuck — Tesseract still runs. */
-async function parsePhotoLabel(imageDataUrl) {
+async function parsePhotoLabel(imagesInput) {
   var statusEl = document.getElementById('parsingStatus');
+  // Multi-photo capture passes an array; legacy callers pass a single
+  // dataUrl. Normalize once here so all downstream code is array-aware.
+  var imagesArr = Array.isArray(imagesInput) ? imagesInput : [imagesInput];
+  var firstImage = imagesArr[0]; // OpenAI/Tesseract paths only consume one
 
   // Prefer Claude when the Supabase client is initialized (which means the
   // Edge Function URL is reachable in principle). No client-side key check
   // needed — the key lives in supabase secrets.
   if (typeof supabaseClient !== 'undefined' && supabaseClient) {
     try {
-      statusEl.textContent = 'Analyzing with Claude…';
+      statusEl.textContent = imagesArr.length > 1
+        ? 'Analyzing ' + imagesArr.length + ' photos with Claude…'
+        : 'Analyzing with Claude…';
       statusEl.style.animation = 'pulse 1s infinite';
       statusEl.style.color = 'var(--text-muted)';
 
-      const parsed = await parseLabelWithClaude(imageDataUrl);
+      const parsed = await parseLabelWithClaude(imagesArr);
       return populatePhotoFormFromParsed(parsed, statusEl);
     } catch (err) {
       console.error('[Claude Vision] parse failed, falling back:', err);
@@ -11913,8 +12422,9 @@ async function parsePhotoLabel(imageDataUrl) {
   }
 
   if (!hasOpenAIKey()) {
-    // No OpenAI key either — use the original Tesseract flow as a final fallback
-    return parsePhotoLabelTesseract(imageDataUrl);
+    // No OpenAI key either — use the original Tesseract flow as a final
+    // fallback. Tesseract is single-image only.
+    return parsePhotoLabelTesseract(firstImage);
   }
 
   try {
@@ -11922,14 +12432,16 @@ async function parsePhotoLabel(imageDataUrl) {
     statusEl.style.animation = 'pulse 1s infinite';
     statusEl.style.color = 'var(--text-muted)';
 
-    var parsed = await parseLabelWithOpenAI(imageDataUrl);
+    // OpenAI fallback: send only the first photo (multi-image isn't worth
+    // wiring on a fallback that almost never fires).
+    var parsed = await parseLabelWithOpenAI(firstImage);
     populatePhotoFormFromParsed(parsed, statusEl);
   } catch (err) {
     console.error('[OpenAI Vision] parse failed, falling back to OCR:', err);
     statusEl.textContent = 'AI failed (' + (err.message || 'unknown') + ') — using OCR fallback…';
     statusEl.style.color = 'var(--warning)';
     // Graceful fallback — never leave user stuck
-    try { await parsePhotoLabelTesseract(imageDataUrl); }
+    try { await parsePhotoLabelTesseract(firstImage); }
     catch (e2) {
       statusEl.textContent = 'Parsing failed. Enter details manually.';
       statusEl.style.color = 'var(--danger)';
