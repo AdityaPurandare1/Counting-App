@@ -3034,7 +3034,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.35';
+const APP_VERSION = '1.36';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3192,16 +3192,24 @@ async function loadSupabaseItems() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
 
   // PostgREST caps anon queries at the project's db-max-rows (default 1000),
-  // so a single select=* would silently truncate our 4,600-row catalog to
-  // the first 1,000 items alphabetically. Paginate instead — loop through
-  // ranges of SUPABASE_PAGE_SIZE until we get a short page back.
+  // so a single select=* would silently truncate the catalog. Paginate
+  // through SUPABASE_PAGE_SIZE chunks until we get a short page back.
+  //
+  // MAX_PAGES history:
+  //   v1.14: 5 pages = 5K cap (catalog was ~4,600)
+  //   v1.31: 20 pages = 20K cap (catalog had grown to ~5K, safety margin)
+  //   v1.36: 35 pages = 35K cap (catalog is now 26,855 — was silently
+  //          truncating S–Z items: Sunny, Tito's, Veuve, etc disappeared
+  //          from search and AI matching)
+  // Filter is_active=true to skip soft-deleted rows (admin disables them
+  // instead of hard-deleting to preserve history).
   const SUPABASE_PAGE_SIZE = 1000;
-  const SUPABASE_MAX_PAGES = 20;               // hard stop at 20k rows as a safety net
+  const SUPABASE_MAX_PAGES = 35;
   const all = [];
   try {
     for (let page = 0; page < SUPABASE_MAX_PAGES; page++) {
       const offset = page * SUPABASE_PAGE_SIZE;
-      const qs = 'select=*&order=name&limit=' + SUPABASE_PAGE_SIZE + '&offset=' + offset;
+      const qs = 'select=*&is_active=eq.true&order=name&limit=' + SUPABASE_PAGE_SIZE + '&offset=' + offset;
       const { data, error } = await supabaseRest.query('purchase_items', qs);
       if (error) throw error;
       if (!data || data.length === 0) break;
