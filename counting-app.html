@@ -3034,7 +3034,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.32';
+const APP_VERSION = '1.34';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3630,6 +3630,8 @@ function mapSupabaseToItemMaster(items) {
   return items.map((row, i) => ({
     id: row.id ? String(row.id) : ('SB' + i),
     name: row.name || row.item_name || 'Unknown Item',
+    // No `brand` column exists in purchase_items today. Fallbacks kept
+    // for any future schema/import that does add brand/vendor columns.
     brand: row.brand || row.vendor || '',
     category: guessCategory(row.category || row.item_category || ''),
     subcategory: row.subcategory || '',
@@ -3638,7 +3640,9 @@ function mapSupabaseToItemMaster(items) {
     par: row.par_level || row.par || 0,
     expectedQty: row.expected_qty || 0,
     vintage: row.vintage || '',
-    size: row.size || row.bottle_size || '',
+    // Size: real column is `base_uom` (e.g. "1L", "750ml", "12oz").
+    // size/bottle_size kept as legacy-schema fallbacks.
+    size: row.base_uom || row.size || row.bottle_size || '',
     supabaseId: row.id,
     _raw: row,
   }));
@@ -12288,20 +12292,23 @@ function appendPhotoRawDebug(parsed, statusEl) {
 /* Calls the parse-bottle-label Edge Function, which holds the Anthropic key
    server-side and runs Sonnet with a cached system prompt + catalog.
 
-   Two-pass strategy:
-     Pass 1: send ONLY the carried items (what the venue actually stocks).
-             ~99% of labels resolve here, with a smaller prompt and a
-             stable cache prefix.
-     Pass 2: only fires when Pass 1 returns no candidates AND null
-             matchedId. Sends the broader catalog so genuinely-novel
-             items still resolve. Slower path, rare hit.
+   Single-pass strategy (v1.34): one call with a large carried payload +
+   a smaller "other catalog" payload. The earlier two-pass approach was
+   simpler in theory but the carried-only first pass would miss any
+   bottle past the alphabetical cap (e.g. Ketel One at position ~3,600
+   of 8,743 carried items never reached the prompt window). Single-pass
+   with a 4000 cap and dedup gets the bulk of carried into one prompt
+   that Claude can actually search.
+
+   Dedup: collapses duplicate craftable: SKU rows by (name|size|upc) so
+   8 identical "Ketel One" rows become 1 prompt entry. itemMaster is
+   untouched — only the AI payload collapses.
 
    Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on
    network/upstream errors (NOT on a clean "no match" — that's a valid
    result, the picker UI handles it).
 
-   Accepts either a single dataUrl or an array (multi-photo capture).
-*/
+   Accepts either a single dataUrl or an array (multi-photo capture). */
 async function parseLabelWithClaude(imagesInput) {
   const images = Array.isArray(imagesInput) ? imagesInput : [imagesInput];
 
@@ -12321,6 +12328,26 @@ async function parseLabelWithClaude(imagesInput) {
     return String(a.name || '').localeCompare(String(b.name || ''));
   };
 
+  // Dedup before sending to Claude. Catalogs imported from craftable: /
+  // R365 frequently have 5–17 duplicate rows per real product (same name,
+  // same UPC, same size). Sending all of them clutters the prompt and
+  // produces a candidate picker full of identical-looking options. Keys
+  // on (name|size|upc) — items that legitimately differ in any of those
+  // fields stay separate.
+  const dedupePayload = function (rows) {
+    const seen = new Set();
+    const out = [];
+    for (const it of rows) {
+      const key = (String(it.name || '').trim().toLowerCase()) + '|' +
+                  (String(it.size || '').trim().toLowerCase()) + '|' +
+                  (String(it.upc || '').trim());
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(it);
+    }
+    return out;
+  };
+
   const carriedSetRef = (typeof carriedSet !== 'undefined' && carriedSet) ? carriedSet : new Set();
   const allItems = (itemMaster || []).slice();
   const carried = [];
@@ -12329,55 +12356,42 @@ async function parseLabelWithClaude(imagesInput) {
     if (carriedSetRef.has(String(it.id))) carried.push(it);
     else other.push(it);
   }
-  const carriedPayload = carried.sort(sortByName).slice(0, 500).map(toPayload);
-  const otherPayload   = other.sort(sortByName).slice(0, 500).map(toPayload);
+
+  // Caps chosen to fit within Sonnet 4.6's 200K context. Math: ~25 tokens
+  // per catalog line, 4000 carried + 1000 other = 125K tokens for the
+  // catalog block, leaving ~75K for system prompt + image + response.
+  // Empirically the user's deduped carried fits well under 4000.
+  const carriedPayload = dedupePayload(carried.sort(sortByName)).slice(0, 4000).map(toPayload);
+  const otherPayload   = dedupePayload(other.sort(sortByName)).slice(0, 1000).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
 
-  const callEdge = async function (carriedArr, catalogArr) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Edge Functions require an apikey or Authorization header. The
-        // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
-        // secret, not on Supabase auth.
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-      },
-      body: JSON.stringify({
-        // Send BOTH fields so this works against either Edge Function
-        // version during a deploy gap. Old function reads `image` and
-        // ignores `images`; new function reads `images` and ignores
-        // `image`. Either order of (push HTML / redeploy function) is safe.
-        image: images[0],
-        images: images,
-        carried: carriedArr,
-        catalog: catalogArr,
-      }),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(function () { return ''; });
-      throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
-    }
-    return await res.json();
-  };
-
-  // Pass 1: carried-only. Catalog field is omitted so the Edge Function
-  // renders only the carried section in the prompt — smaller, faster,
-  // stable cache prefix.
-  const pass1 = await callEdge(carriedPayload, []);
-  const pass1HasMatch = !!(pass1 && (
-    (pass1.candidates && pass1.candidates.length > 0) ||
-    pass1.matchedId
-  ));
-  if (pass1HasMatch) return pass1;
-
-  // Pass 2 only on a true miss. Send the broader catalog. Carried still
-  // included so Claude sees the same priority ordering and can flip to a
-  // carried row if it second-guesses itself.
-  const pass2 = await callEdge(carriedPayload, otherPayload);
-  return pass2;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // Edge Functions require an apikey or Authorization header. The
+      // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
+      // secret, not on Supabase auth.
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+    },
+    body: JSON.stringify({
+      // Send BOTH image and images so this works against either Edge
+      // Function version during a deploy gap. Old function reads `image`,
+      // new function reads `images` (preferred). Either order of
+      // (push HTML / redeploy function) is safe.
+      image: images[0],
+      images: images,
+      carried: carriedPayload,
+      catalog: otherPayload,
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(function () { return ''; });
+    throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
+  }
+  return await res.json();
 }
 
 /* ---------- parsePhotoLabel WRAPPER ---------- */

@@ -119,12 +119,20 @@ const SYSTEM_PROMPT =
   'So when in doubt between two near-equal SKUs (especially same-name ' +
   'different-size, e.g. 750ml vs 1.5L), include BOTH in candidates rather ' +
   'than guessing — the counter can see the bottle.\n\n' +
-  'MATCHING RULES — be liberal, not conservative:\n' +
+  'MATCHING RULES — accuracy over coverage:\n' +
   '- Match across abbreviations, missing words, reordering. "818 Reposado" ' +
   'MUST match "818 Tequila Reposado" — the missing "Tequila" is implicit ' +
   'from the bottle. Same for "Don Julio 1942" matching "Don Julio Anejo 1942".\n' +
   '- UPC match (label barcode == catalog UPC) is definitive and overrides ' +
   'name/brand differences.\n' +
+  '- ANTI-CONFABULATION: The catalog you receive may be incomplete (a venue ' +
+  'subset). If the label\'s brand and product name are NOT clearly listed in ' +
+  'either CARRIED or OTHER CATALOG, return matchedId=null AND candidates=[]. ' +
+  'Do NOT pick a "similar but different" product just to give an answer. ' +
+  'Example: a Ketel One photo with NO "Ketel" entry in the catalog must ' +
+  'return null/empty — never match it to "Tito\'s" or "Egg Nog" because ' +
+  'they happen to be 1L bottles. The phone surfaces null/empty as a clean ' +
+  '"no catalog match" UI; a wrong match is a counted-wrong-bottle bug.\n' +
   '- SIZE COMES FROM THE LABEL, NOT THE CATALOG. If the label clearly shows ' +
   '"1.5L" or "3L" or "1L", return that exact value in the size field even ' +
   'when the matched catalog row says "750ml". DO NOT substitute the ' +
@@ -135,12 +143,13 @@ const SYSTEM_PROMPT =
   'If you cannot tell from the photos, include both in candidates.\n' +
   '- Confidence: "high" for UPC matches or near-exact name matches; ' +
   '"medium" for fuzzy/partial matches where brand and product type clearly ' +
-  'align; "low" for guesses. Withholding a match the counter can clearly ' +
-  'see costs them an inventory row — err on the side of matching.\n' +
+  'align; "low" for guesses (and prefer null over a "low" confidence guess).\n' +
   '- Output `name` and `brand` using the LABEL\'s spelling, not the ' +
   'catalog\'s. matchedId still points to the catalog row.\n\n' +
   "Use empty strings (not null) for label fields you can't read.\n" +
-  'Use null for matchedId AND empty array for candidates only when no row in either list plausibly matches.';
+  'Use null for matchedId AND empty array for candidates whenever the bottle ' +
+  'in the photo is not clearly represented in either list — the phone has a ' +
+  'first-class "no catalog match" path that handles this gracefully.';
 
 interface CatalogItem {
   id: string;
