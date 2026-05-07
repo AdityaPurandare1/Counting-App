@@ -69,22 +69,63 @@ function reject(status: number, message: string): Response {
   return jsonResponse(status, { error: message });
 }
 
+// App identity tag we write into auth.users.user_metadata.apps so we can
+// distinguish Counting-App users from sibling apps (e.g. Keva) sharing
+// this Supabase project. Multi-app users have multiple entries in this
+// array; smart-delete checks it before tearing down the auth account.
+const APP_TAG = 'kount';
+
 // auth.users has no PostgREST exposure by default, so the cleanest way to
 // resolve email → user_id is via the admin listUsers API. For org sizes
 // this app targets (tens to low-hundreds of users) one paged scan is
 // fine; if user count grows we can switch to storing auth_user_id on
 // app_users and avoiding the lookup.
-async function findAuthUserIdByEmail(admin: ReturnType<typeof createClient>, email: string): Promise<string | null> {
+async function findAuthUserByEmail(
+  admin: ReturnType<typeof createClient>,
+  email: string,
+): Promise<{ id: string; user_metadata: Record<string, unknown> } | null> {
   const target = email.toLowerCase();
-  // Page through; stop at first match. perPage max is 1000 in Supabase.
   for (let page = 1; page <= 10; page++) {
     const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 200 });
     if (error) throw new Error('listUsers failed: ' + error.message);
     const hit = data.users.find((u) => (u.email || '').toLowerCase() === target);
-    if (hit) return hit.id;
+    if (hit) return { id: hit.id, user_metadata: (hit.user_metadata || {}) as Record<string, unknown> };
     if (data.users.length < 200) break;  // last page
   }
   return null;
+}
+
+// Convenience for the existing single-purpose callers.
+async function findAuthUserIdByEmail(admin: ReturnType<typeof createClient>, email: string): Promise<string | null> {
+  const u = await findAuthUserByEmail(admin, email);
+  return u?.id ?? null;
+}
+
+// Returns the app-tags array from user metadata, normalized. Treats
+// missing / non-array values as empty.
+function appTagsFromMetadata(meta: Record<string, unknown> | null | undefined): string[] {
+  if (!meta) return [];
+  const v = (meta as { apps?: unknown }).apps;
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === 'string');
+}
+
+// Adds APP_TAG to the apps array if not already present. Returns the
+// merged metadata to pass to updateUserById. Idempotent.
+function metadataWithKountTag(existing: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const base = (existing || {}) as Record<string, unknown>;
+  const tags = appTagsFromMetadata(base);
+  if (tags.includes(APP_TAG)) return base;
+  return { ...base, apps: [...tags, APP_TAG] };
+}
+
+// Removes APP_TAG from the apps array. Returns the updated metadata.
+// Idempotent (no-op if APP_TAG isn't in the list).
+function metadataWithoutKountTag(existing: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  const base = (existing || {}) as Record<string, unknown>;
+  const tags = appTagsFromMetadata(base);
+  if (!tags.includes(APP_TAG)) return base;
+  return { ...base, apps: tags.filter((t) => t !== APP_TAG) };
 }
 
 Deno.serve(async (req) => {
@@ -195,8 +236,11 @@ async function handleInvite(
 
   // Send the invite email. The user clicks the link → lands on the app →
   // Supabase establishes their session → app prompts for password.
+  // We tag user_metadata.apps with APP_TAG so we can later distinguish
+  // Counting-App users from sibling-app users on the shared project.
   const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
     redirectTo: payload.redirect_to,
+    data: metadataWithKountTag(null),  // becomes user_metadata
   });
 
   if (inviteErr || !invited.user) {
@@ -206,9 +250,11 @@ async function handleInvite(
     //   (b) They're in auth.users but NOT in app_users → just add them to
     //       Counting-App. They already have a password from the other app
     //       context; no invite email is needed (and would fail anyway).
+    //       We MERGE the kount tag into their existing user_metadata.apps
+    //       so a future cross-app delete can see they're multi-app.
     if (/already.*registered|already.*exist|user_repeated_signup/i.test(inviteErr?.message || '')) {
-      const existingUserId = await findAuthUserIdByEmail(admin, email);
-      if (!existingUserId) {
+      const existing = await findAuthUserByEmail(admin, email);
+      if (!existing) {
         return reject(500, 'Auth says user exists but lookup failed: ' + (inviteErr?.message || 'unknown'));
       }
       const { data: existingProfile, error: profileLookupErr } = await admin
@@ -222,19 +268,29 @@ async function handleInvite(
       if (existingProfile) {
         return reject(409, 'User already in this app — use Edit instead');
       }
-      // Add to app_users. No invite email; the user's existing
-      // credentials from the other app context work as-is.
+      // Merge kount tag without disturbing other-app tags.
+      const mergedMeta = metadataWithKountTag(existing.user_metadata);
+      const { error: tagErr } = await admin.auth.admin.updateUserById(existing.id, {
+        user_metadata: mergedMeta,
+      });
+      if (tagErr) {
+        // Don't hard-fail — tagging is observability, not security. Log
+        // and proceed to the app_users insert.
+        console.warn('[admin-user-mgmt] tag merge failed (continuing):', tagErr);
+      }
       const { error: linkErr } = await admin.from('app_users').insert(profileRow);
       if (linkErr) {
         return reject(500, 'Failed to add existing user to app_users: ' + linkErr.message);
       }
-      console.log('[admin-user-mgmt] linked existing auth user by', callerEmail, '→', email);
+      const otherApps = appTagsFromMetadata(existing.user_metadata).filter((t) => t !== APP_TAG);
+      console.log('[admin-user-mgmt] linked existing auth user by', callerEmail, '→', email, 'other_apps=', otherApps);
       return jsonResponse(200, {
         ok: true,
         email,
-        user_id: existingUserId,
+        user_id: existing.id,
         action: 'invite',
-        linked_existing_user: true,  // tells UI: no email sent, they already have a password
+        linked_existing_user: true,
+        other_apps: otherApps,  // tells UI which sibling apps the user is also in
       });
     }
     return reject(500, 'Invite failed: ' + (inviteErr?.message || 'unknown'));
@@ -319,16 +375,43 @@ async function handleDelete(
   if (!email) return reject(400, 'email required');
   if (email === callerEmail) return reject(400, 'Cannot delete yourself');
 
-  const userId = await findAuthUserIdByEmail(admin, email);
-  if (userId) {
-    const { error: delErr } = await admin.auth.admin.deleteUser(userId);
-    if (delErr) return reject(500, 'auth delete failed: ' + delErr.message);
+  const existing = await findAuthUserByEmail(admin, email);
+
+  // Smart delete based on the user_metadata.apps tag.
+  //   - If the auth user has tags for OTHER apps (e.g. ['kount','keva'])
+  //     → preserve auth.users so they keep working in those apps; just
+  //     strip the kount tag and remove our app_users row.
+  //   - If the auth user is kount-only (or has no tag at all) → remove
+  //     auth.users entirely as before.
+  // Either branch always removes the app_users row.
+  let keptAuthAccount = false;
+  let otherApps: string[] = [];
+  if (existing) {
+    const tags = appTagsFromMetadata(existing.user_metadata);
+    otherApps = tags.filter((t) => t !== APP_TAG);
+    if (otherApps.length > 0) {
+      // Multi-app user — keep their auth account, just untag kount.
+      const { error: untagErr } = await admin.auth.admin.updateUserById(existing.id, {
+        user_metadata: metadataWithoutKountTag(existing.user_metadata),
+      });
+      if (untagErr) console.warn('[admin-user-mgmt] untag failed (continuing):', untagErr);
+      keptAuthAccount = true;
+    } else {
+      const { error: delErr } = await admin.auth.admin.deleteUser(existing.id);
+      if (delErr) return reject(500, 'auth delete failed: ' + delErr.message);
+    }
   }
-  // Always remove the app_users row even if no auth user was found —
-  // covers legacy/in-flight records cleanly.
+  // Always remove the app_users row.
   await admin.from('app_users').delete().eq('email', email);
-  console.log('[admin-user-mgmt] delete by', callerEmail, '→', email);
-  return jsonResponse(200, { ok: true, email, action: 'delete' });
+  console.log('[admin-user-mgmt] delete by', callerEmail, '→', email,
+    keptAuthAccount ? '(kept auth, also in ' + otherApps.join(',') + ')' : '(full delete)');
+  return jsonResponse(200, {
+    ok: true,
+    email,
+    action: 'delete',
+    kept_auth_account: keptAuthAccount,
+    other_apps: otherApps,
+  });
 }
 
 async function handleResetPassword(
