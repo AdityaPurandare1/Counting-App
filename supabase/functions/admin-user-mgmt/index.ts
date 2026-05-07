@@ -185,21 +185,6 @@ async function handleInvite(
   }
   const venueIds = Array.isArray(payload.venue_ids) ? payload.venue_ids : [];
 
-  // Send the invite email. The user clicks the link → lands on the app →
-  // Supabase establishes their session → app prompts for password.
-  const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: payload.redirect_to,
-  });
-  if (inviteErr || !invited.user) {
-    // 422 from Supabase usually means "user already exists" — surface as 409
-    if (/already.*registered|already.*exist/i.test(inviteErr?.message || '')) {
-      return reject(409, 'User already exists in auth — use update_profile or reset_password');
-    }
-    return reject(500, 'Invite failed: ' + (inviteErr?.message || 'unknown'));
-  }
-
-  // Provision the app_users row. Upsert so a re-invite of someone whose
-  // app_users row was created by hand still lands consistently.
   const profileRow = {
     email,
     name: payload.name || email,
@@ -207,6 +192,57 @@ async function handleInvite(
     venue_ids: venueIds,
     is_active: true,
   };
+
+  // Send the invite email. The user clicks the link → lands on the app →
+  // Supabase establishes their session → app prompts for password.
+  const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
+    redirectTo: payload.redirect_to,
+  });
+
+  if (inviteErr || !invited.user) {
+    // "Already registered" means the email exists in auth.users — possibly
+    // from a sibling app on the same Supabase project. Two sub-cases:
+    //   (a) They're ALSO in our app_users → true duplicate, 409.
+    //   (b) They're in auth.users but NOT in app_users → just add them to
+    //       Counting-App. They already have a password from the other app
+    //       context; no invite email is needed (and would fail anyway).
+    if (/already.*registered|already.*exist|user_repeated_signup/i.test(inviteErr?.message || '')) {
+      const existingUserId = await findAuthUserIdByEmail(admin, email);
+      if (!existingUserId) {
+        return reject(500, 'Auth says user exists but lookup failed: ' + (inviteErr?.message || 'unknown'));
+      }
+      const { data: existingProfile, error: profileLookupErr } = await admin
+        .from('app_users')
+        .select('email')
+        .eq('email', email)
+        .maybeSingle();
+      if (profileLookupErr) {
+        return reject(500, 'app_users lookup failed: ' + profileLookupErr.message);
+      }
+      if (existingProfile) {
+        return reject(409, 'User already in this app — use Edit instead');
+      }
+      // Add to app_users. No invite email; the user's existing
+      // credentials from the other app context work as-is.
+      const { error: linkErr } = await admin.from('app_users').insert(profileRow);
+      if (linkErr) {
+        return reject(500, 'Failed to add existing user to app_users: ' + linkErr.message);
+      }
+      console.log('[admin-user-mgmt] linked existing auth user by', callerEmail, '→', email);
+      return jsonResponse(200, {
+        ok: true,
+        email,
+        user_id: existingUserId,
+        action: 'invite',
+        linked_existing_user: true,  // tells UI: no email sent, they already have a password
+      });
+    }
+    return reject(500, 'Invite failed: ' + (inviteErr?.message || 'unknown'));
+  }
+
+  // Normal new-user path: provision the app_users row. Upsert so a re-
+  // invite of someone whose app_users row was created by hand still
+  // lands consistently.
   const { error: profErr } = await admin.from('app_users').upsert(profileRow, { onConflict: 'email' });
   if (profErr) {
     // Best-effort rollback so we don't leave an orphaned auth user. If the
