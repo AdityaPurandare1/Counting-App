@@ -75,24 +75,21 @@ function reject(status: number, message: string): Response {
 // array; smart-delete checks it before tearing down the auth account.
 const APP_TAG = 'kount';
 
-// auth.users has no PostgREST exposure by default, so the cleanest way to
-// resolve email → user_id is via the admin listUsers API. For org sizes
-// this app targets (tens to low-hundreds of users) one paged scan is
-// fine; if user count grows we can switch to storing auth_user_id on
-// app_users and avoiding the lookup.
+// auth.users isn't exposed via PostgREST by default. Migration 0018 added
+// SECURITY DEFINER RPCs (find_auth_user_by_email + list_auth_user_emails)
+// granted only to service_role — Edge Functions invoke them from the admin
+// client. This replaced the prior admin.auth.admin.listUsers() approach,
+// which was O(n) (paged scan through every auth user) and occasionally
+// returned "Database error finding users" on multi-app projects.
 async function findAuthUserByEmail(
   admin: ReturnType<typeof createClient>,
   email: string,
 ): Promise<{ id: string; user_metadata: Record<string, unknown> } | null> {
-  const target = email.toLowerCase();
-  for (let page = 1; page <= 10; page++) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 200 });
-    if (error) throw new Error('listUsers failed: ' + error.message);
-    const hit = data.users.find((u) => (u.email || '').toLowerCase() === target);
-    if (hit) return { id: hit.id, user_metadata: (hit.user_metadata || {}) as Record<string, unknown> };
-    if (data.users.length < 200) break;  // last page
-  }
-  return null;
+  const { data, error } = await admin.rpc('find_auth_user_by_email', { p_email: email.toLowerCase() });
+  if (error) throw new Error('find_auth_user_by_email rpc failed: ' + error.message);
+  const row = (data as Array<{ user_id: string; user_metadata: Record<string, unknown> | null }> | null)?.[0];
+  if (!row) return null;
+  return { id: row.user_id, user_metadata: (row.user_metadata || {}) as Record<string, unknown> };
 }
 
 // Convenience for the existing single-purpose callers.
@@ -515,17 +512,14 @@ async function handleMigrateLegacy(
   if (appErr) return reject(500, 'Failed to load app_users: ' + appErr.message);
   const appUsers = (appUsersData || []) as Array<{ email: string; name: string | null; role: Role; venue_ids: string[] | null; is_active: boolean }>;
 
-  // 2. Pull all auth.users emails. Same paging cap as findAuthUserIdByEmail
-  // (10 pages × 200 = 2000); a hospitality org is well under this.
-  const authEmails = new Set<string>();
-  for (let page = 1; page <= 10; page++) {
-    const { data, error } = await admin.auth.admin.listUsers({ page, perPage: 200 });
-    if (error) return reject(500, 'listUsers failed: ' + error.message);
-    for (const u of data.users) {
-      if (u.email) authEmails.add(u.email.toLowerCase());
-    }
-    if (data.users.length < 200) break;
-  }
+  // 2. Pull all auth.users emails via the SECURITY DEFINER RPC from
+  // migration 0018. Single indexed query — replaces the prior paged
+  // listUsers scan that occasionally hit "Database error finding users".
+  const { data: authRows, error: authErr } = await admin.rpc('list_auth_user_emails');
+  if (authErr) return reject(500, 'list_auth_user_emails rpc failed: ' + authErr.message);
+  const authEmails = new Set<string>(
+    ((authRows as Array<{ email: string }> | null) || []).map((r) => r.email),
+  );
 
   // 3. Diff.
   const needsInvite = appUsers.filter((u) => !authEmails.has((u.email || '').toLowerCase()));
