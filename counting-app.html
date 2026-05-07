@@ -2109,6 +2109,9 @@ html, body {
       <input class="form-input" id="loginPassword" placeholder="Your password" type="password" autocomplete="current-password">
     </div>
     <button class="submit-btn" onclick="handleLogin()">Sign in</button>
+    <button class="submit-btn" onclick="handleMagicLink()" style="margin-top:8px;background:transparent;color:var(--accent);border:1px solid var(--accent)">
+      Email me a sign-in link instead
+    </button>
     <p id="loginError" style="font-size:12px;color:var(--danger);text-align:center;margin-top:10px;display:none"></p>
     <p style="font-size:12px;text-align:center;margin-top:14px">
       <a href="#" onclick="handleForgotPassword();return false" style="color:var(--accent);text-decoration:none">Forgot your password?</a>
@@ -6279,6 +6282,48 @@ async function handleForgotPassword() {
   // existence to scrapers).
   errorEl.style.color = 'var(--text-muted)';
   errorEl.textContent = 'If that email is registered, a reset link is on its way.';
+  errorEl.style.display = 'block';
+  setTimeout(function () { errorEl.style.color = ''; }, 6000);
+}
+
+/* "Email me a sign-in link instead" — passwordless flow. Supabase sends
+   a one-time link; clicking it from the same browser establishes a
+   session via detectSessionInUrl. We pass shouldCreateUser:false so a
+   typo'd email doesn't accidentally provision an account when signups
+   are otherwise disabled. Vague success messaging either way to avoid
+   leaking which emails are registered. */
+async function handleMagicLink() {
+  const email = document.getElementById('loginEmail').value.trim().toLowerCase();
+  const errorEl = document.getElementById('loginError');
+  if (!email) {
+    errorEl.textContent = 'Type your email above first, then tap Email me a sign-in link.';
+    errorEl.style.color = '';
+    errorEl.style.display = 'block';
+    return;
+  }
+  if (!supabaseClient) {
+    errorEl.textContent = 'Auth not available — check your connection and try again.';
+    errorEl.style.color = '';
+    errorEl.style.display = 'block';
+    return;
+  }
+  try {
+    const { error } = await supabaseClient.auth.signInWithOtp({
+      email: email,
+      options: {
+        shouldCreateUser: false,
+        emailRedirectTo: window.location.origin + window.location.pathname,
+      },
+    });
+    if (error) {
+      console.warn('[auth] signInWithOtp failed:', error);
+      // Still vague — never disclose account existence.
+    }
+  } catch (e) {
+    console.warn('[auth] signInWithOtp threw:', e);
+  }
+  errorEl.style.color = 'var(--text-muted)';
+  errorEl.textContent = 'If that email is registered, a sign-in link is on its way. Click it from this same browser.';
   errorEl.style.display = 'block';
   setTimeout(function () { errorEl.style.color = ''; }, 6000);
 }
