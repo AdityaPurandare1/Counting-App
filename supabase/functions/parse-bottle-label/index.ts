@@ -25,19 +25,29 @@ import { corsHeaders } from '../_shared/cors.ts';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-6';
 
-// Structured output schema. Mirrors the field shape the mobile app's
-// parsePhotoLabel wrapper already expects from the OpenAI path so we can
-// drop this in without touching the form-population logic.
+// Structured output schema (v1.35 — label extraction only).
+//
+// Earlier versions asked Claude to also match against a venue catalog
+// payload. That produced confident-wrong matches whenever the target
+// bottle wasn't in the prompt window (alphabetical caps, dupes, etc).
+// The flow is now:
+//   1. Edge Function: extract label fields (no catalog, no matching)
+//   2. Phone:         counter searches inventory by typed name OR a
+//                     read-off-label UPC is looked up locally for a
+//                     definitive auto-pick.
+// matchedId/candidates are still in the schema as ALWAYS-EMPTY/null so
+// older phone clients (still expecting the fields) don't crash. The
+// matching responsibility is fully on the phone.
 const RESPONSE_SCHEMA = {
   type: 'object',
   properties: {
     name: {
       type: 'string',
-      description: "Product name from the label (e.g. 'Reposado'). Empty string if not visible.",
+      description: "Product name from the label (e.g. 'Reposado', 'Yellow Label Brut'). Empty string if not visible.",
     },
     brand: {
       type: 'string',
-      description: "Brand or producer (e.g. 'Don Julio', 'Heineken'). Empty string if not visible.",
+      description: "Brand or producer (e.g. 'Don Julio', 'Heineken', 'Veuve Clicquot'). Empty string if not visible.",
     },
     category: {
       type: 'string',
@@ -50,106 +60,69 @@ const RESPONSE_SCHEMA = {
     },
     size: {
       type: 'string',
-      description: "Bottle/container size with unit (e.g. '750ml', '1.75L', '12oz'). Empty string if not visible.",
+      description: "Bottle/container size with unit (e.g. '750ml', '1.75L', '12oz', '1L'). Empty string if not visible.",
     },
     details: {
       type: 'string',
-      description: 'Free-form additional details visible on the label that might disambiguate (region, varietal, etc.).',
-    },
-    matchedId: {
-      // anyOf instead of type: ['string', 'null'] — the array-of-types form
-      // isn't reliably accepted by Anthropic's strict JSON-schema validator,
-      // even though it's valid per the JSON Schema spec. anyOf is the
-      // documented-supported way to express nullability.
-      anyOf: [{ type: 'string' }, { type: 'null' }],
-      description: 'Catalog id of your single best match (= candidates[0].id when candidates is non-empty). null when no catalog row is plausible.',
-    },
-    candidates: {
-      type: 'array',
-      description: 'Up to 5 plausible catalog rows ranked by confidence (best first). Empty array when nothing matches. The phone uses this for ambiguity resolution: if 2+ have UPCs the counter picks; if 0 have UPCs the counter picks. Be liberal — when a label could plausibly be one of two SKUs (e.g. 750ml vs 1.5L of the same wine), include both.',
-      maxItems: 5,
-      items: {
-        type: 'object',
-        properties: {
-          id:    { type: 'string',  description: 'Catalog id (must be one from the lists above).' },
-          name:  { type: 'string',  description: 'Catalog name.' },
-          brand: { type: 'string',  description: 'Catalog brand. Empty string if not in the catalog row.' },
-          size:  { type: 'string',  description: 'Catalog size. Empty string if not in the catalog row.' },
-          upc:   { type: 'string',  description: 'Catalog UPC. Empty string when the catalog row has none.' },
-        },
-        required: ['id', 'name', 'brand', 'size', 'upc'],
-        additionalProperties: false,
-      },
+      description: 'Free-form additional details visible on the label that disambiguate (varietal, region, age statement, expression, etc.).',
     },
     upc: {
       type: 'string',
-      description: 'UPC/barcode for the matched catalog row. If matchedId is set and that row has a [UPC ...] entry, copy the digits exactly. If you can read a UPC from the label itself, return that. Empty string when neither is available.',
+      description: 'UPC/barcode digits read from the label or back of the bottle. Empty string if no barcode is visible or readable.',
     },
     confidence: {
       type: 'string',
       enum: ['high', 'medium', 'low'],
-      description: 'How confident you are in the match. high = UPC or near-exact name match, medium = fuzzy/partial name match, low = guess.',
+      description: 'How confident you are that the extracted fields are correct. high = label is clear and you read it cleanly; medium = some fields fuzzy; low = mostly guessing from limited visual info.',
+    },
+    // Stub fields kept for back-compat with v1.32-v1.34 phone clients
+    // that still expect these in the response. Always null/empty in v1.35+.
+    matchedId: {
+      anyOf: [{ type: 'string' }, { type: 'null' }],
+      description: 'DEPRECATED — always null. Catalog matching now happens on the phone.',
+    },
+    candidates: {
+      type: 'array',
+      description: 'DEPRECATED — always empty. Catalog matching now happens on the phone.',
+      maxItems: 0,
+      items: { type: 'object', additionalProperties: true },
     },
   },
-  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'matchedId', 'candidates', 'upc', 'confidence'],
+  required: ['name', 'brand', 'category', 'vintage', 'size', 'details', 'upc', 'confidence', 'matchedId', 'candidates'],
   additionalProperties: false,
 };
 
 const SYSTEM_PROMPT =
-  'You are a bar/restaurant inventory assistant. Given one or more photos of ' +
-  'a wine, liquor, or beer label/bottle, extract the key fields AND match ' +
-  'against the provided catalog.\n\n' +
-  'MULTIPLE PHOTOS: You may receive 1–3 photos of the SAME bottle taken from ' +
-  'different angles (e.g. front label + back label + neck/seal). Combine ' +
-  'information across all photos before deciding — vintage, UPC, importer ' +
-  'text, varietal, and size frequently appear on only one face.\n\n' +
-  'MATCHING PRIORITY (try in order, stop at first hit):\n' +
-  '1. CARRIED ITEMS — the venue\'s stocked list. Always preferred. If the ' +
-  'label plausibly matches a carried item, that is the match — even if ' +
-  'something in "Other catalog" looks like a closer name match.\n' +
-  '2. OTHER CATALOG — broader inventory the venue could carry but doesn\'t ' +
-  'currently. Only consider these when no carried item plausibly matches.\n' +
-  '3. NO MATCH — set matchedId to null AND candidates to []. The mobile app ' +
-  'will route this to a pending-items review queue. Still extract every ' +
-  'label field you can read.\n\n' +
-  'CANDIDATES (the array): include up to 5 catalog rows you considered ' +
-  'plausible, ranked best-first. matchedId MUST equal candidates[0].id when ' +
-  'candidates is non-empty. The phone disambiguates downstream — if 2+ ' +
-  'candidates have UPCs the counter picks; if 0 have UPCs the counter picks. ' +
-  'So when in doubt between two near-equal SKUs (especially same-name ' +
-  'different-size, e.g. 750ml vs 1.5L), include BOTH in candidates rather ' +
-  'than guessing — the counter can see the bottle.\n\n' +
-  'MATCHING RULES — accuracy over coverage:\n' +
-  '- Match across abbreviations, missing words, reordering. "818 Reposado" ' +
-  'MUST match "818 Tequila Reposado" — the missing "Tequila" is implicit ' +
-  'from the bottle. Same for "Don Julio 1942" matching "Don Julio Anejo 1942".\n' +
-  '- UPC match (label barcode == catalog UPC) is definitive and overrides ' +
-  'name/brand differences.\n' +
-  '- ANTI-CONFABULATION: The catalog you receive may be incomplete (a venue ' +
-  'subset). If the label\'s brand and product name are NOT clearly listed in ' +
-  'either CARRIED or OTHER CATALOG, return matchedId=null AND candidates=[]. ' +
-  'Do NOT pick a "similar but different" product just to give an answer. ' +
-  'Example: a Ketel One photo with NO "Ketel" entry in the catalog must ' +
-  'return null/empty — never match it to "Tito\'s" or "Egg Nog" because ' +
-  'they happen to be 1L bottles. The phone surfaces null/empty as a clean ' +
-  '"no catalog match" UI; a wrong match is a counted-wrong-bottle bug.\n' +
-  '- SIZE COMES FROM THE LABEL, NOT THE CATALOG. If the label clearly shows ' +
-  '"1.5L" or "3L" or "1L", return that exact value in the size field even ' +
-  'when the matched catalog row says "750ml". DO NOT substitute the ' +
-  'catalog\'s size onto the size field. The catalog size only helps you ' +
-  'pick the right SKU when multiple sizes exist for the same product.\n' +
-  '- When multiple catalog rows differ only by size (e.g. a 750ml SKU and ' +
-  'a 1.5L SKU of the same wine), match the SKU whose size matches the label. ' +
-  'If you cannot tell from the photos, include both in candidates.\n' +
-  '- Confidence: "high" for UPC matches or near-exact name matches; ' +
-  '"medium" for fuzzy/partial matches where brand and product type clearly ' +
-  'align; "low" for guesses (and prefer null over a "low" confidence guess).\n' +
-  '- Output `name` and `brand` using the LABEL\'s spelling, not the ' +
-  'catalog\'s. matchedId still points to the catalog row.\n\n' +
-  "Use empty strings (not null) for label fields you can't read.\n" +
-  'Use null for matchedId AND empty array for candidates whenever the bottle ' +
-  'in the photo is not clearly represented in either list — the phone has a ' +
-  'first-class "no catalog match" path that handles this gracefully.';
+  'You are a bar/restaurant inventory assistant. Your single job is to ' +
+  'READ a bottle label and return its visible fields as JSON. You do NOT ' +
+  'match against any catalog — the phone handles inventory matching ' +
+  'separately, locally, and authoritatively.\n\n' +
+  'MULTIPLE PHOTOS: You may receive 1–3 photos of the SAME bottle from ' +
+  'different angles (front label + back label + neck/seal). Combine ' +
+  'information across all photos — vintage, UPC, importer text, varietal, ' +
+  'and size frequently only appear on one face.\n\n' +
+  'WHAT TO EXTRACT:\n' +
+  '- name: the product name as it appears on the label (e.g. "Yellow Label", ' +
+  '"Reposado", "Anejo 1942"). Use the LABEL\'s spelling, not a normalized form.\n' +
+  '- brand: the producer/brand (e.g. "Veuve Clicquot", "Don Julio"). If the ' +
+  'label combines brand+product into one phrase, do your best to split.\n' +
+  '- category: the best-fit inventory category — wine, spirits, beer, food, other.\n' +
+  '- vintage: the year if printed (wines mainly).\n' +
+  '- size: the bottle volume as written on the label — "750ml", "1L", "1.5L", ' +
+  '"12oz", "375ml". DO NOT guess based on bottle shape; only return what you ' +
+  'can read.\n' +
+  '- details: anything extra that helps the counter ID the SKU — varietal, ' +
+  'region, age, expression, special edition. Free-form.\n' +
+  '- upc: if a barcode is in the photo and the digits are readable, return the ' +
+  'digits. Empty string if no barcode is visible.\n' +
+  '- confidence: how clean the read was (high / medium / low).\n\n' +
+  'WHAT NOT TO DO:\n' +
+  '- Do NOT invent fields you cannot see. Empty string is the correct answer ' +
+  'for unreadable / not-on-label fields.\n' +
+  '- Do NOT translate or normalize names ("Vodka" should stay "Vodka", not ' +
+  '"vodka"; "1L" should stay "1L", not "1000ml").\n' +
+  '- matchedId is ALWAYS null. candidates is ALWAYS []. These fields exist ' +
+  'only for client back-compat — the phone does its own matching.';
 
 interface CatalogItem {
   id: string;
@@ -181,43 +154,6 @@ function parseImage(input: string): { mediaType: string; data: string } {
   }
   // Raw base64 — assume JPEG (matches what canvas.toDataURL defaults to).
   return { mediaType: 'image/jpeg', data: input };
-}
-
-function renderCatalogLines(items: CatalogItem[], cap: number): string {
-  return items.slice(0, cap).map((item) => {
-    const parts = [item.id, '|', item.name];
-    if (item.brand) parts.push(' — ', item.brand);
-    if (item.size)  parts.push(' (', item.size, ')');
-    if (item.upc)   parts.push(' [UPC ', item.upc, ']');
-    return parts.join('');
-  }).join('\n');
-}
-
-function buildCatalogText(carried: CatalogItem[] | undefined, other: CatalogItem[] | undefined): string {
-  const sections: string[] = [];
-  // Two-tier rendering so Claude knows which list to try first. The
-  // venue's carried items get the full payload; the broader catalog is
-  // capped harder to bound prompt size. Include UPC inline so a label
-  // barcode can short-circuit name fuzziness.
-  if (carried && carried.length > 0) {
-    sections.push(
-      '=== CARRIED ITEMS (this venue stocks these — match these FIRST) ===\n' +
-      'Format: id|name — brand (size) [UPC code]\n' +
-      renderCatalogLines(carried, 250),
-    );
-  } else {
-    sections.push('=== CARRIED ITEMS ===\n(none — this venue\'s carried list is empty)');
-  }
-  if (other && other.length > 0) {
-    sections.push(
-      '=== OTHER CATALOG (broader inventory — match only when no carried item fits) ===\n' +
-      renderCatalogLines(other, 250),
-    );
-  }
-  if (sections.length === 0) {
-    return '(catalog empty — return matchedId: null)';
-  }
-  return sections.join('\n\n');
 }
 
 Deno.serve(async (req) => {
@@ -276,22 +212,25 @@ Deno.serve(async (req) => {
     };
   });
 
-  const catalogText = buildCatalogText(body.carried, body.catalog);
+  // v1.35: catalog payload is no longer used by the prompt. Older clients
+  // (v1.32-v1.34) still send `carried` and `catalog` in the body — we
+  // accept and ignore them for back-compat. Logged so we can confirm
+  // when those clients drop off.
+  if ((body.carried && body.carried.length) || (body.catalog && body.catalog.length)) {
+    console.log('[parse-bottle-label] legacy client sent catalog payload (ignored)');
+  }
 
-  // Cache placement: render order is tools → system → messages. We put the
-  // system prompt + catalog both in the system array, and put the
-  // cache_control marker on the LAST system block (the catalog). Because
-  // caching matches a prefix, this caches both blocks together using one
-  // breakpoint. The image lives in messages — outside the cached prefix —
-  // so it can change every call without invalidating anything.
+  // Cache placement: only the system prompt is cached now (no catalog).
+  // The system prompt is stable across calls so cache hits are cheap.
+  // The image lives in messages — outside the cached prefix — and
+  // changes every call.
   const requestBody = {
     model: MODEL,
     max_tokens: 1024,
     system: [
-      { type: 'text', text: SYSTEM_PROMPT },
       {
         type: 'text',
-        text: catalogText,
+        text: SYSTEM_PROMPT,
         cache_control: { type: 'ephemeral' },
       },
     ],
@@ -309,8 +248,8 @@ Deno.serve(async (req) => {
           {
             type: 'text',
             text: imageBlocks.length > 1
-              ? 'Analyze these ' + imageBlocks.length + ' photos of the same bottle (different angles/labels) and return JSON matching the schema. Combine information across the photos. Use the catalog above to populate candidates and matchedId when confident.'
-              : 'Analyze this label and return JSON matching the schema. Use the catalog above to populate candidates and matchedId when confident.',
+              ? 'Read these ' + imageBlocks.length + ' photos of the same bottle (front/back/neck angles) and return JSON of the visible label fields. Combine information across the photos. Do NOT match against any catalog — the phone does that.'
+              : 'Read this label and return JSON of the visible fields. Do NOT match against any catalog — the phone does that.',
           },
         ],
       },

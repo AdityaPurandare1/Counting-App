@@ -3034,7 +3034,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.34';
+const APP_VERSION = '1.35';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -12051,102 +12051,122 @@ async function parseLabelWithOpenAI(imageDataUrl) {
    The OpenAI fallback path doesn't return candidates; it falls back to the
    single-match branch via parsed.matchedId. */
 function populatePhotoFormFromParsed(parsed, statusEl) {
-  var nameInput = document.getElementById('photoName');
+  // v1.35: label-extraction-only flow. Edge Function returns just what
+  // it READ off the label. Catalog matching is local:
+  //   1. If parsed.upc is set, look it up in itemMaster:
+  //        · 1 match → auto-pick (UPC = guaranteed SKU)
+  //        · 2+ matches (catalog dupes) → show picker
+  //        · 0 matches → keep label-read UPC visible, counter searches
+  //   2. No UPC → pre-fill name/size/details, counter searches by typing
+  //
+  // No more AI matching against a catalog — that produced confabulations
+  // for items past the alphabetical cap (Ketel One, Sunny, etc).
+  parsed = parsed || {};
 
-  // Normalize candidates. OpenAI/Tesseract paths skip this field, so build
-  // a synthetic single-element list from matchedId for shape parity.
-  var candidates = Array.isArray(parsed && parsed.candidates) ? parsed.candidates.slice() : [];
-  if (candidates.length === 0 && parsed && parsed.matchedId) {
-    var legacyItem = itemMaster.find(function (x) { return String(x.id) === String(parsed.matchedId); });
-    if (legacyItem) {
-      candidates = [{
-        id: String(legacyItem.id),
-        name: legacyItem.name || '',
-        brand: legacyItem.brand || '',
-        size: legacyItem.size || '',
-        upc: legacyItem.upc || '',
-      }];
-    }
-  }
+  var nameInput  = document.getElementById('photoName');
+  var catSelect  = document.getElementById('photoCategory');
+  var detailsInp = document.getElementById('photoDetails');
 
-  // Resolve which candidate (if any) to apply automatically.
-  var autoChoice = null;
-  var needsPicker = false;
-  if (candidates.length === 1) {
-    autoChoice = candidates[0];
-  } else if (candidates.length >= 2) {
-    var withUpc = candidates.filter(function (c) { return c && c.upc && String(c.upc).trim(); });
-    if (withUpc.length === 1) {
-      autoChoice = withUpc[0];
-    } else {
-      // 0 or 2+ with UPC → ambiguous, counter picks.
-      needsPicker = true;
-    }
-  }
-
-  // Stash the raw extraction (vintage, size on label, etc.) so the picker's
-  // selectCandidate() can apply it after the counter chooses.
   appState._photoParsed = parsed;
-
-  // Reset previous picker state regardless of branch — keeps the modal
-  // clean across consecutive photos.
   hidePhotoCandidatePicker();
 
-  if (needsPicker) {
-    showPhotoCandidatePicker(candidates, parsed, statusEl);
-    // Don't pre-fill the name — counter must choose. Fields populated by
-    // selectPhotoCandidate() once they tap a row.
-    nameInput.value = '';
-    delete nameInput.dataset.masterId;
-    delete nameInput.dataset.upc;
-    updatePhotoUpcDisplay('');
-    statusEl.textContent = 'Multiple matches — tap one to pick';
-    statusEl.style.animation = 'none';
-    statusEl.style.color = 'var(--warning)';
-    appendPhotoRawDebug(parsed, statusEl);
-    return;
+  // Build a "Brand Name" display string. Drop brand if it's already in name.
+  var rawName  = String(parsed.name  || '').trim();
+  var rawBrand = String(parsed.brand || '').trim();
+  var displayName = rawName;
+  if (rawBrand && rawName && rawName.toLowerCase().indexOf(rawBrand.toLowerCase()) === -1) {
+    displayName = (rawBrand + ' ' + rawName).trim();
+  } else if (!rawName && rawBrand) {
+    displayName = rawBrand;
   }
 
-  if (autoChoice) {
-    applyPhotoCandidate(autoChoice, parsed, statusEl);
-    appendPhotoRawDebug(parsed, statusEl);
-    return;
-  }
-
-  // No candidates → free-text + flag for admin queue.
-  var displayName = parsed && parsed.name ? parsed.name : '';
-  if (parsed && parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
-    displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
-  }
+  // Apply baseline label fields. Overridden by applyPhotoCandidate below
+  // if a UPC match is found.
   nameInput.value = displayName;
   delete nameInput.dataset.masterId;
-  // Even with no catalog match, Claude may have read a UPC off the label.
-  // Surface it — that UPC alone can be the key to admin linking later.
-  var labelUpc = parsed && parsed.upc ? String(parsed.upc).trim() : '';
-  if (labelUpc) nameInput.dataset.upc = labelUpc;
-  else delete nameInput.dataset.upc;
-  updatePhotoUpcDisplay(labelUpc);
-  if (parsed && parsed.category) document.getElementById('photoCategory').value = parsed.category;
-
+  if (parsed.category) catSelect.value = parsed.category;
   var bits = [];
-  if (parsed && parsed.vintage) bits.push(parsed.vintage);
-  if (parsed && parsed.size) bits.push(parsed.size);
-  if (parsed && parsed.details) bits.push(parsed.details);
-  document.getElementById('photoDetails').value = bits.join(' · ');
+  if (parsed.vintage) bits.push(parsed.vintage);
+  if (parsed.size)    bits.push(parsed.size);
+  if (parsed.details) bits.push(parsed.details);
+  detailsInp.value = bits.join(' · ');
 
-  statusEl.textContent = 'AI extracted — no catalog match. Edit/search below.' + (labelUpc ? ' UPC: ' + labelUpc : '');
-  statusEl.style.animation = 'none';
-  statusEl.style.color = 'var(--warning)';
+  // Local UPC lookup — the only auto-match path now.
+  var labelUpc = parsed.upc ? String(parsed.upc).trim() : '';
+  if (labelUpc) {
+    var upcMatches = (itemMaster || []).filter(function (it) {
+      return it && it.upc && String(it.upc).trim() === labelUpc;
+    });
+
+    if (upcMatches.length === 1) {
+      // Single definitive match — auto-pick.
+      applyPhotoCandidate({
+        id: upcMatches[0].id,
+        name: upcMatches[0].name,
+        brand: upcMatches[0].brand,
+        size: upcMatches[0].size,
+        upc: upcMatches[0].upc,
+      }, parsed, statusEl);
+      appendPhotoRawDebug(parsed, statusEl);
+      return;
+    }
+
+    if (upcMatches.length >= 2) {
+      // Catalog dupes for this UPC — counter picks which row.
+      var dupeCandidates = upcMatches.map(function (it) {
+        return {
+          id: String(it.id),
+          name: it.name || '',
+          brand: it.brand || '',
+          size: it.size || '',
+          upc: it.upc || '',
+        };
+      });
+      showPhotoCandidatePicker(dupeCandidates, parsed, statusEl);
+      nameInput.dataset.upc = labelUpc;
+      updatePhotoUpcDisplay(labelUpc);
+      statusEl.textContent = 'UPC ' + labelUpc + ' matches ' + dupeCandidates.length + ' catalog rows — tap one';
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--warning)';
+      appendPhotoRawDebug(parsed, statusEl);
+      return;
+    }
+
+    // labelUpc set but no catalog row has it. Show the read UPC so admin
+    // can link it later; counter searches by name to pick the right item.
+    nameInput.dataset.upc = labelUpc;
+    updatePhotoUpcDisplay(labelUpc);
+    statusEl.textContent = 'Read UPC ' + labelUpc + ' — not in catalog. Search by name below.';
+    statusEl.style.animation = 'none';
+    statusEl.style.color = 'var(--warning)';
+    if (displayName && typeof onPhotoSearch === 'function') {
+      try { onPhotoSearch(displayName); } catch (e) {}
+    }
+    appState.photoIssue = 'not-in-craftable';
+    document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
+      chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
+    });
+    appendPhotoRawDebug(parsed, statusEl);
+    return;
+  }
+
+  // No UPC on label. Counter searches by typed name. Pre-trigger search
+  // suggestions from what we read.
+  delete nameInput.dataset.upc;
+  updatePhotoUpcDisplay('');
 
   if (displayName && typeof onPhotoSearch === 'function') {
     try { onPhotoSearch(displayName); } catch (e) {}
   }
 
-  // Flag for admin Issues page so a brand-new bottle gets reviewed.
-  appState.photoIssue = 'not-in-craftable';
-  document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
-    chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
-  });
+  if (displayName) {
+    statusEl.textContent = 'Read: "' + displayName + '"' + (parsed.size ? ' (' + parsed.size + ')' : '') + ' — pick from results below or edit name';
+    statusEl.style.color = 'var(--text-muted)';
+  } else {
+    statusEl.textContent = 'No label text detected — type the item name';
+    statusEl.style.color = 'var(--warning)';
+  }
+  statusEl.style.animation = 'none';
 
   appendPhotoRawDebug(parsed, statusEl);
 }
@@ -12290,79 +12310,25 @@ function appendPhotoRawDebug(parsed, statusEl) {
 
 /* ---------- parseLabelWithClaude ---------- */
 /* Calls the parse-bottle-label Edge Function, which holds the Anthropic key
-   server-side and runs Sonnet with a cached system prompt + catalog.
+   server-side and runs Sonnet on each photo.
 
-   Single-pass strategy (v1.34): one call with a large carried payload +
-   a smaller "other catalog" payload. The earlier two-pass approach was
-   simpler in theory but the carried-only first pass would miss any
-   bottle past the alphabetical cap (e.g. Ketel One at position ~3,600
-   of 8,743 carried items never reached the prompt window). Single-pass
-   with a 4000 cap and dedup gets the bulk of carried into one prompt
-   that Claude can actually search.
+   v1.35: label extraction ONLY. The Edge Function no longer needs the
+   catalog — it just reads what's on the bottle and returns the visible
+   fields. Catalog matching happens on the phone (local UPC lookup if
+   the label barcode is readable, or counter searches by typed name).
 
-   Dedup: collapses duplicate craftable: SKU rows by (name|size|upc) so
-   8 identical "Ketel One" rows become 1 prompt entry. itemMaster is
-   untouched — only the AI payload collapses.
+   Earlier versions sent a 4000-row catalog to Claude and asked for a
+   match. That broke whenever the target bottle was past the alphabetical
+   cap (Ketel One at row ~3600 worked; Sunny at row ~6400 didn't) and
+   produced "egg" / "Tito's" hallucinations. Letting Claude focus on
+   reading and the phone do the matching avoids both failure modes.
 
    Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on
-   network/upstream errors (NOT on a clean "no match" — that's a valid
-   result, the picker UI handles it).
+   network/upstream errors.
 
    Accepts either a single dataUrl or an array (multi-photo capture). */
 async function parseLabelWithClaude(imagesInput) {
   const images = Array.isArray(imagesInput) ? imagesInput : [imagesInput];
-
-  // Catalog row → wire payload. brand/size/upc default to '' rather than
-  // null so the Edge Function's strict JSON schema (required fields) accepts
-  // every row without per-row branching.
-  const toPayload = function (it) {
-    return {
-      id: String(it.id || ''),
-      name: String(it.name || ''),
-      brand: it.brand ? String(it.brand) : '',
-      size: it.size ? String(it.size) : '',
-      upc: it.upc ? String(it.upc) : '',
-    };
-  };
-  const sortByName = function (a, b) {
-    return String(a.name || '').localeCompare(String(b.name || ''));
-  };
-
-  // Dedup before sending to Claude. Catalogs imported from craftable: /
-  // R365 frequently have 5–17 duplicate rows per real product (same name,
-  // same UPC, same size). Sending all of them clutters the prompt and
-  // produces a candidate picker full of identical-looking options. Keys
-  // on (name|size|upc) — items that legitimately differ in any of those
-  // fields stay separate.
-  const dedupePayload = function (rows) {
-    const seen = new Set();
-    const out = [];
-    for (const it of rows) {
-      const key = (String(it.name || '').trim().toLowerCase()) + '|' +
-                  (String(it.size || '').trim().toLowerCase()) + '|' +
-                  (String(it.upc || '').trim());
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(it);
-    }
-    return out;
-  };
-
-  const carriedSetRef = (typeof carriedSet !== 'undefined' && carriedSet) ? carriedSet : new Set();
-  const allItems = (itemMaster || []).slice();
-  const carried = [];
-  const other = [];
-  for (const it of allItems) {
-    if (carriedSetRef.has(String(it.id))) carried.push(it);
-    else other.push(it);
-  }
-
-  // Caps chosen to fit within Sonnet 4.6's 200K context. Math: ~25 tokens
-  // per catalog line, 4000 carried + 1000 other = 125K tokens for the
-  // catalog block, leaving ~75K for system prompt + image + response.
-  // Empirically the user's deduped carried fits well under 4000.
-  const carriedPayload = dedupePayload(carried.sort(sortByName)).slice(0, 4000).map(toPayload);
-  const otherPayload   = dedupePayload(other.sort(sortByName)).slice(0, 1000).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
 
@@ -12383,8 +12349,10 @@ async function parseLabelWithClaude(imagesInput) {
       // (push HTML / redeploy function) is safe.
       image: images[0],
       images: images,
-      carried: carriedPayload,
-      catalog: otherPayload,
+      // No catalog payload — v1.35 Edge Function does label extraction
+      // only. Older Edge Functions accepted catalog and tried to match;
+      // sending an empty payload there would produce no match (which is
+      // correct — phone now matches locally regardless).
     }),
   });
   if (!res.ok) {
