@@ -2856,7 +2856,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.38';
+const APP_VERSION = '1.39';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4800,6 +4800,14 @@ async function joinNetworkedAudit(rawCode) {
   if (!code) { showToast('Enter a join code', 'warn'); return null; }
   if (!navigator.onLine) { showToast('Offline — cannot join an audit', 'error'); return null; }
 
+  // If the user is already in a different audit, leave it before joining
+  // the new one. Otherwise their kount_members row from the previous audit
+  // stays as a stale "still counting" entry. leaveNetworkedAudit reads
+  // appState.audit + appState.user before we overwrite them below.
+  if (appState.audit && appState.audit.supabaseId) {
+    leaveNetworkedAudit();
+  }
+
   const { data, error } = await supabaseRest.query(
     'kount_audits',
     'join_code=eq.' + encodeURIComponent(code) + '&status=eq.active&select=*'
@@ -5337,6 +5345,21 @@ function unsubscribeFromAuditRealtime() {
 }
 
 function leaveNetworkedAudit() {
+  // Capture identity before unsubscribing — appState may be cleared by the
+  // caller right after this returns (handleLogout nulls appState.user).
+  // The fetch is fire-and-forget; we don't block UI on it. If the row
+  // delete fails (offline, race), the stale row just stays — server-side
+  // heartbeat-based cleanup is a separate follow-up.
+  const auditId = appState.audit && appState.audit.supabaseId;
+  const email   = appState.user  && appState.user.email;
+  if (auditId && email && supabaseClient) {
+    supabaseRest.deleteRows(
+      'kount_members',
+      'audit_id=eq.' + encodeURIComponent(auditId) +
+      '&user_email=eq.' + encodeURIComponent(email)
+    ).catch(function (e) { console.warn('[audit] leave: delete member row failed', e); });
+  }
+
   unsubscribeFromAuditRealtime();
   hideOfflineBanner();
 }
