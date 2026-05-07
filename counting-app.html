@@ -2856,7 +2856,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.37';
+const APP_VERSION = '1.38';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4828,6 +4828,16 @@ async function joinNetworkedAudit(rawCode) {
     return null;
   }
   appState.currentVenue = matchingVenue;
+
+  // Pull any custom zones the audit creator (or other counters) added,
+  // BEFORE building the per-zone counts map below — so a zone added by
+  // another device is already in matchingVenue.zones when we initialize.
+  // Then start the realtime subscription so future zone INSERTs from
+  // OTHER devices land here too. Without these two calls, a counter who
+  // joins via join code never sees zones added after they joined.
+  try { await loadVenueZonesFromSupabase(audit.venue_id); } catch (e) {}
+  startVenueZonesRealtime(audit.venue_id);
+
   appState.currentZone = (matchingVenue.zones && matchingVenue.zones[0]) || null;
 
   // Join as a member — duplicate on reconnect is fine, 23505 swallowed
@@ -7007,6 +7017,12 @@ function startVenueZonesRealtime(venueId) {
         const v = appState.venues.find(x => x.id === venueId);
         if (v && row && !v.zones.includes(row.zone_name)) {
           v.zones.push(row.zone_name);
+          // If an audit is in progress, the new zone needs an empty counts
+          // bucket so addCountEntry / renderCountPage don't trip over an
+          // undefined key when the counter taps the new zone tab.
+          if (appState.audit && appState.audit.counts && !appState.audit.counts[row.zone_name]) {
+            appState.audit.counts[row.zone_name] = [];
+          }
           if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
         }
       })
