@@ -3034,7 +3034,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.32';
+const APP_VERSION = '1.33';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3630,6 +3630,9 @@ function mapSupabaseToItemMaster(items) {
   return items.map((row, i) => ({
     id: row.id ? String(row.id) : ('SB' + i),
     name: row.name || row.item_name || 'Unknown Item',
+    // No `brand` column exists in purchase_items today — brand info is
+    // embedded in name. Fallbacks kept for any future schema/import that
+    // does add brand/vendor columns.
     brand: row.brand || row.vendor || '',
     category: guessCategory(row.category || row.item_category || ''),
     subcategory: row.subcategory || '',
@@ -3638,7 +3641,11 @@ function mapSupabaseToItemMaster(items) {
     par: row.par_level || row.par || 0,
     expectedQty: row.expected_qty || 0,
     vintage: row.vintage || '',
-    size: row.size || row.bottle_size || '',
+    // Size: real column is `base_uom` (e.g. "1L", "750ml", "12oz"). Some
+    // rows misuse base_uom for packaging units like "Bottle"/"Each" — those
+    // get passed through unchanged and Claude/the human handle them. The
+    // size/bottle_size fallbacks are legacy-schema stragglers.
+    size: row.base_uom || row.size || row.bottle_size || '',
     supabaseId: row.id,
     _raw: row,
   }));
@@ -12329,8 +12336,31 @@ async function parseLabelWithClaude(imagesInput) {
     if (carriedSetRef.has(String(it.id))) carried.push(it);
     else other.push(it);
   }
-  const carriedPayload = carried.sort(sortByName).slice(0, 500).map(toPayload);
-  const otherPayload   = other.sort(sortByName).slice(0, 500).map(toPayload);
+
+  // Dedupe before sending to Claude. The catalog has many SKU-level
+  // duplicates (e.g. 8 "Ketel One" rows from craftable: imports, all with
+  // the same UPC and size). Sending all 8 to Claude clutters the prompt
+  // and produces a picker UI full of identical options. We collapse on
+  // (name|size|upc) and keep the first id per group — that id still
+  // resolves to a valid catalog row in itemMaster on the phone, and the
+  // counter sees one entry per real product.
+  // The original itemMaster is untouched — dedup only affects the AI prompt.
+  const dedupePayload = function (rows) {
+    const seen = new Set();
+    const out = [];
+    for (const it of rows) {
+      const key = (String(it.name || '').trim().toLowerCase()) + '|' +
+                  (String(it.size || it.base_uom || '').trim().toLowerCase()) + '|' +
+                  (String(it.upc || '').trim());
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(it);
+    }
+    return out;
+  };
+
+  const carriedPayload = dedupePayload(carried.sort(sortByName)).slice(0, 500).map(toPayload);
+  const otherPayload   = dedupePayload(other.sort(sortByName)).slice(0, 500).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
 
