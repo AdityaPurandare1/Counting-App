@@ -2237,19 +2237,58 @@ html, body {
     </div><!-- end activeAuditContent -->
   </div>
 
-  <!-- ========== VIEW / SEARCH PAGE ========== -->
-  <div class="page hide" id="page-view">
-    <div class="section-title">Item lookup</div>
-    <div class="search-bar">
-      <span class="si">
-        <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-          <circle cx="6" cy="6" r="4"/>
-          <path d="M9 9l3.5 3.5"/>
-        </svg>
-      </span>
-      <input type="text" placeholder="Search all items..." id="viewSearchInput" oninput="renderViewPage()">
+  <!-- ========== CALCULATOR PAGE ========== -->
+  <div class="page hide" id="page-calculator">
+    <style>
+      .calc-key {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm, 8px);
+        font-size: 22px;
+        font-weight: 600;
+        color: var(--text);
+        padding: 18px 0;
+        cursor: pointer;
+        font-family: inherit;
+        transition: background 0.1s;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .calc-key:active { background: var(--surface3, var(--surface2)); }
+      .calc-fn { background: var(--surface3, var(--surface2)); color: var(--text-muted); font-size: 18px; }
+      .calc-op { background: var(--accent-soft, var(--surface2)); color: var(--accent); font-weight: 700; }
+      .calc-eq { background: var(--accent); color: var(--surface); font-weight: 700; }
+    </style>
+    <div class="section-title">Calculator</div>
+    <div id="calcDisplay" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 16px;margin-bottom:14px;text-align:right;font-family:var(--mono,'JetBrains Mono',monospace);min-height:78px;display:flex;flex-direction:column;justify-content:flex-end;gap:4px">
+      <div id="calcExpr" style="font-size:14px;color:var(--text-muted);min-height:18px;word-break:break-all">&nbsp;</div>
+      <div id="calcResult" style="font-size:32px;font-weight:700;color:var(--text);word-break:break-all">0</div>
     </div>
-    <div id="viewList"></div>
+    <div id="calcKeypad" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <button class="calc-key calc-fn" onclick="calcInput('C')">C</button>
+      <button class="calc-key calc-fn" onclick="calcInput('back')">⌫</button>
+      <button class="calc-key calc-fn" onclick="calcInput('%')">%</button>
+      <button class="calc-key calc-op" onclick="calcInput('/')">÷</button>
+
+      <button class="calc-key" onclick="calcInput('7')">7</button>
+      <button class="calc-key" onclick="calcInput('8')">8</button>
+      <button class="calc-key" onclick="calcInput('9')">9</button>
+      <button class="calc-key calc-op" onclick="calcInput('*')">×</button>
+
+      <button class="calc-key" onclick="calcInput('4')">4</button>
+      <button class="calc-key" onclick="calcInput('5')">5</button>
+      <button class="calc-key" onclick="calcInput('6')">6</button>
+      <button class="calc-key calc-op" onclick="calcInput('-')">−</button>
+
+      <button class="calc-key" onclick="calcInput('1')">1</button>
+      <button class="calc-key" onclick="calcInput('2')">2</button>
+      <button class="calc-key" onclick="calcInput('3')">3</button>
+      <button class="calc-key calc-op" onclick="calcInput('+')">+</button>
+
+      <button class="calc-key" style="grid-column:span 2" onclick="calcInput('0')">0</button>
+      <button class="calc-key" onclick="calcInput('.')">.</button>
+      <button class="calc-key calc-eq" onclick="calcInput('=')">=</button>
+    </div>
   </div>
 
   <!-- ========== VARIANCE PAGE (with Count 1 / Count 2 lifecycle) ========== -->
@@ -2429,11 +2468,21 @@ html, body {
       </svg>
       Variance
     </button>
-    <button class="nav-item" data-page="view" onclick="showPage('view')">
-      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-        <circle cx="8" cy="8" r="4.5"/><path d="M11.5 11.5L16 16"/>
+    <button class="nav-item" data-page="calculator" onclick="showPage('calculator')">
+      <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3.5" y="2" width="11" height="14" rx="1.5"/>
+        <rect x="5.5" y="4" width="7" height="2.5" rx="0.5"/>
+        <circle cx="6.5" cy="9" r="0.6" fill="currentColor"/>
+        <circle cx="9" cy="9" r="0.6" fill="currentColor"/>
+        <circle cx="11.5" cy="9" r="0.6" fill="currentColor"/>
+        <circle cx="6.5" cy="11.5" r="0.6" fill="currentColor"/>
+        <circle cx="9" cy="11.5" r="0.6" fill="currentColor"/>
+        <circle cx="11.5" cy="11.5" r="0.6" fill="currentColor"/>
+        <circle cx="6.5" cy="14" r="0.6" fill="currentColor"/>
+        <circle cx="9" cy="14" r="0.6" fill="currentColor"/>
+        <circle cx="11.5" cy="14" r="0.6" fill="currentColor"/>
       </svg>
-      Search
+      Calculator
     </button>
     <button class="nav-item" data-page="summary" onclick="showPage('summary')">
       <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -2867,7 +2916,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.41';
+const APP_VERSION = '1.44';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6253,7 +6302,7 @@ function showPage(page) {
   const renderMap = {
     venues: renderVenues,
     count: renderCountPage,
-    view: renderViewPage,
+    calculator: renderCalculatorPage,
     variance: renderVariancePage,
     summary: renderSummaryPage,
     recount: renderRecountPage,
@@ -9315,6 +9364,83 @@ function renderViewPage() {
       '</div>' +
     '</div>'
   ).join('');
+}
+
+/* ================================================================
+   CALCULATOR PAGE
+   Replaces the old Search tab in the bottom nav. Pure-local UI; no
+   network, no audit-state interaction. State lives in module-level
+   strings so flipping tabs preserves the current expression.
+   ================================================================ */
+let _calcExpr = '';
+let _calcResult = '0';
+let _calcJustEvaluated = false;
+
+function renderCalculatorPage() {
+  const exprEl = document.getElementById('calcExpr');
+  const resEl = document.getElementById('calcResult');
+  if (exprEl) exprEl.textContent = _calcExpr || ' ';
+  if (resEl) resEl.textContent = _calcResult;
+}
+
+function calcInput(key) {
+  if (key === 'C') {
+    _calcExpr = '';
+    _calcResult = '0';
+    _calcJustEvaluated = false;
+    return renderCalculatorPage();
+  }
+  if (key === 'back') {
+    if (_calcJustEvaluated) { _calcExpr = ''; _calcJustEvaluated = false; }
+    else _calcExpr = _calcExpr.slice(0, -1);
+    return renderCalculatorPage();
+  }
+  if (key === '=') {
+    if (!_calcExpr) return;
+    try {
+      const sanitized = _calcExpr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
+      // Only allow digits, basic operators, parens, dot, percent, space.
+      if (!/^[\d+\-*/.()% ]+$/.test(sanitized)) {
+        _calcResult = 'Error';
+        _calcJustEvaluated = true;
+        return renderCalculatorPage();
+      }
+      // Treat N% as (N/100) — basic-calculator semantics.
+      const exprWithPct = sanitized.replace(/(\d+(?:\.\d+)?)%/g, '($1/100)');
+      const val = Function('"use strict";return (' + exprWithPct + ')')();
+      _calcResult = Number.isFinite(val) ? parseFloat(val.toFixed(6)).toString() : 'Error';
+    } catch (e) {
+      _calcResult = 'Error';
+    }
+    _calcJustEvaluated = true;
+    return renderCalculatorPage();
+  }
+
+  // After =, a digit/decimal starts a fresh expression; an operator
+  // chains from the previous result.
+  if (_calcJustEvaluated) {
+    if (/[\d.]/.test(key)) {
+      _calcExpr = '';
+      _calcResult = '0';
+    } else if (/[+\-*/%]/.test(key)) {
+      _calcExpr = _calcResult === 'Error' ? '' : _calcResult;
+    }
+    _calcJustEvaluated = false;
+  }
+
+  // Operator de-dupe: typing two operators in a row replaces the last one.
+  // (Exception: a leading '-' is allowed for negation.)
+  if (/[+\-*/]/.test(key) && _calcExpr && /[+\-*/]/.test(_calcExpr.slice(-1))) {
+    _calcExpr = _calcExpr.slice(0, -1) + key;
+  } else {
+    // Decimal de-dupe: don't allow two dots in the same number.
+    if (key === '.') {
+      const lastNum = _calcExpr.match(/(\d*\.?\d*)$/);
+      if (lastNum && lastNum[1].includes('.')) return;
+    }
+    _calcExpr += key;
+  }
+  renderCalculatorPage();
 }
 
 /* ================================================================
