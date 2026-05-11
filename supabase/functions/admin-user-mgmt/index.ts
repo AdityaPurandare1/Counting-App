@@ -75,6 +75,19 @@ function reject(status: number, message: string): Response {
 // array; smart-delete checks it before tearing down the auth account.
 const APP_TAG = 'kount';
 
+// Production landing URLs for invite + password-reset emails. Server-side
+// constants — never accept the caller's origin, because admins can trigger
+// these flows from localhost during dev and the recipient lands on a URL
+// they can't reach. Phone PWA gets `counting-app.html` directly because the
+// `index.html` redirect at the repo root uses meta-refresh, which drops
+// the auth hash fragment Supabase puts on recovery/invite links.
+const PROD_PHONE_URL = 'https://adityapurandare1.github.io/Counting-App/counting-app.html';
+const PROD_ADMIN_URL = 'https://adityapurandare1.github.io/Counting-Admin/';
+
+function redirectForRole(role: Role | null | undefined): string {
+  return role === 'counter' ? PROD_PHONE_URL : PROD_ADMIN_URL;
+}
+
 // auth.users isn't exposed via PostgREST by default. Migration 0018 added
 // SECURITY DEFINER RPCs (find_auth_user_by_email + list_auth_user_emails)
 // granted only to service_role — Edge Functions invoke them from the admin
@@ -235,8 +248,11 @@ async function handleInvite(
   // Supabase establishes their session → app prompts for password.
   // We tag user_metadata.apps with APP_TAG so we can later distinguish
   // Counting-App users from sibling-app users on the shared project.
+  // Server-picks the redirect by role — caller's `payload.redirect_to` is
+  // ignored on purpose so an admin invoking from localhost can't ship a
+  // dead link to the recipient.
   const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(email, {
-    redirectTo: payload.redirect_to,
+    redirectTo: redirectForRole(payload.role),
     data: metadataWithKountTag(null),  // becomes user_metadata
   });
 
@@ -429,8 +445,20 @@ async function handleResetPassword(
   //      copy this link". Belt-and-braces for flaky SMTP.
   // If (1) succeeds and (2) fails, we still return ok — the user got
   // their email and that's the main thing.
+  // Look up the target's role so the recovery link points at the app they
+  // actually use. Counters land on the phone PWA, everyone else on the
+  // admin SPA. Fall back to phone URL if the row is missing — safest
+  // landing page for an unknown user.
+  const { data: targetProfile } = await admin
+    .from('app_users')
+    .select('role')
+    .eq('email', email)
+    .maybeSingle();
+  const targetRole = (targetProfile?.role ?? null) as Role | null;
+  const redirect = redirectForRole(targetRole);
+
   const { error: sendErr } = await admin.auth.resetPasswordForEmail(email, {
-    redirectTo: payload.redirect_to,
+    redirectTo: redirect,
   });
   if (sendErr) return reject(500, 'Reset email failed to send: ' + sendErr.message);
 
@@ -439,7 +467,7 @@ async function handleResetPassword(
     const { data: linkData, error: linkErr } = await admin.auth.admin.generateLink({
       type: 'recovery',
       email,
-      options: { redirectTo: payload.redirect_to },
+      options: { redirectTo: redirect },
     });
     if (!linkErr) actionLink = linkData?.properties?.action_link || null;
   } catch (e) {
@@ -550,7 +578,7 @@ async function handleMigrateLegacy(
     }
     try {
       const { data: invited, error: inviteErr } = await admin.auth.admin.inviteUserByEmail(targetEmail, {
-        redirectTo: payload.redirect_to,
+        redirectTo: redirectForRole(u.role),
       });
       if (inviteErr || !invited.user) {
         results.push({ email: targetEmail, ok: false, error: inviteErr?.message || 'no user returned' });
