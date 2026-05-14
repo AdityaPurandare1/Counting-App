@@ -2944,7 +2944,7 @@ const supabaseClient = (window.supabase && window.supabase.createClient)
 /* Currently-signed-in user's JWT, refreshed by Supabase's onAuthStateChange.
    Read at the top of every supabaseRest call so a token rotation
    (autoRefreshToken) is picked up without restarting the app. Null while
-   the user is signed out OR signed in via the legacy ACCESS_LIST path. */
+   the user is signed out. */
 let currentSupabaseJwt = null;
 if (supabaseClient) {
   supabaseClient.auth.getSession().then(function (resp) {
@@ -2975,9 +2975,8 @@ if (supabaseClient) {
     // past the refresh window. Treat it as a forced logout: clear local
     // state so the app doesn't keep rendering with a stale identity.
     if (event === 'SIGNED_OUT' && typeof appState !== 'undefined' && appState && appState.user) {
-      // Don't clobber legacy ACCESS_LIST users (they have no Supabase
-      // session by definition, so SIGNED_OUT for them is a no-op anyway).
-      // But if a Supabase-authed user was just revoked, force re-login.
+      // Force re-login on session revocation (admin disabled the user)
+      // or expired refresh window.
       console.warn('[auth] SIGNED_OUT received — clearing local user state');
       appState.user = null;
       appState.currentVenue = null;
@@ -2990,10 +2989,10 @@ if (supabaseClient) {
 
 // Build the Authorization header. When a user is signed in via Supabase
 // Auth, we send their JWT — Postgres RLS policies will see them as a
-// real authenticated user. When nobody is signed in (boot, login screen,
-// legacy ACCESS_LIST users), we fall back to the anon key so the
-// dev-mode `to anon using (true)` policies still allow reads/writes.
-// Phase 4 (RLS flip) will lock the anon path down.
+// real authenticated user. When nobody is signed in (boot, login screen)
+// we fall back to the anon key so the dev-mode `to anon using (true)`
+// policies still allow reads/writes. Phase 4 (RLS flip) will lock the
+// anon path down.
 function _supabaseAuthHeaders(extra) {
   const headers = {
     'apikey': SUPABASE_ANON_KEY,
@@ -3196,6 +3195,13 @@ function startCarriedItemsRealtime() {
     });
 }
 
+async function stopCarriedItemsRealtime() {
+  if (carriedItemsChannel && supabaseClient) {
+    try { await supabaseClient.removeChannel(carriedItemsChannel); } catch (e) {}
+  }
+  carriedItemsChannel = null;
+}
+
 /* Periodic backstop. Realtime is great when it works, but WebSocket
    subscriptions silently drop on flaky cellular / when the PWA is
    backgrounded. A 60-second poll while the page is visible guarantees that
@@ -3212,6 +3218,13 @@ function startPeriodicCatalogSync() {
     if (!supabaseLoaded) loadItemMaster().catch(function() {});
     loadApprovedUpcMappings(false).catch(function() {});
   }, 60 * 1000);
+}
+
+function stopPeriodicCatalogSync() {
+  if (_periodicSyncTimer) {
+    clearInterval(_periodicSyncTimer);
+    _periodicSyncTimer = null;
+  }
 }
 
 /* Shared search helper used by every scan/type path. Always prefers the
@@ -3449,16 +3462,28 @@ async function loadAvtFromSupabase() {
     if (repResp.error || !repResp.data || repResp.data.length === 0) return false;
     var report = repResp.data[0];
 
-    // Pull all rows for that report, paginated past the db-max-rows cap
+    // Pull all rows for that report, paginated past the db-max-rows cap.
+    // The PAGE-sized early-exit below is the standard terminator (a short
+    // page means we hit the end). MAX_PAGES is a safety ceiling so a
+    // buggy backend can't spin forever; if we hit it we warn loudly
+    // rather than silently truncating the report.
     var rows = [];
     var PAGE = 1000;
-    for (var p = 0; p < 10; p++) {
+    var MAX_PAGES = 100;  // 100k rows headroom; bump if needed
+    var p = 0;
+    var hitCap = false;
+    for (; p < MAX_PAGES; p++) {
       var qs = 'select=*&report_id=eq.' + encodeURIComponent(report.id) +
                '&order=item_name&limit=' + PAGE + '&offset=' + (p * PAGE);
       var pg = await supabaseRest.query('kount_avt_rows', qs);
       if (pg.error || !pg.data || pg.data.length === 0) break;
       rows = rows.concat(pg.data);
       if (pg.data.length < PAGE) break;
+      if (p === MAX_PAGES - 1) hitCap = true;
+    }
+    if (hitCap) {
+      console.warn('[avt] hit MAX_PAGES cap of ' + MAX_PAGES + ' (' + (MAX_PAGES * PAGE) + ' rows). Report display may be incomplete.');
+      try { showToast('AVT report exceeds ' + (MAX_PAGES * PAGE) + ' rows; display may be incomplete', 'warning'); } catch (e) {}
     }
     if (rows.length === 0) return false;
 
@@ -3751,21 +3776,28 @@ async function renderPendingApprovals() {
     return;
   }
 
-  container.innerHTML = pendingMappingsList.map(function(p, i) {
+  // Bind buttons by row id (UUID), not by array index — realtime can
+  // re-fetch the list between render and click, shifting indices so the
+  // admin accidentally approves a different row than the one they
+  // clicked.
+  container.innerHTML = pendingMappingsList.map(function(p) {
     return '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--warning-dim);border:1px solid rgba(178,112,63,.2);border-radius:var(--radius-sm);margin-bottom:6px">' +
       '<div style="flex:1;min-width:0">' +
         '<div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(p.item_name) + '</div>' +
         '<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + esc(p.barcode_raw) + ' · by ' + esc(p.submitted_by_name) + '</div>' +
       '</div>' +
-      '<button onclick="approveUPCPending(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--success-dim);color:var(--success);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Approve">✓</button>' +
-      '<button onclick="rejectUPCPending(' + i + ')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--danger-dim);color:var(--danger);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Reject">✕</button>' +
+      '<button onclick="approveUPCPending(\'' + esc(p.id) + '\')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--success-dim);color:var(--success);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Approve">✓</button>' +
+      '<button onclick="rejectUPCPending(\'' + esc(p.id) + '\')" style="width:30px;height:30px;border-radius:50%;border:none;background:var(--danger-dim);color:var(--danger);font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center" title="Reject">✕</button>' +
     '</div>';
   }).join('');
 }
 
-async function approveUPCPending(index) {
-  const p = pendingMappingsList[index];
-  if (!p) return;
+async function approveUPCPending(id) {
+  // Look up by UUID — pendingMappingsList may have been re-fetched by
+  // a realtime event between render and this click, so an index would
+  // point at the wrong row.
+  const p = pendingMappingsList.find(function(x) { return String(x.id) === String(id); });
+  if (!p) { showToast('That approval is no longer pending — refreshed list.', 'warn'); renderPendingApprovals(); return; }
 
   const role = appState.user?.role || 'counter';
   if (role !== 'corporate' && role !== 'manager') {
@@ -3811,9 +3843,11 @@ async function approveUPCPending(index) {
   renderPendingApprovals();
 }
 
-async function rejectUPCPending(index) {
-  const p = pendingMappingsList[index];
-  if (!p) return;
+async function rejectUPCPending(id) {
+  // Same UUID lookup as approveUPCPending — index-based binding would
+  // race with realtime re-fetches.
+  const p = pendingMappingsList.find(function(x) { return String(x.id) === String(id); });
+  if (!p) { showToast('That approval is no longer pending — refreshed list.', 'warn'); renderPendingApprovals(); return; }
 
   const role = appState.user?.role || 'counter';
   if (role !== 'corporate' && role !== 'manager') {
@@ -4302,9 +4336,6 @@ if (appState.user && !appState.user.venueIds) {
 //   - Live session but no cached user (e.g. localStorage cleared) →
 //     re-hydrate from the JWT instead of dumping them on the login screen
 //     for nothing.
-// Legacy ACCESS_LIST users have no Supabase session and skip this whole
-// block — they keep their localStorage-only state until Phase 5
-// migrates them.
 if (supabaseClient) {
   setTimeout(async function () {
     try {
@@ -4317,11 +4348,10 @@ if (supabaseClient) {
         // want to yank them off their current page.
         await _hydrateUserProfileFromSession({ redirect: false });
       } else if (appState.user && currentSupabaseJwt === null) {
-        // Don't auto-clear here: we can't tell yet if this user signed in
-        // via Supabase or via legacy ACCESS_LIST. The first authenticated
-        // REST call will fail loudly if they're a stale Supabase user;
-        // legacy users never had a session in the first place. Phase 4
-        // RLS flip will tighten this up.
+        // Cached user with no live Supabase session = stale local state.
+        // The next authenticated REST call would fail anyway; let it
+        // surface naturally so we don't yank the user off a page they
+        // may still be working on locally.
       }
     } catch (e) { console.warn('[auth] boot session check failed:', e); }
   }, 0);
@@ -5172,6 +5202,17 @@ async function syncEntryToSupabase(entry, zone, opts) {
   const auditId = appState.audit.supabaseId;
   const isRecount = !!(opts && opts.isRecount);
 
+  // The phone overloads `entry.sku` to carry either a catalog SKU or a
+  // UPC/barcode depending on which capture method created the entry.
+  // Writing the same value to both `kount_entries.sku` and .upc columns
+  // pollutes both: querying by UPC misses entries (some rows have SKU
+  // values stored there) and vice versa. Split based on method:
+  //   - barcode / photo → value is definitely a UPC
+  //   - guided / manual → value is a SKU from the catalog or user-typed
+  // entry.upc takes precedence if the upstream caller bothered to set
+  // it explicitly.
+  const methodIsScan = entry.method === 'barcode' || entry.method === 'photo';
+  const skuVal = entry.sku || null;
   const payload = {
     audit_id: auditId,
     item_id: isValidUuid(entry.masterId) ? entry.masterId : null,
@@ -5182,8 +5223,8 @@ async function syncEntryToSupabase(entry, zone, opts) {
     method: entry.method || null,
     issue: entry.issue || 'none',
     issue_notes: entry.notes || null,
-    sku: entry.sku || null,
-    upc: entry.sku || null,
+    sku: methodIsScan ? null : skuVal,
+    upc: (entry.upc || (methodIsScan ? skuVal : null)) || null,
     counted_by_email: (appState.user && appState.user.email) || 'unknown',
     counted_by_name: (appState.user && appState.user.name) || null,
     is_recount: isRecount,
@@ -5943,51 +5984,28 @@ function isAuditLocked() {
 
 /* ================================================================
    ACCESS CONTROL LIST
-   Edit this list to control who can access the app.
-   Each entry has: email, name, role, and assigned venues (by ID).
-   Roles: 'corporate' = all venues, 'manager' = assigned venues,
-          'counter' = assigned venues only.
-   
-   To add a new user: copy a line and change the email/name/role.
-   To remove a user: delete their line.
-   To change venue access: update the venueIds array.
+   Source of truth is the Supabase `app_users` table, managed via the
+   desktop Security screen. ACCESS_LIST is hydrated from a localStorage
+   cache at boot for instant first paint, then refreshed live from
+   Supabase. Users are added/removed/edited through the admin UI — no
+   code change needed.
    ================================================================ */
-const ACCESS_LIST = [
-  // Corporate — full access to all venues
-  { email: 'admin@hwood.com',         name: 'Admin',            role: 'corporate', venueIds: 'all' },
-  { email: 'ceo@hwood.com',           name: 'CEO',              role: 'corporate', venueIds: 'all' },
-
-  // Managers — access to assigned venues
-  // v1=Delilah LA, v2=Delilah Miami, v3=The Nice Guy, v4=The Birdstreet Club
-  // v5=Poppy, v6=Keys, v7=Bootsy Bellows, v8=The Fleur Room, v9=Harriets, v10=40 Love
-  { email: 'manager1@hwood.com',      name: 'Manager 1',        role: 'manager',   venueIds: ['v1', 'v2', 'v3'] },
-  { email: 'manager2@hwood.com',      name: 'Manager 2',        role: 'manager',   venueIds: ['v4', 'v5', 'v6'] },
-  { email: 'manager3@hwood.com',      name: 'Manager 3',        role: 'manager',   venueIds: ['v7', 'v8', 'v9', 'v10'] },
-
-  // Counters (3rd party) — access to assigned venues
-  { email: 'counter1@team.com',       name: 'Counter 1',        role: 'counter',   venueIds: ['v1', 'v2'] },
-  { email: 'counter2@team.com',       name: 'Counter 2',        role: 'counter',   venueIds: ['v3', 'v4'] },
-  { email: 'counter3@team.com',       name: 'Counter 3',        role: 'counter',   venueIds: ['v5', 'v6'] },
-  { email: 'counter4@team.com',       name: 'Counter 4',        role: 'counter',   venueIds: ['v7', 'v8'] },
-  { email: 'counter5@team.com',       name: 'Counter 5',        role: 'counter',   venueIds: ['v9', 'v10'] },
-
-  // Add more users below this line:
-  // { email: 'newuser@example.com', name: 'New User', role: 'counter', venueIds: ['v1'] },
-];
+const ACCESS_LIST = [];
 
 /* ================================================================
-   app_users integration (v1.6)
+   app_users integration
    The desktop Security screen CRUDs a Supabase app_users table. Both
    apps pull from it so admins can manage access without a code push.
    Strategy:
      1. At boot, synchronously hydrate ACCESS_LIST from localStorage
-        cache (written by a prior successful Supabase fetch). Falls
-        through to the hardcoded baseline above on first visit / wipe.
+        cache (written by a prior successful Supabase fetch). Starts
+        empty on first visit / wipe — login is then unavailable until
+        the async Supabase fetch completes.
      2. Fire an async Supabase fetch; on success, replace in-memory
         ACCESS_LIST (via splice so the `const` binding stays) and
         refresh the localStorage cache.
-   This keeps login instant + offline-tolerant while letting admin edits
-   propagate across devices.
+   This keeps login instant once cached + offline-tolerant while letting
+   admin edits propagate across devices.
    ================================================================ */
 const APP_USERS_CACHE_KEY = 'hwood_app_users_cache_v1';
 
@@ -6104,16 +6122,12 @@ async function stopAppUsersRealtime() {
 }
 
 /* ================================================================
-   AUTHENTICATION (Phase 1: dual-path)
-     1. If the user typed a password, try Supabase Auth first. Success
-        means a real JWT and server-enforced identity going forward.
-     2. On auth failure OR no-password-typed, try the legacy ACCESS_LIST
-        path so users we haven't migrated to Supabase Auth yet keep
-        working through the transition. Phase 5 migrates everyone and
-        deletes the legacy branch.
-     3. Either path resolves the user's role + venueIds before signing
-        them into appState — auth path pulls from app_users (live),
-        legacy path pulls from the hardcoded list.
+   AUTHENTICATION
+     Single-path Supabase Auth. The user types email + password; on
+     success we look up role + venueIds in app_users (live) and sign
+     them into appState. Users without a password use the magic-link
+     ("Email me a sign-in link") or password-reset buttons under the
+     form to bootstrap themselves in.
    ================================================================ */
 async function handleLogin() {
   const email = document.getElementById('loginEmail').value.trim().toLowerCase();
@@ -6126,57 +6140,61 @@ async function handleLogin() {
     return;
   }
 
-  errorEl.style.display = 'none';
-
-  // Identify legacy candidates up front. We need this BEFORE handling auth
-  // failure so a legacy user who accidentally typed a password (their
-  // muscle memory says "passwords go in password fields") still gets in,
-  // rather than being told their credentials are wrong on an account they
-  // don't yet have.
-  const legacyEntry = ACCESS_LIST.find(function (entry) {
-    return entry.email.toLowerCase() === email;
-  });
-
-  let authedUser = null;
-  let authInvalidCredentials = false;
-  if (supabaseClient && password) {
-    try {
-      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-      if (!error && data && data.user) {
-        authedUser = data.user;
-        // Set the JWT immediately from the response so the very next REST
-        // call (the app_users lookup below) carries it. Without this we
-        // race onAuthStateChange — the callback fires as a microtask and
-        // may not have set currentSupabaseJwt before our next fetch goes
-        // out, which falls back to the anon key. Under dev RLS that
-        // accidentally works; once Phase 4 locks RLS down, the
-        // anon-fallback fetch would 401. Fix the race here by setting
-        // explicitly; onAuthStateChange will fire shortly with the same
-        // value (idempotent).
-        if (data.session && data.session.access_token) {
-          currentSupabaseJwt = data.session.access_token;
-        }
-      } else if (error && /invalid login|invalid_credentials|invalid grant/i.test(error.message || '')) {
-        // Wrong password OR no auth account exists. We can't tell which
-        // (Supabase intentionally hides that to avoid leaking account
-        // existence). Defer the error decision until after the legacy
-        // check below: if this email IS a legacy user we plan to migrate,
-        // the typed password was just a confused user — let them in via
-        // legacy. If they're NOT a legacy user, surface the real error.
-        authInvalidCredentials = true;
-      } else if (error) {
-        // Network/5xx — log and fall through to legacy.
-        console.warn('[auth] signInWithPassword failed (transient), trying legacy:', error);
-      }
-    } catch (e) {
-      console.warn('[auth] signInWithPassword threw, trying legacy:', e);
-    }
+  if (!password) {
+    errorEl.textContent = 'Password required. Tap "Email me a sign-in link" below if you do not have one yet.';
+    errorEl.style.display = 'block';
+    return;
   }
 
-  // If auth said "invalid credentials" AND this email isn't a legacy
-  // candidate, the user really did mistype — show the error and stop.
-  if (authInvalidCredentials && !authedUser && !legacyEntry) {
-    errorEl.textContent = 'Email or password incorrect. If you don\'t have a password yet, ask admin for an invite.';
+  if (!supabaseClient) {
+    errorEl.textContent = 'Sign-in unavailable — connection to Supabase is not configured.';
+    errorEl.style.display = 'block';
+    return;
+  }
+
+  errorEl.style.display = 'none';
+
+  // Single-path Supabase Auth. Recovery paths for users without a
+  // password live on this same form: "Email me a sign-in link" and
+  // "Forgot your password?".
+  let authedUser = null;
+  let authInvalidCredentials = false;
+  let authTransientError = false;
+  try {
+    const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+    if (!error && data && data.user) {
+      authedUser = data.user;
+      // Set the JWT immediately from the response so the very next REST
+      // call (the app_users lookup below) carries it. Without this we
+      // race onAuthStateChange — the callback fires as a microtask and
+      // may not have set currentSupabaseJwt before our next fetch goes
+      // out, which falls back to the anon key.
+      if (data.session && data.session.access_token) {
+        currentSupabaseJwt = data.session.access_token;
+      }
+    } else if (error && /invalid login|invalid_credentials|invalid grant/i.test(error.message || '')) {
+      authInvalidCredentials = true;
+    } else if (error) {
+      console.warn('[auth] signInWithPassword failed (transient):', error);
+      authTransientError = true;
+    }
+  } catch (e) {
+    console.warn('[auth] signInWithPassword threw:', e);
+    authTransientError = true;
+  }
+
+  if (authTransientError) {
+    errorEl.textContent = 'Sign-in temporarily unavailable. Try again in a moment, or tap "Email me a sign-in link".';
+    errorEl.style.display = 'block';
+    return;
+  }
+  if (authInvalidCredentials) {
+    errorEl.textContent = 'Email or password incorrect. Tap "Email me a sign-in link" below if you do not have a password yet.';
+    errorEl.style.display = 'block';
+    return;
+  }
+  if (!authedUser) {
+    errorEl.textContent = 'Sign-in failed. Try again, or tap "Email me a sign-in link".';
     errorEl.style.display = 'block';
     return;
   }
@@ -6185,54 +6203,35 @@ async function handleLogin() {
   let resolvedVenueIds = null;
   let resolvedName = null;
 
-  if (authedUser) {
-    // Look up role + venue assignments in app_users. Joined by email so the
-    // existing admin Security screen keeps working unchanged.
-    try {
-      const profile = await supabaseRest.query(
-        'app_users',
-        'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
-      );
-      const row = profile.data && profile.data[0];
-      if (!row) {
-        errorEl.textContent = 'Signed in but no app profile found. Ask admin to set your role.';
-        errorEl.style.display = 'block';
-        try { await supabaseClient.auth.signOut(); } catch (e) {}
-        return;
-      }
-      if (row.is_active === false) {
-        errorEl.textContent = 'Your account is disabled. Contact your admin.';
-        errorEl.style.display = 'block';
-        try { await supabaseClient.auth.signOut(); } catch (e) {}
-        return;
-      }
-      resolvedName = row.name || email;
-      resolvedRole = row.role;
-      resolvedVenueIds = row.role === 'corporate' ? 'all' : (row.venue_ids || []);
-    } catch (e) {
-      console.warn('[auth] app_users lookup failed:', e);
-      errorEl.textContent = 'Signed in but profile fetch failed. Try again in a moment.';
+  // Look up role + venue assignments in app_users. Joined by email so the
+  // existing admin Security screen keeps working unchanged.
+  try {
+    const profile = await supabaseRest.query(
+      'app_users',
+      'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
+    );
+    const row = profile.data && profile.data[0];
+    if (!row) {
+      errorEl.textContent = 'Signed in but no app profile found. Ask admin to set your role.';
       errorEl.style.display = 'block';
-      try { await supabaseClient.auth.signOut(); } catch (e2) {}
+      try { await supabaseClient.auth.signOut(); } catch (e) {}
       return;
     }
-  } else {
-    // Legacy ACCESS_LIST fallback — reached when:
-    //   (a) no password was typed (legacy users by definition have none),
-    //   (b) the auth call failed transiently (network/5xx), or
-    //   (c) auth said "invalid credentials" but the email IS a legacy
-    //       candidate (the early-return above only fires when neither
-    //       legacyEntry nor authedUser exists).
-    // Once Phase 5 migrates everyone and ACCESS_LIST is deleted, this
-    // whole branch goes away.
-    if (!legacyEntry) {
-      errorEl.textContent = 'Access denied. Your email is not authorized. Contact your admin.';
+    if (row.is_active === false) {
+      errorEl.textContent = 'Your account is disabled. Contact your admin.';
       errorEl.style.display = 'block';
+      try { await supabaseClient.auth.signOut(); } catch (e) {}
       return;
     }
-    resolvedName = legacyEntry.name;
-    resolvedRole = legacyEntry.role;
-    resolvedVenueIds = legacyEntry.venueIds;
+    resolvedName = row.name || email;
+    resolvedRole = row.role;
+    resolvedVenueIds = row.role === 'corporate' ? 'all' : (row.venue_ids || []);
+  } catch (e) {
+    console.warn('[auth] app_users lookup failed:', e);
+    errorEl.textContent = 'Signed in but profile fetch failed. Try again in a moment.';
+    errorEl.style.display = 'block';
+    try { await supabaseClient.auth.signOut(); } catch (e2) {}
+    return;
   }
 
   appState.user = {
@@ -6359,6 +6358,12 @@ function handleLogout() {
     stopVenuesRealtime();
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
+    // v1.45: also tear down carried-items realtime + the 60s catalog
+    // poll. Both were leaking past sign-out — the channel kept reacting
+    // to mutations against an anon JWT, and the timer kept hitting
+    // Supabase on a one-minute cadence forever.
+    stopCarriedItemsRealtime();
+    stopPeriodicCatalogSync();
     appState.user = null;
     appState.currentVenue = null;
     appState.currentZone = null;
@@ -8159,24 +8164,89 @@ let lastScanTime = 0;
 let nativeBarcodeStream = null;
 let nativeScanInterval = null;
 
-// Phase A: 4-frame confirmation before firing
-const SCAN_FRAMES_REQUIRED = 4;
+// Format-aware confirmation thresholds. The brute-force 4-frame check used
+// to filter false positives across the board; that was slow because most
+// retail items use GTIN-family barcodes (UPC-A / EAN-13 / EAN-8) whose
+// checksums catch incomplete digits and hallucinated reads in a single
+// frame. Reserve the slow path for formats without a built-in integrity
+// check (Code 128/39 numeric, etc.).
+const FRAMES_HIGH_CONF = 2;  // length + GTIN checksum verified
+const FRAMES_MED_CONF  = 3;  // length + digit-shape OK, no checksum
+const FRAMES_LOW_CONF  = 4;  // free-text formats, fall back to brute force
 let scanCandidateCode = '';
 let scanCandidateCount = 0;
 let scanLastSeenAt = 0;
+let scanCandidateRequired = FRAMES_LOW_CONF;
+
+/** Verify the GTIN check digit (last char) for UPC-A (12), EAN-13 (13),
+ *  EAN-8 (8), and GTIN-14. Returns false for non-numeric or short codes.
+ *  Algorithm: weight digits 3,1,3,1,... from right-of-check-digit, sum,
+ *  the check digit must be (10 - sum%10) % 10. */
+function isValidGtinChecksum(digits) {
+  if (!/^\d+$/.test(digits) || digits.length < 8) return false;
+  let sum = 0;
+  for (let i = 1; i < digits.length; i++) {
+    const d = digits.charCodeAt(digits.length - 1 - i) - 48;
+    sum += (i % 2 === 1 ? 3 : 1) * d;
+  }
+  const expected = (10 - (sum % 10)) % 10;
+  return expected === (digits.charCodeAt(digits.length - 1) - 48);
+}
+
+/** Map (code, format) to a confidence level. Higher confidence = fewer
+ *  confirmation frames needed before locking. Returns 'invalid' to reject
+ *  the detection outright (length too short, wrong digit count for the
+ *  claimed format, or failed checksum). */
+function validateBarcode(code, format) {
+  if (!code || code.length <= 3) return 'invalid';
+  switch (format) {
+    case 'ean_13':
+      return /^\d{13}$/.test(code) && isValidGtinChecksum(code) ? 'high' : 'invalid';
+    case 'upc_a':
+      return /^\d{12}$/.test(code) && isValidGtinChecksum(code) ? 'high' : 'invalid';
+    case 'ean_8':
+      return /^\d{8}$/.test(code)  && isValidGtinChecksum(code) ? 'high' : 'invalid';
+    case 'upc_e':
+      // UPC-E has its own expansion algorithm; treat as medium (length OK
+      // but skip checksum to avoid rejecting valid codes the detector
+      // already pre-validated).
+      return /^\d{8}$/.test(code) ? 'medium' : 'invalid';
+    case 'qr_code':
+      // QR has internal error correction so the detector wouldn't return
+      // garbage. Snap-lock fast.
+      return 'medium';
+    case 'code_128':
+    case 'code_39':
+      // Variable-length, no required checksum. Require shape + extra
+      // frames since false positives are most common here.
+      return code.length >= 4 ? 'medium' : 'invalid';
+    default:
+      // Format unknown or detector didn't supply one — fall back to the
+      // pre-fix brute-force 4-frame behavior.
+      return 'low';
+  }
+}
+
+function requiredFramesFor(confidence) {
+  if (confidence === 'high')   return FRAMES_HIGH_CONF;
+  if (confidence === 'medium') return FRAMES_MED_CONF;
+  return FRAMES_LOW_CONF;
+}
 
 function resetScanConfirmation() {
   scanCandidateCode = '';
   scanCandidateCount = 0;
   scanLastSeenAt = 0;
-  updateScanUI(0, null);
+  scanCandidateRequired = FRAMES_LOW_CONF;
+  updateScanUI(0, null, FRAMES_LOW_CONF);
 }
 
-function updateScanUI(progress, code) {
+function updateScanUI(progress, code, requiredFrames) {
   const frame = document.getElementById('scanFrame');
   const dots = document.querySelectorAll('#scanProgress .dot');
   const status = document.getElementById('barcodeStatus');
   if (!frame || !dots.length) return;
+  const required = requiredFrames || FRAMES_LOW_CONF;
 
   // Reset classes
   frame.classList.remove('targeting', 'locked');
@@ -8184,25 +8254,33 @@ function updateScanUI(progress, code) {
   if (progress === 0) {
     dots.forEach(d => d.classList.remove('filled', 'done'));
     if (status) status.textContent = 'Point camera at barcode';
-  } else if (progress >= SCAN_FRAMES_REQUIRED) {
+  } else if (progress >= required) {
     frame.classList.add('locked');
     dots.forEach(d => { d.classList.remove('filled'); d.classList.add('done'); });
     if (status) status.textContent = 'Locked: ' + code;
   } else {
     frame.classList.add('targeting');
+    // Map confidence-progress (progress/required) onto however many dots
+    // the HTML provides, so a 2-frame lock still walks the dots.
+    const dotProgress = Math.min(dots.length, Math.round((progress / required) * dots.length));
     dots.forEach((d, i) => {
       d.classList.remove('done');
-      if (i < progress) d.classList.add('filled');
+      if (i < dotProgress) d.classList.add('filled');
       else d.classList.remove('filled');
     });
-    if (status) status.textContent = 'Hold steady... (' + progress + '/' + SCAN_FRAMES_REQUIRED + ')';
+    if (status) status.textContent = 'Hold steady... (' + progress + '/' + required + ')';
   }
 }
 
 /* Handle a single detection from either native or Quagga.
-   Returns true if this detection completed a 4-frame lock (caller should fire). */
-function processDetection(code) {
-  if (!code || code.length <= 3) return false;
+   Returns true if this detection completed the confidence-gated lock
+   (caller should fire). The `format` argument lets us pick a shorter
+   frame requirement when the code's checksum validates — see
+   validateBarcode above. */
+function processDetection(code, format) {
+  const confidence = validateBarcode(code, format);
+  if (confidence === 'invalid') return false;
+  const required = requiredFramesFor(confidence);
   const now = Date.now();
 
   // Debounce: same code just fired within 3s — ignore
@@ -8219,12 +8297,13 @@ function processDetection(code) {
   } else {
     scanCandidateCode = code;
     scanCandidateCount = 1;
+    scanCandidateRequired = required;
   }
   scanLastSeenAt = now;
 
-  updateScanUI(Math.min(scanCandidateCount, SCAN_FRAMES_REQUIRED), code);
+  updateScanUI(Math.min(scanCandidateCount, required), code, required);
 
-  if (scanCandidateCount >= SCAN_FRAMES_REQUIRED) {
+  if (scanCandidateCount >= required) {
     lastScannedCode = code;
     lastScanTime = now;
     return true;
@@ -8238,7 +8317,8 @@ function onBarcodeDetected(result) {
   if (!barcodeActive) return;
 
   const code = result.codeResult.code;
-  if (!processDetection(code)) return;
+  const format = result.codeResult.format;  // Quagga supplies 'ean_13', 'upc_a', etc.
+  if (!processDetection(code, format)) return;
 
   barcodeActive = false;
   if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
@@ -8246,7 +8326,7 @@ function onBarcodeDetected(result) {
     Quagga.stop();
     closeBarcodeScanner();
     handleBarcodeResult(code);
-  }, 120); // tiny delay so user sees the green "locked" state
+  }, 80); // tiny delay so user sees the green "locked" state
 }
 
 function openBarcodeScanner() {
@@ -8271,6 +8351,16 @@ async function openNativeBarcodeScanner() {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
     });
+    // Race guard: getUserMedia is async. If the scanner was closed
+    // between modal-open and the stream resolving (e.g. iOS Safari
+    // permission prompt triggers visibilitychange which runs the close
+    // handler), stop the tracks immediately — assigning to
+    // nativeBarcodeStream now would leak a live camera (LED stays on,
+    // privacy + battery hit).
+    if (!barcodeActive) {
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
     nativeBarcodeStream = stream;
 
     const video = document.createElement('video');
@@ -8300,15 +8390,17 @@ async function openNativeBarcodeScanner() {
       try {
         const barcodes = await detector.detect(video);
         if (barcodes.length > 0) {
-          const code = barcodes[0].rawValue;
-          if (processDetection(code)) {
+          const result = barcodes[0];
+          const code = result.rawValue;
+          const format = result.format;  // 'ean_13', 'upc_a', 'qr_code', etc.
+          if (processDetection(code, format)) {
             barcodeActive = false;
             if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
             // Brief delay so user sees the green "locked" state before modal closes
             setTimeout(() => {
               closeBarcodeScanner();
               handleBarcodeResult(code);
-            }, 120);
+            }, 80);
           }
         } else {
           // No barcode in frame — decay the candidate count if we've lost sight
@@ -8316,11 +8408,11 @@ async function openNativeBarcodeScanner() {
           if (scanCandidateCode && now - scanLastSeenAt > 600) {
             scanCandidateCode = '';
             scanCandidateCount = 0;
-            updateScanUI(0, null);
+            updateScanUI(0, null, scanCandidateRequired);
           }
         }
       } catch (e) {}
-    }, 150);
+    }, 100);
 
   } catch (error) {
     document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
@@ -8735,17 +8827,29 @@ function submitBarcodeEntry() {
    PHOTO CAPTURE
    ================================================================ */
 let photoStream = null;
+// Tracks whether the photo-capture modal is currently expecting a stream.
+// Used to guard the async getUserMedia callback — if closePhotoCapture()
+// ran while permission was being requested, the resolved stream must be
+// stopped instead of assigned to photoStream, otherwise the camera LED
+// stays on after the modal closes.
+let photoActive = false;
 let capturedPhotoData = null;
 
 function openPhotoCapture() {
   if (isAuditLocked()) return; // FIX #1
 
   document.getElementById('photoModal').classList.remove('hide');
+  photoActive = true;
 
   navigator.mediaDevices.getUserMedia({
     video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
   })
     .then(stream => {
+      // Race guard — see photoActive declaration above.
+      if (!photoActive) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
       photoStream = stream;
       document.getElementById('photoVideo').srcObject = stream;
     })
@@ -8756,6 +8860,7 @@ function openPhotoCapture() {
 }
 
 function closePhotoCapture() {
+  photoActive = false;
   if (photoStream) {
     photoStream.getTracks().forEach(track => track.stop());
     photoStream = null;
@@ -9991,9 +10096,9 @@ function renderVariancePage() {
       '<div class="var-info">' +
         '<div class="var-name">' + esc(r.avt.itemName) + '</div>' +
         '<div class="var-detail">' +
-          'Actual: ' + r.avt.actual.toFixed(1) + ' | Theo: ' + r.avt.theo.toFixed(1) +
-          ' | Var: ' + (r.avt.variance >= 0 ? '+' : '') + r.avt.variance.toFixed(2) +
-          ' | $' + (r.avt.varianceValue >= 0 ? '+' : '') + r.avt.varianceValue.toFixed(2) +
+          'Actual: ' + Number(r.avt.actual || 0).toFixed(1) + ' | Theo: ' + Number(r.avt.theo || 0).toFixed(1) +
+          ' | Var: ' + (Number(r.avt.variance) >= 0 ? '+' : '') + Number(r.avt.variance || 0).toFixed(2) +
+          ' | $' + (Number(r.avt.varianceValue) >= 0 ? '+' : '') + Number(r.avt.varianceValue || 0).toFixed(2) +
           (r.counted > 0 ? ' | Counted: ' + formatQty(r.counted) : '') +
         '</div>' +
       '</div>' +
@@ -10418,13 +10523,12 @@ function closeCount2() {
     return;
   }
 
-  // All-rows-recorded validation. The user's rule: "block it if that item
-  // hasn't been recorded under the recount". A row is "recorded" once it
-  // has a non-null auditResult — the corrected/verified pick is the
-  // explicit signal that the manager has decided what to do with the row.
-  // We also re-validate auditReason here in case a refresh / race / legacy
-  // row left it blank; the admin Reports CSV's Context column depends on
-  // it and we never want a silent blank.
+  // Strict validation — every recount row needs a manager decision
+  // (auditResult), a reason, and a recountQty. Closing without all three
+  // would submit an immutable audit containing rows that can never be
+  // filled in afterward; the rows would sit with status='pending' and
+  // count2_qty=null forever. We block close until the recount is actually
+  // complete.
   const recounts = appState.audit.recounts || {};
   const entries = Object.entries(recounts);
   const missingResult = entries.filter(([, r]) => !r.auditResult);
@@ -10439,10 +10543,6 @@ function closeCount2() {
     showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
     return;
   }
-  // Defense against rows that picked up auditResult but never got a
-  // numeric recountQty (e.g. a stale cloud row, a sync race, a manual DB
-  // edit). Without this, the audit "completes" with count2_qty=null on
-  // the affected rows and the admin Reports CSV shows a blank quantity.
   const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
   if (missingQty.length > 0) {
     const sample = missingQty.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingQty.length > 3 ? '…' : '');
@@ -11204,9 +11304,9 @@ function exportCountCSV(countNumber) {
       csvEscape(issues.zone || ''),
       avt.actual,
       avt.theo,
-      avt.variance.toFixed(2),
-      '$' + avt.cuPrice.toFixed(2),
-      '$' + avt.varianceValue.toFixed(2),
+      Number(avt.variance || 0).toFixed(2),
+      '$' + Number(avt.cuPrice || 0).toFixed(2),
+      '$' + Number(avt.varianceValue || 0).toFixed(2),
       (avt.variancePct || 0).toFixed(1) + '%',
       countedQty || '',
       severity,
