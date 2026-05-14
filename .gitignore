@@ -15,3 +15,13 @@ Thumbs.db
 
 # Ignore node_modules in case dev tooling ever gets introduced locally
 node_modules/
+
+# Supabase CLI working directory — caches linked-project ref + diff state.
+# Not source code; rebuilds itself when `supabase link` / `supabase status`
+# runs. Keep out of git history.
+supabase/.temp/
+
+# One-shot SQL artifacts emitted by scripts/ (the *.mjs files themselves
+# stay tracked, but their generated outputs don't).
+scripts/_*.sql
+scripts/_*.log

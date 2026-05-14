@@ -3069,28 +3069,43 @@ const supabaseRest = {
 let supabaseItems = [];
 let supabaseLoaded = false;
 
+// In-scope master_items categories for the Counting-App (bar / bev / liquor
+// / wine / mixers + beer). Food, produce, supplies, services are excluded —
+// the phone should never show them. Includes the lowercase + capitalized
+// variants because the upstream catalog has casing inconsistencies.
+const IN_SCOPE_CATEGORIES = [
+  'Wine Cost', 'wine', 'Wine',
+  'Liquor Cost', 'liquor', 'Liquor',
+  'Beer Cost', 'beer',
+  'N/A Beverage Cost', 'non_alcoholic_beverage',
+  'Bar Consumables', 'bar_consumable',
+  'Bar Supplies',
+];
+// PostgREST in.(...) needs quoted values for items with spaces / slashes.
+const IN_SCOPE_FILTER = 'category=in.(' + IN_SCOPE_CATEGORIES.map(function(c) { return '"' + c.replace(/"/g, '\\"') + '"'; }).join(',') + ')';
+
 async function loadSupabaseItems() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
 
-  // PostgREST caps anon queries at the project's db-max-rows (default 1000),
-  // so a single select=* would silently truncate the catalog. Paginate
-  // through SUPABASE_PAGE_SIZE chunks until we get a short page back.
+  // Post-Path-B: catalog source is master_items, not purchase_items.
+  // master_items is ~12k active rows vs purchase_items' 26k, and 1.7× of
+  // those are SKU variants of the same canonical product. Switching to
+  // masters narrows the search space and removes vendor-variant noise
+  // that was making name search pick the wrong row. We also apply
+  // IN_SCOPE_FILTER so food/produce/dairy/supplies never reach the phone.
   //
-  // MAX_PAGES history:
-  //   v1.14: 5 pages = 5K cap
-  //   v1.31: 20 pages = 20K cap
-  //   v1.37: 35 pages = 35K cap (catalog is now 26,855 — 20K cap was
-  //          silently truncating S–Z items: Sunny, Tito's, Veuve, etc
-  //          disappeared from search). is_active filter drops soft-deleted
-  //          rows so admin's "disable" pattern hides items from the phone.
+  // UPCs are no longer on this table — they live in master_item_upcs and
+  // are loaded by loadMasterItemUpcs() below. mapSupabaseToItemMaster
+  // therefore returns items with upc='' here; the scan resolver fills the
+  // UPC from the master_item_upcs cache when it's available.
   const SUPABASE_PAGE_SIZE = 1000;
   const SUPABASE_MAX_PAGES = 35;
   const all = [];
   try {
     for (let page = 0; page < SUPABASE_MAX_PAGES; page++) {
       const offset = page * SUPABASE_PAGE_SIZE;
-      const qs = 'select=*&is_active=eq.true&order=name&limit=' + SUPABASE_PAGE_SIZE + '&offset=' + offset;
-      const { data, error } = await supabaseRest.query('purchase_items', qs);
+      const qs = 'select=*&is_active=eq.true&' + IN_SCOPE_FILTER + '&order=name&limit=' + SUPABASE_PAGE_SIZE + '&offset=' + offset;
+      const { data, error } = await supabaseRest.query('master_items', qs);
       if (error) throw error;
       if (!data || data.length === 0) break;
       all.push.apply(all, data);
@@ -3099,7 +3114,7 @@ async function loadSupabaseItems() {
     if (all.length === 0) return false;
     supabaseItems = all;
     supabaseLoaded = true;
-    console.log('Supabase: loaded ' + all.length + ' purchase_items (paginated)');
+    console.log('Supabase: loaded ' + all.length + ' master_items (in-scope, paginated)');
     return true;
   } catch (e) { console.error('Supabase load failed:', e); return false; }
 }
@@ -3116,23 +3131,24 @@ let carriedSet = new Set();
 async function loadCarriedItemsFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
-    // PostgREST caps anon SELECT at db-max-rows (default 1000). The catalog
-    // is now ~5K items and growing — paginate so a curated item past row
-    // 1000 never silently disappears from the phone.
+    // Post-Path-B: carried set is keyed by master_item_id, not
+    // purchase_item_id. The 0023 migration backfilled the new column and
+    // 0024 deduped + scope-filtered to bar/bev/liquor/wine — so what we
+    // load here is already the curated in-scope catalog.
     const PAGE_SIZE = 1000;
     const MAX_PAGES = 20;
     const all = [];
     for (let page = 0; page < MAX_PAGES; page++) {
       const offset = page * PAGE_SIZE;
-      const qs = 'select=purchase_item_id&order=purchase_item_id&limit=' + PAGE_SIZE + '&offset=' + offset;
+      const qs = 'select=master_item_id&master_item_id=not.is.null&order=master_item_id&limit=' + PAGE_SIZE + '&offset=' + offset;
       const { data, error } = await supabaseRest.query('kount_carried_items', qs);
       if (error) { console.warn('[carried] page ' + page + ' failed:', error); return false; }
       if (!data || data.length === 0) break;
       for (let i = 0; i < data.length; i++) all.push(data[i]);
       if (data.length < PAGE_SIZE) break;
     }
-    carriedSet = new Set(all.map(function(r) { return String(r.purchase_item_id); }));
-    console.log('[carried] loaded ' + carriedSet.size + ' items from Supabase');
+    carriedSet = new Set(all.map(function(r) { return String(r.master_item_id); }));
+    console.log('[carried] loaded ' + carriedSet.size + ' master_items from Supabase');
 
     // After refreshing carriedSet, validate that itemMaster actually contains
     // the IDs we just got. If resolution is poor (<80%), itemMaster is stale
@@ -3541,21 +3557,38 @@ async function loadAvtFromSupabase() {
 }
 
 function mapSupabaseToItemMaster(items) {
-  return items.map((row, i) => ({
-    id: row.id ? String(row.id) : ('SB' + i),
-    name: row.name || row.item_name || 'Unknown Item',
-    brand: row.brand || row.vendor || '',
-    category: guessCategory(row.category || row.item_category || ''),
-    subcategory: row.subcategory || '',
-    upc: row.upc || '',
-    sku: row.upc || row.sku || ('SB' + i),
-    par: row.par_level || row.par || 0,
-    expectedQty: row.expected_qty || 0,
-    vintage: row.vintage || '',
-    size: row.size || row.bottle_size || '',
-    supabaseId: row.id,
-    _raw: row,
-  }));
+  // Maps master_items rows into the itemMaster shape used by search,
+  // scan, and the photo-parse Edge Function. Key differences from the
+  // old purchase_items path:
+  //   - upc / sku come from master_item_upcs (separate cache), not this row
+  //   - brand is no longer a column on the catalog table — names like
+  //     "Don Julio 1942 1.75L" already embed brand + product + size
+  //   - size is composed from base_size + base_unit when the name
+  //     doesn't already include it
+  return items.map(function(row, i) {
+    var sizeStr = '';
+    if (row.base_size != null && row.base_unit) {
+      sizeStr = String(row.base_size) + String(row.base_unit).toLowerCase();
+    } else if (row.size) {
+      // back-compat for any rows that still carry a literal size field
+      sizeStr = row.size;
+    }
+    return {
+      id: row.id ? String(row.id) : ('MI' + i),
+      name: row.name || 'Unknown Item',
+      brand: '',                                   // master_items has no brand col
+      category: guessCategory(row.category || ''),
+      subcategory: row.subcategory || '',
+      upc: '',                                     // filled from upcMappingsCache during scan
+      sku: row.id ? String(row.id) : ('MI' + i),   // master_id doubles as SKU for display
+      par: 0,
+      expectedQty: 0,
+      vintage: '',
+      size: sizeStr,
+      supabaseId: row.id,                          // semantics shift: this is master_id now
+      _raw: row,
+    };
+  });
 }
 
 function guessCategory(cat) {
@@ -3654,11 +3687,15 @@ async function linkUPCToItem(barcode, item) {
   const email = (appState.user && appState.user.email) || 'unknown';
   const name = (appState.user && appState.user.name) || 'Unknown';
 
-  // Build the upc_mappings row
+  // Build the upc_mappings row. Post Path B, item.supabaseId is a
+  // master_items.id (itemMaster is now sourced from master_items). The
+  // mapping row carries master_item_id; purchase_item_id stays null so
+  // we don't accidentally tie the barcode to a procurement record.
   const payload = {
     barcode_raw: barcode,
     barcode_normalized: normBarcode,
-    purchase_item_id: item.supabaseId || null,
+    master_item_id: item.supabaseId || null,
+    purchase_item_id: null,
     item_name: item.name,
     item_brand: item.brand || null,
     item_category: item.category || null,
@@ -3705,20 +3742,28 @@ async function linkUPCToItem(barcode, item) {
   }
 
   if (approveNow) {
-    // Push the new value to purchase_items.upc on every approved path
-    // (blank add and overwrite both) so downstream lookups see the change
-    // immediately. Server-side trigger from upc_mappings→purchase_items
-    // (if present) is idempotent with this write.
+    // Post Path B, "approve" means write the barcode → master mapping
+    // into master_item_upcs. We DON'T touch purchase_items.upc anymore —
+    // that was the source of the cross-size UPC propagation issue cleaned
+    // up in migration 0022.
     if (item.supabaseId) {
-      supabaseRest.update(
-        'purchase_items',
-        'id=eq.' + encodeURIComponent(item.supabaseId),
-        { upc: barcode }
-      ).catch(() => {});
-      // Keep the local itemMaster entry in sync so the next scan in this
-      // session sees the new UPC without a round-trip.
-      const masterEntry = itemMaster.find(m => m.id === String(item.supabaseId) || m.id === item.id);
-      if (masterEntry) masterEntry.upc = barcode;
+      const miuPayload = {
+        master_item_id: item.supabaseId,
+        upc_raw: barcode,
+        upc_normalized: normBarcode,
+        source: policy.isUpdate ? 'scan_admin_overwrite' : 'scan_admin_blank_add',
+        notes: 'Approved inline via linkUPCToItem (' + policy.reason + ')',
+        added_by_email: email,
+      };
+      supabaseRest.insert('master_item_upcs', miuPayload).catch(function(e) {
+        // If the unique constraint fires (someone else already linked this
+        // UPC to a different master), the upc_mappings row is still
+        // 'approved' but the master_item_upcs insert fails. Surface a
+        // warning so admin sees the conflict.
+        console.warn('[upc] master_item_upcs insert failed (likely unique violation):', e);
+      });
+      // Local itemMaster doesn't carry UPC fields anymore (post Path B)
+      // — the upcMappingsCache update below is what serves the next scan.
     }
 
     const successMsg = policy.isUpdate
@@ -4122,18 +4167,21 @@ function validateItemMaster(source) {
   }
   var unknownCount = 0;
   var noNameCount = 0;
-  var withUpc = 0;
   for (var i = 0; i < n; i++) {
     var it = itemMaster[i];
     if (!it || !it.name || !String(it.name).trim()) noNameCount++;
     else if (it.name === 'Unknown Item') unknownCount++;
-    if (it && it.upc && String(it.upc).trim()) withUpc++;
   }
   if (unknownCount > n * 0.5 || noNameCount > n * 0.5) {
     showMasterBanner('Inventory loaded but ' + (unknownCount + noNameCount) + ' of ' + n + ' items have no name. Search will not match — restart the app.');
     return;
   }
-  console.log('[master] ' + source + ' validated: ' + n + ' items, ' + withUpc + ' with UPC, ' + unknownCount + ' Unknown, ' + noNameCount + ' nameless');
+  // Post Path B: items don't carry inline UPCs (they live in master_item_upcs
+  // and are loaded by loadApprovedUpcMappings). The "with UPC" count we
+  // used to log here is no longer meaningful on itemMaster — surface the
+  // upcMappingsCache size instead so the bar staff can see at a glance how
+  // many barcodes are scannable.
+  console.log('[master] ' + source + ' validated: ' + n + ' items, ' + Object.keys(upcMappingsCache).length + ' barcodes cached, ' + unknownCount + ' Unknown, ' + noNameCount + ' nameless');
   hideMasterBanner();
 }
 
@@ -4411,40 +4459,54 @@ function normalizeBarcode(code) {
   return digits.replace(/^0+/, '');
 }
 
-/* Load approved mappings from Supabase into the in-memory cache.
-   PostgREST caps anon queries at db-max-rows (default 1000), so a single
-   select=* silently truncates once we cross that threshold and any mapping
-   past page 1 disappears from `upcMappingsCache` — the symptom is "approved
-   UPC scans don't populate item details." Paginate the same way
-   loadSupabaseItems does. */
+/* Load approved barcode → master mappings from Supabase into the in-memory
+   cache. Source is master_item_upcs (post Path B); every row in that table
+   is approved by definition, so no status filter is needed.
+
+   Key shape (unchanged for downstream callers):
+     upcMappingsCache[upc_normalized] = {
+       title: master_items.name,
+       category: master_items.category,
+       masterId: master_items.id,
+       barcode: master_item_upcs.upc_raw,
+       approvedAt: master_item_upcs.added_at,
+     }
+
+   Why we still call this loadApprovedUpcMappings: the name is referenced
+   from many places (boot path, post-login hooks, periodic catalog sync,
+   the manual "refresh approvals" handler). Keeping the name avoids a
+   sprawling rename. */
 async function loadApprovedUpcMappings(force) {
   const now = Date.now();
   if (!force && (now - upcMappingsCacheLoadedAt) < UPC_CACHE_TTL_MS) {
     return; // cache still fresh
   }
   const PAGE_SIZE = 1000;
-  const MAX_PAGES = 50; // 50k mappings ceiling — well above realistic scale
+  const MAX_PAGES = 50;
   const next = {};
   let totalRows = 0;
+  // Embed-join to master_items so we can show the master's name when the
+  // counter scans a barcode that wasn't recently in the itemMaster cache.
   for (let page = 0; page < MAX_PAGES; page++) {
     const offset = page * PAGE_SIZE;
-    const qs = 'select=*&status=eq.approved&order=id&limit=' + PAGE_SIZE + '&offset=' + offset;
-    const { data, error } = await supabaseRest.query('upc_mappings', qs);
+    const qs = 'select=upc_raw,upc_normalized,master_item_id,added_at,master_items(name,category)&order=id&limit=' + PAGE_SIZE + '&offset=' + offset;
+    const { data, error } = await supabaseRest.query('master_item_upcs', qs);
     if (error) {
-      console.warn('UPC mappings load failed — using cached copy:', error);
+      console.warn('master_item_upcs load failed — using cached copy:', error);
       return;
     }
     if (!data || data.length === 0) break;
     for (const row of data) {
-      const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
+      const key = row.upc_normalized || normalizeBarcode(row.upc_raw);
       if (!key) continue;
+      const mi = row.master_items || null;
       next[key] = {
-        title: row.item_name,
-        brand: row.item_brand || '',
-        category: row.item_category || 'other',
-        masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
-        barcode: row.barcode_raw,
-        approvedAt: row.reviewed_at,
+        title: (mi && mi.name) || '',
+        brand: '',  // master_items has no brand column
+        category: (mi && mi.category) || 'other',
+        masterId: row.master_item_id ? String(row.master_item_id) : null,
+        barcode: row.upc_raw,
+        approvedAt: row.added_at,
       };
     }
     totalRows += data.length;
@@ -4457,7 +4519,7 @@ async function loadApprovedUpcMappings(force) {
       cache: upcMappingsCache, loadedAt: upcMappingsCacheLoadedAt
     }));
   } catch (e) {}
-  console.log('UPC mappings cache refreshed: ' + Object.keys(upcMappingsCache).length + ' entries (' + totalRows + ' rows fetched)');
+  console.log('master_item_upcs cache refreshed: ' + Object.keys(upcMappingsCache).length + ' entries (' + totalRows + ' rows fetched)');
 }
 
 /* Refresh the pending-approvals count (for Summary badge). */
@@ -4676,15 +4738,23 @@ function startUpcRealtime() {
   const role = appState.user && appState.user.role;
   if (role !== 'corporate' && role !== 'manager') return;
 
+  // Post Path B we watch BOTH tables:
+  //   - upc_mappings: pending submissions queue (admin toast on new pending)
+  //   - master_item_upcs: live approved barcodes (cache refresh on new row)
   upcRealtimeChannel = supabaseClient
-    .channel('upc-mappings-' + _tabSessionId)
+    .channel('upc-realtime-' + _tabSessionId)
     .on('postgres_changes', {
       event: '*',
       schema: 'public',
       table: 'upc_mappings',
     }, (evt) => onUpcRealtimeEvent(evt))
+    .on('postgres_changes', {
+      event: '*',
+      schema: 'public',
+      table: 'master_item_upcs',
+    }, (evt) => onUpcRealtimeEvent(evt))
     .subscribe((status) => {
-      if (status === 'SUBSCRIBED') console.log('[upc realtime] subscribed');
+      if (status === 'SUBSCRIBED') console.log('[upc realtime] subscribed (upc_mappings + master_item_upcs)');
       if (status === 'CHANNEL_ERROR') console.warn('[upc realtime] channel error');
     });
 }
@@ -4785,29 +4855,34 @@ function onPendingItemRealtimeEvent(evt) {
 function onUpcRealtimeEvent(evt) {
   const row = (evt && (evt.new || evt.old)) || {};
   const ev = evt && evt.eventType;
+  const tbl = evt && evt.table;
 
-  // Keep the badge + approved cache fresh on any change
-  loadPendingApprovalsCount();
-  if (ev === 'INSERT' && row.status === 'approved') {
-    const key = row.barcode_normalized || normalizeBarcode(row.barcode_raw);
-    if (key) {
-      upcMappingsCache[key] = {
-        title: row.item_name,
-        brand: row.item_brand || '',
-        category: row.item_category || 'other',
-        masterId: row.purchase_item_id ? String(row.purchase_item_id) : null,
-        barcode: row.barcode_raw,
-        approvedAt: row.reviewed_at || new Date().toISOString(),
-      };
+  if (tbl === 'master_item_upcs') {
+    // A barcode just got attached to a master (admin approval or fresh
+    // backfill). Refresh upcMappingsCache so the next scan resolves
+    // without waiting for the periodic catalog poll.
+    if (ev === 'INSERT' || ev === 'UPDATE') {
+      const key = row.upc_normalized || normalizeBarcode(row.upc_raw);
+      if (key) {
+        // We don't have the master name in the row itself — let
+        // loadApprovedUpcMappings populate the cache properly. The
+        // simplest correct thing is a forced refresh.
+        loadApprovedUpcMappings(true).catch(function() {});
+      }
+    } else if (ev === 'DELETE') {
+      const key = (row && (row.upc_normalized || normalizeBarcode(row.upc_raw))) || '';
+      if (key) delete upcMappingsCache[key];
     }
+    return;
   }
 
-  // Notify admins of new pending submissions so they can approve/reject live
+  // upc_mappings: pending-submission queue.
+  loadPendingApprovalsCount();
+
   if (ev === 'INSERT' && row.status === 'pending') {
     showToast('New UPC pending: ' + (row.item_name || row.barcode_raw), 'warn');
   }
 
-  // If the approvals modal is open, re-render it with fresh data
   const modal = document.getElementById('upcApprovalModal');
   if (modal && !modal.classList.contains('hide')) {
     renderPendingApprovals();
@@ -5213,9 +5288,16 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // it explicitly.
   const methodIsScan = entry.method === 'barcode' || entry.method === 'photo';
   const skuVal = entry.sku || null;
+  // Post Path-B, the phone's itemMaster is sourced from master_items, so
+  // entry.masterId IS a master_items.id. Write it to BOTH the legacy
+  // item_id (back-compat for any older reader) AND the new master_item_id
+  // column. Once the rewrite is fully deployed and stable, a follow-up
+  // can drop the item_id write.
+  const masterIdVal = isValidUuid(entry.masterId) ? entry.masterId : null;
   const payload = {
     audit_id: auditId,
-    item_id: isValidUuid(entry.masterId) ? entry.masterId : null,
+    item_id: masterIdVal,
+    master_item_id: masterIdVal,
     item_name: entry.name,
     category: entry.category || null,
     qty: Number(entry.qty) || 0,
