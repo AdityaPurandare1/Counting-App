@@ -2916,7 +2916,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.45';
+const APP_VERSION = '1.46';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6670,7 +6670,60 @@ function selectVenue(id) {
   // scoreSeverity's chronic bands compute correctly when the user
   // navigates to Variance / closes Count 1 here.
   loadAvtWeeksHistory(venue.id).catch(function() {});
-  showPage('count');
+  // v1.45: reconcile any stale cached audit. If the phone was offline / closed
+  // while admin cancelled the audit via desktop, appState.audit still carries
+  // status='active' or 'submitted' with count_phase='review' — which renders
+  // the misleading "Count 1 complete — recount in progress" lock screen for
+  // a venue that has no live audit. Fetch the current row before showing the
+  // count page so a cancelled or removed audit clears immediately.
+  reconcileLocalAuditWithServer(venue.id).finally(function() { showPage('count'); });
+}
+
+/* Verify the local appState.audit against the server. Clears the local
+   audit if it was cancelled (or deleted) remotely so the phone doesn't
+   keep showing stale recount/lock UI. Mismatches on a different venue
+   are also cleared — the local cache should only ever describe the
+   venue the user just opened.
+
+   Called from selectVenue (above) and on boot. Safe to no-op when:
+     - there's no cached audit at all
+     - the cached audit has no supabaseId (solo / offline audit)
+     - the cached audit belongs to a venue other than `venueId` */
+async function reconcileLocalAuditWithServer(venueId) {
+  if (!appState.audit) return;
+  if (!appState.audit.supabaseId) return;          // solo audit, nothing to reconcile
+  if (appState.audit.venueId !== venueId) return;  // not this venue's audit
+  try {
+    const { data, error } = await supabaseRest.query(
+      'kount_audits',
+      'select=id,status,count_phase&id=eq.' + encodeURIComponent(appState.audit.supabaseId) + '&limit=1'
+    );
+    if (error) { console.warn('[audit] reconcile fetch failed, keeping local:', error); return; }
+    const row = (data && data[0]) || null;
+    if (!row) {
+      // Audit row was deleted from the server — clear local
+      console.log('[audit] remote row missing, clearing local audit cache');
+      appState.audit = null;
+      saveState();
+      return;
+    }
+    if (row.status === 'cancelled') {
+      console.log('[audit] remote cancelled, clearing local audit cache');
+      // Tear down any lingering realtime channel for the cancelled audit
+      try { if (typeof leaveNetworkedAudit === 'function') leaveNetworkedAudit(); } catch (e) {}
+      appState.audit = null;
+      appState.currentZone = (appState.currentVenue && appState.currentVenue.zones && appState.currentVenue.zones[0]) || null;
+      saveState();
+      return;
+    }
+    // Server still says active/submitted — sync the latest status + phase
+    // so the lock-screen logic in renderCountPage reflects truth.
+    appState.audit.status = row.status;
+    appState.audit.countPhase = row.count_phase;
+    saveState();
+  } catch (e) {
+    console.warn('[audit] reconcile threw, keeping local:', e);
+  }
 }
 
 /* ================================================================
@@ -12596,7 +12649,11 @@ if (appState.user) {
     // Restored session — pull custom zones + start realtime for this venue
     loadVenueZonesFromSupabase(appState.currentVenue.id).catch(function() {});
     startVenueZonesRealtime(appState.currentVenue.id);
-    showPage('count');
+    // v1.45: reconcile the restored audit against the server before
+    // rendering, so a remotely-cancelled audit clears its stale
+    // "recount in progress" lock screen instead of waiting for the user
+    // to navigate to venues and back.
+    reconcileLocalAuditWithServer(appState.currentVenue.id).finally(function() { showPage('count'); });
   } else {
     showPage('venues');
   }
