@@ -2940,7 +2940,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.49';
+const APP_VERSION = '1.50';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -12925,7 +12925,27 @@ if (appState.user) {
 }
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // Auto-apply new deploys. Installed iOS PWAs background instead of fully
+  // quitting, so a bare register() rarely re-checks sw.js and devices can sit
+  // on a stale cached bundle for days. We (1) reload once when a freshly
+  // activated SW takes control, and (2) poke reg.update() on launch and every
+  // time the app returns to the foreground so the check actually happens.
+  var _hadController = !!navigator.serviceWorker.controller;
+  var _swReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function () {
+    // Only reload if a previous SW was controlling this page (i.e. a real
+    // update, not the first-ever install) and guard against reload loops.
+    if (!_hadController || _swReloaded) return;
+    _swReloaded = true;
+    location.reload();
+  });
+  navigator.serviceWorker.register('sw.js').then(function (reg) {
+    var poke = function () { try { reg.update(); } catch (e) {} };
+    poke();
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') poke();
+    });
+  }).catch(function () {});
 }
 </script>
 </body>
