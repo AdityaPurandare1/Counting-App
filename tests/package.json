@@ -1,0 +1,13 @@
+{
+  "name": "counting-app-tests",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Robot-QA: Playwright personas drive the real Counting-App PWA against a faithful in-memory Supabase mock.",
+  "scripts": {
+    "test": "playwright test",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0"
+  }
+}
