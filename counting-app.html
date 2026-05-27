@@ -2946,7 +2946,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.51';
+const APP_VERSION = '1.52';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7614,26 +7614,33 @@ function renderGuidedMode() {
   if (zoneItems.length > 0) {
     html += '<div class="list-header"><h3>' + esc(appState.currentZone) + ' — counted</h3><span class="total">' + zoneItems.length + '</span></div>';
     html += zoneItems.map(item => {
-      const nameTap = (!isLocked && item.masterId) ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer"' : '';
-      const controls = isLocked
-        ? '<div class="qty-val">' + formatQty(item.qty) + '</div>'
-        : '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:14px;margin-right:2px">⇄</button>' +
-          '<div class="c-qty">' +
+      // Vertical card: name + meta across the TOP (full width, no truncation),
+      // big − / qty / + centered on the BOTTOM so it's easy to read and tap.
+      const nameTap = (!isLocked && item.masterId)
+        ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer;flex:1;min-width:0"'
+        : ' style="flex:1;min-width:0"';
+      const meta =
+        '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
+        (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
+        (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '');
+      const top =
+        '<div style="display:flex;align-items:center;gap:12px">' +
+          '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
+          '<div class="c-info"' + nameTap + '>' +
+            '<div class="c-name">' + esc(item.name) + '</div>' +
+            '<div class="c-meta">' + meta + '</div>' +
+          '</div>' +
+          (isLocked ? '' : '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:16px;flex-shrink:0">⇄</button>') +
+        '</div>';
+      const bottom = isLocked
+        ? '<div style="text-align:center"><span class="qty-val" style="font-size:24px">' + formatQty(item.qty) + '</span></div>'
+        : '<div class="c-qty" style="justify-content:center;gap:22px">' +
             '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
-            '<span class="qty-val">' + formatQty(item.qty) + '</span>' +
+            '<span class="qty-val" style="font-size:24px;min-width:48px;text-align:center">' + formatQty(item.qty) + '</span>' +
             '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', 1)">+</button>' +
           '</div>';
-      return '<div class="c-item fade-in">' +
-        '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
-        '<div class="c-info"' + nameTap + '>' +
-          '<div class="c-name">' + esc(item.name) + '</div>' +
-          '<div class="c-meta">' +
-            '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
-            (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
-            (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
-          '</div>' +
-        '</div>' +
-        controls +
+      return '<div class="c-item fade-in" style="flex-direction:column;align-items:stretch;gap:12px">' +
+        top + bottom +
       '</div>';
     }).join('');
   } else {
