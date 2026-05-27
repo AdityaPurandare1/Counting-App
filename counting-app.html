@@ -1345,95 +1345,6 @@ html, body {
   margin: 22px 0 8px;
 }
 
-/* ---------- QUICK COUNT GRID ---------- */
-.quick-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.quick-tile {
-  background: var(--surface);
-  border: 1.5px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 12px;
-  text-align: center;
-  cursor: pointer;
-  transition: all 0.12s;
-  position: relative;
-  min-height: 96px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  box-shadow: var(--shadow-sm);
-}
-
-.quick-tile:active {
-  transform: scale(0.96);
-  background: var(--surface2);
-}
-
-.quick-tile.locked {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-.quick-tile .qt-minus {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  border: 1.5px solid var(--border);
-  background: var(--surface2);
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1;
-  padding: 0;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.quick-tile .qt-minus:active { transform: scale(0.9); background: var(--danger); color: #000; }
-
-.quick-tile .qt-name {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  line-height: 1.2;
-}
-
-.quick-tile .qt-count {
-  font-family: var(--mono);
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--accent);
-  margin-top: 6px;
-  letter-spacing: -1px;
-  line-height: 1;
-}
-
-.quick-tile .qt-cat {
-  font-size: 10px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  margin-top: 4px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-}
-
-.quick-tile.has-count {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
 /* ---------- VARIANCE ROW ---------- */
 .var-row {
   background: var(--surface);
@@ -2199,64 +2110,10 @@ html, body {
       <div id="lastUpcErrorBanner"></div>
       <div id="countProgress" class="progress-wrap"></div>
       <div class="zone-tabs" id="zoneTabs"></div>
-      <!-- Mode toggle hidden: Guided is now the single unified count view
-           (search + scan/photo/manual + inline-editable list). Kept in the
-           DOM so setCountMode/render logic still resolves the buttons. -->
-      <div class="mode-toggle" style="display:none">
-        <button class="mode-btn active" data-mode="guided" onclick="setCountMode('guided')">Guided</button>
-        <button class="mode-btn" data-mode="free" onclick="setCountMode('free')">Free count</button>
-        <button class="mode-btn" data-mode="quick" onclick="setCountMode('quick')">Quick tap</button>
-      </div>
+      <!-- Guided is the single unified count view: it builds its own search,
+           scan/photo/manual buttons, This Zone / All Count toggle, and the
+           inline-editable counted-item list inside #guidedContent. -->
       <div id="guidedContent"></div>
-      <div id="freeContent" class="hide">
-      <div class="scan-actions" id="scanActions">
-        <button class="scan-btn barcode" onclick="openBarcodeScanner()">
-          <span class="scan-icon">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor">
-              <rect x="1" y="3" width="2" height="12"/>
-              <rect x="5" y="3" width="1" height="12"/>
-              <rect x="8" y="3" width="2" height="12"/>
-              <rect x="12" y="3" width="1" height="12"/>
-              <rect x="15" y="3" width="2" height="12"/>
-            </svg>
-          </span>
-          Barcode
-        </button>
-        <button class="scan-btn photo" onclick="openPhotoCapture()">
-          <span class="scan-icon">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="2" y="5" width="14" height="10" rx="2"/>
-              <circle cx="9" cy="10" r="2.5"/>
-              <path d="M6 5l1-2h4l1 2"/>
-            </svg>
-          </span>
-          Photo
-        </button>
-        <button class="scan-btn manual" onclick="openManualEntry()">
-          <span class="scan-icon">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M13 3l2 2-8 8H4v-3z"/>
-            </svg>
-          </span>
-          Manual
-        </button>
-      </div>
-      <div class="search-bar">
-        <span class="si">
-          <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-            <circle cx="6" cy="6" r="4"/>
-            <path d="M9 9l3.5 3.5"/>
-          </svg>
-        </span>
-        <input type="text" placeholder="Search counted items..." id="searchInput" oninput="renderFreeList()">
-      </div>
-      <div class="list-header">
-        <h3>Counted items</h3>
-        <span class="total" id="zoneTotal">0</span>
-      </div>
-      <div id="countList"></div>
-    </div>
-    <div id="quickContent" class="hide"></div>
     </div><!-- end activeAuditContent -->
   </div>
 
@@ -4289,7 +4146,6 @@ const appState = {
   ],
   currentVenue: null,
   currentZone: null,
-  countMode: 'guided',
   audit: null,
   selectedIssue: 'none',
   guidedIssue: 'none',
@@ -5137,6 +4993,11 @@ async function syncRecountsToSupabase() {
       return {
         audit_id: auditId,
         item_id: null,                                // AVT flow doesn't have a purchase_items id today
+        // Path B: write the master_items id when the source row has one (the
+        // all-counted-items fallback derives rows from counted entries, which
+        // carry masterId). AVT/name-derived rows send null. Never put a master
+        // id into the legacy item_id column.
+        master_item_id: rec.masterId || null,
         item_name: cleanName,
         severity: String(rec.severity || 'MEDIUM').toUpperCase(),
         variance_value: Number(rec.varianceValue || 0),
@@ -5193,6 +5054,12 @@ async function syncRecountUpdateToSupabase(key) {
     counter_initials: rec.counterInitials || null,
     variance_qty: rec.variance != null ? Number(rec.variance) : null,
   };
+
+  // Path B: keep master_item_id in sync when the local row knows its master
+  // id. Only set it when present so we never null out a value the insert (or
+  // a later backfill) already wrote. AVT/name-derived rows have no masterId
+  // and leave the column untouched.
+  if (rec.masterId) patch.master_item_id = rec.masterId;
 
   // Helper to mark a row as needing retry. We persist via saveState so the
   // pending flag survives a tab close, and surface a toast so the user
@@ -5303,7 +5170,9 @@ function entryFromSupabaseRow(row) {
     notes: row.issue_notes,
     issue: row.issue || 'none',
     photoId: row.photo_id,
-    masterId: row.item_id,
+    // Path B: the master_items id now lives in master_item_id; item_id is
+    // written null. Fall back to item_id for legacy rows written before the fix.
+    masterId: row.master_item_id ?? row.item_id,
     method: row.method,
     counterEmail: row.counted_by_email,
     counterName: row.counted_by_name,
@@ -5714,6 +5583,9 @@ async function refreshRecountsFromSupabase() {
         itemName: r.item_name,
         // Keep the avtItem key so renderRecountPage / submitGuidedEntry pick the new format
         avtItem: { itemName: r.item_name },
+        // Path B: carry the master_items id back into local state so a later
+        // update re-sends it. Null for AVT/name-derived rows.
+        masterId: r.master_item_id ? String(r.master_item_id) : null,
         severity: String(r.severity || 'MEDIUM').toUpperCase(),
         varianceValue: Number(r.variance_value || 0),
         variance: r.variance_qty != null ? Number(r.variance_qty) : 0,
@@ -6967,27 +6839,15 @@ function renderCountPage() {
     updateHeaderCount();
     startTimer();
 
-    // Unified count: the Free/Quick tabs are hidden, so the count screen
-    // always renders the single Guided view. Pin the mode so a previously
-    // persisted 'free'/'quick' preference can't strand a counter off it.
-    appState.countMode = 'guided';
-    const mode = appState.countMode;
-    document.querySelectorAll('.mode-btn[data-mode]').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.mode === mode);
-    });
-
-    document.getElementById('guidedContent').classList.toggle('hide', mode !== 'guided');
-    document.getElementById('freeContent').classList.toggle('hide', mode !== 'free');
-    document.getElementById('quickContent').classList.toggle('hide', mode !== 'quick');
+    // Unified count: Guided is the single count view.
+    document.getElementById('guidedContent').classList.remove('hide');
 
     // Disable scan buttons during active count (safety net — should not be locked here)
     document.querySelectorAll('.scan-btn').forEach(btn => {
       btn.classList.remove('locked');
     });
 
-    if (mode === 'guided') renderGuidedMode();
-    else if (mode === 'quick') renderQuickMode();
-    else renderFreeList();
+    renderGuidedMode();
 
     // Show "Close Count 1" button for managers/admins during count1 phase
     const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
@@ -7182,11 +7042,6 @@ function endAuditEarly() {
     showConfirm('Cancel this audit? ' + itemCount + ' items have been counted and will be discarded. This cannot be undone.',
       () => doCancel('Audit cancelled (' + itemCount + ' items discarded)'));
   }
-}
-
-function setCountMode(mode) {
-  appState.countMode = mode;
-  renderCountPage();
 }
 
 function renderProgress() {
@@ -8009,59 +7864,10 @@ function closeGuidedEntry(event) {
   document.getElementById('recountReasonGroup')?.classList.add('hide');
 }
 
-/* ================================================================
-   FREE COUNT MODE
-   ================================================================ */
-/* Re-render whichever count view is active. adjustQuantity & friends used to
-   hard-call renderFreeList(), which only refreshes the (now hidden) Free
-   list; the unified Guided view needs its own re-render after an inline edit. */
+/* Re-render the count view after an inline edit (adjustQuantity & friends).
+   Guided is the single unified count view, so this re-renders it. */
 function refreshCountList() {
-  const mode = appState.countMode;
-  if (mode === 'quick') renderQuickMode();
-  else if (mode === 'free') renderFreeList();
-  else renderGuidedMode();
-}
-
-function renderFreeList() {
-  const items = appState.audit?.counts[appState.currentZone] || [];
-  const search = (document.getElementById('searchInput')?.value || '').toLowerCase();
-  const filtered = search
-    ? items.filter(i => i.name.toLowerCase().includes(search) || (i.sku || '').toLowerCase().includes(search))
-    : items;
-
-  document.getElementById('zoneTotal').textContent = filtered.length + ' item' + (filtered.length !== 1 ? 's' : '');
-
-  if (filtered.length === 0) {
-    document.getElementById('countList').innerHTML =
-      '<div class="empty-state">' +
-        '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5">' +
-          '<rect x="6" y="4" width="24" height="28" rx="3"/>' +
-          '<path d="M12 12h12M12 18h12M12 24h6"/>' +
-        '</svg>' +
-        '<p>No items in this zone yet.</p>' +
-      '</div>';
-    return;
-  }
-
-  document.getElementById('countList').innerHTML = filtered.map(item =>
-    '<div class="c-item fade-in">' +
-      '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
-      '<div class="c-info">' +
-        '<div class="c-name">' + esc(item.name) + '</div>' +
-        '<div class="c-meta">' +
-          '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
-          (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
-          (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
-        '</div>' +
-      '</div>' +
-      '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:14px;margin-right:2px">⇄</button>' +
-      '<div class="c-qty">' +
-        '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
-        '<span class="qty-val">' + formatQty(item.qty) + '</span>' +
-        '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', 1)">+</button>' +
-      '</div>' +
-    '</div>'
-  ).join('');
+  renderGuidedMode();
 }
 
 /* ---------- Move a counted entry to a different zone ----------
@@ -8156,158 +7962,6 @@ function moveEntryToZone(entryId, toZone) {
     showToast('Moved to ' + toZone, 'success');
   }
   renderCountPage();
-}
-
-/* ================================================================
-   QUICK TAP MODE
-   ================================================================ */
-/* ================================================================
-   QUICK TAP MODE
-   ================================================================ */
-function renderQuickMode() {
-  const isLocked = appState.audit.status === 'submitted';
-  const countedMap = {};
-  Object.values(appState.audit.counts).forEach(zoneItems => {
-    zoneItems.forEach(item => {
-      if (item.masterId) countedMap[item.masterId] = (countedMap[item.masterId] || 0) + item.qty;
-    });
-  });
-
-  // Show search + recently counted as quick-tap tiles
-  let html = '<div class="search-bar" style="margin-bottom:12px">' +
-    '<span class="si"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M9 9l3.5 3.5"/></svg></span>' +
-    '<input type="text" placeholder="Search to quick-tap..." id="quickSearchInput" oninput="onQuickSearch(this.value)" autocomplete="off">' +
-  '</div>';
-  html += '<div id="quickSearchResults"></div>';
-
-  // Show items already counted as quick-tap tiles for fast +1
-  const countedItems = Object.entries(countedMap);
-  if (countedItems.length > 0) {
-    html += '<div class="list-header"><h3>Tap to +1</h3></div>';
-    html += '<div class="quick-grid">';
-    html += countedItems.slice(0, 30).map(([masterId, qty]) => {
-      const item = itemMaster.find(i => i.id === masterId);
-      if (!item) return '';
-      return '<div class="quick-tile has-count' + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + masterId + '\')">' +
-        (isLocked ? '' : '<button class="qt-minus" onclick="event.stopPropagation();quickTapMinus(\'' + masterId + '\')" aria-label="subtract one">−</button>') +
-        '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
-        '<div class="qt-count">' + qty + '</div>' +
-        '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
-      '</div>';
-    }).join('');
-    html += '</div>';
-  } else {
-    html += '<div class="empty-state"><p>Search for items above, then tap to count. Items you have counted will appear here for quick +1.</p></div>';
-  }
-
-  document.getElementById('quickContent').innerHTML = html;
-}
-
-let quickSearchTimeout = null;
-
-function onQuickSearch(value) {
-  if (quickSearchTimeout) clearTimeout(quickSearchTimeout);
-  quickSearchTimeout = setTimeout(() => doQuickSearch(value), 150);
-}
-
-function doQuickSearch(value) {
-  const query = value.toLowerCase().trim();
-  const resultsEl = document.getElementById('quickSearchResults');
-
-  if (query.length < 1) {
-    resultsEl.innerHTML = '';
-    return;
-  }
-
-  const isLocked = appState.audit?.status === 'submitted';
-  const countedMap = {};
-  Object.values(appState.audit.counts).forEach(zoneItems => {
-    zoneItems.forEach(item => {
-      if (item.masterId) countedMap[item.masterId] = (countedMap[item.masterId] || 0) + item.qty;
-    });
-  });
-
-  const matches = [];
-  for (let i = 0; i < itemMaster.length && matches.length < 20; i++) {
-    const item = itemMaster[i];
-    const hay = ((item.name || '') + ' ' + (item.brand || '') + ' ' + (item.sku || '') + ' ' + (item.upc || '')).toLowerCase();
-    if (hay.includes(query)) {
-      matches.push(item);
-    }
-  }
-
-  if (matches.length === 0) {
-    resultsEl.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--text-dim);text-align:center">No matches</div>';
-    return;
-  }
-
-  resultsEl.innerHTML = '<div class="quick-grid">' + matches.map(item => {
-    const count = countedMap[item.id] || 0;
-    return '<div class="quick-tile ' + (count > 0 ? 'has-count' : '') + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + item.id + '\')">' +
-      (count > 0 && !isLocked ? '<button class="qt-minus" onclick="event.stopPropagation();quickTapMinus(\'' + item.id + '\')" aria-label="subtract one">−</button>' : '') +
-      '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
-      '<div class="qt-count">' + count + '</div>' +
-      '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
-    '</div>';
-  }).join('') + '</div>';
-}
-
-function quickTap(masterId) {
-  if (isAuditLocked()) return; // FIX #1
-
-  const item = itemMaster.find(i => i.id === masterId);
-  if (!item) return;
-
-  const zoneItems = appState.audit.counts[appState.currentZone] || [];
-  const existing = zoneItems.find(i => i.masterId === masterId);
-
-  if (existing) {
-    existing.qty += 1;
-    logActivity('+1 ' + item.name + ' (' + existing.qty + ' total)');
-
-    // Mirror the +1 to Supabase as a delta. Same delta-semantics rationale
-    // as the duplicate-count path (yesterday's fix): the 23505/merge path
-    // computes existing.qty + payload.qty, which correctly accumulates
-    // across both the local race (first insert still in flight) and
-    // cross-device concurrent counts (another phone +1ing the same row).
-    if (appState.audit && appState.audit.supabaseId) {
-      const deltaEntry = Object.assign({}, existing, { qty: 1 });
-      syncEntryToSupabase(deltaEntry, appState.currentZone).then(function () {
-        if (!existing.supabaseId && deltaEntry.supabaseId) {
-          existing.supabaseId = deltaEntry.supabaseId;
-          saveState();
-        }
-      }).catch(function (err) {
-        console.warn('[audit] quickTap delta sync failed:', err);
-        updateOfflineBannerState('error');
-      });
-    }
-  } else {
-    addCountEntry(item.name, item.category, 1, 'guided', item.sku, null, 'none', null, null, masterId);
-  }
-
-  if (navigator.vibrate) navigator.vibrate(30);
-  saveState();
-  renderQuickMode();
-  renderProgress();
-  updateHeaderCount();
-}
-
-/* Quick-mode −1. Counter feedback: the quick tiles could only add, with no
-   way to undo an accidental tap. Decrements the current-zone entry for this
-   master, reusing adjustQuantity so the −1 inherits the absolute-qty sync,
-   remove-at-zero confirm, and the orphan-heal added for the FK-outage rows. */
-function quickTapMinus(masterId) {
-  if (isAuditLocked()) return;
-  if (!appState.audit) return;
-  const zoneItems = appState.audit.counts[appState.currentZone] || [];
-  const existing = zoneItems.find(i => i.masterId === masterId);
-  if (!existing) { showToast('Not counted in this zone yet', 'warn'); return; }
-  adjustQuantity(existing.id, -1);
-  if (navigator.vibrate) navigator.vibrate(20);
-  renderQuickMode();
-  renderProgress();
-  updateHeaderCount();
 }
 
 /* ================================================================
@@ -11076,6 +10730,9 @@ function closeCount1() {
           appState.audit.recounts[recountKey(item.avt.itemName, zone)] = {
             itemName: item.avt.itemName,
             avtItem: item.avt,
+            // AVT rows are name-derived from the variance report and carry no
+            // master_items id; they legitimately sync master_item_id = null.
+            masterId: null,
             severity: item.severity,
             varianceValue: item.avt.varianceValue,
             variance: item.avt.variance,
@@ -11106,9 +10763,14 @@ function closeCount1() {
           byName[key] = {
             name: item.name,
             category: item.category || '',
+            // Counted entries carry a master_items id; preserve it so the
+            // recount row can write master_item_id (Path B). First non-empty
+            // masterId wins — same name across zones maps to one master.
+            masterId: item.masterId || null,
             zoneQtys: {},
           };
         }
+        if (!byName[key].masterId && item.masterId) byName[key].masterId = item.masterId;
         const zone = item.zone || '';
         byName[key].zoneQtys[zone] = (byName[key].zoneQtys[zone] || 0) + (Number(item.qty) || 0);
       });
@@ -11118,6 +10780,7 @@ function closeCount1() {
           appState.audit.recounts[recountKey(entry.name, zone)] = {
             itemName: entry.name,
             avtItem: null,
+            masterId: entry.masterId || null,
             severity: 'MEDIUM',
             varianceValue: 0,
             variance: 0,
@@ -12208,7 +11871,9 @@ async function hydrateSupabaseHistoricAudit(auditId) {
         notes: e.issue_notes,
         issue: e.issue || 'none',
         method: e.method,
-        masterId: e.item_id,
+        // Path B: prefer master_item_id; item_id is now written null. Legacy
+        // rows (pre-fix) carry the real id in item_id, so fall back to it.
+        masterId: e.master_item_id ?? e.item_id,
         counterEmail: e.counted_by_email,
         counterName: e.counted_by_name,
         timestamp: e.timestamp,
