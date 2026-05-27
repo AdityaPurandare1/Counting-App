@@ -665,9 +665,8 @@ html, body {
   font-weight: 700;
   font-size: 16px;
   color: var(--primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
   line-height: 1.25;
 }
 
@@ -2687,6 +2686,11 @@ html, body {
       <div id="manualExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
     <button class="submit-btn" onclick="submitManualEntry()">Add to count</button>
+    <button id="manualCreateBtn"
+      onclick="createManualForCatalog()"
+      style="display:none;width:100%;margin-top:8px;background:var(--accent);color:#000;border:none;padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:700;font-size:13px;cursor:pointer">
+      ➕ Add "<span id="manualCreateName"></span>" to catalog
+    </button>
     <button id="manualSuggestBtn"
       onclick="suggestManualForCatalog()"
       style="display:none;width:100%;margin-top:8px;background:var(--surface2);color:var(--accent);border:1px solid var(--accent);padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:600;font-size:13px;cursor:pointer">
@@ -2821,6 +2825,8 @@ html, body {
       </label>
       <div id="photoExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
+    <button id="photoCreateBtn" onclick="createPhotoForCatalog()" style="display:none;width:100%;margin-bottom:8px;background:var(--accent);color:#000;border:none;padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:700;font-size:13px;cursor:pointer">➕ Add "<span id="photoCreateName"></span>" to catalog</button>
+    <button id="photoSuggestBtn" onclick="suggestPhotoForCatalog()" style="display:none;width:100%;margin-bottom:8px;background:var(--surface2);color:var(--accent);border:1px solid var(--accent);padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:600;font-size:13px;cursor:pointer">Suggest "<span id="photoSuggestName"></span>" for catalog</button>
     <button class="submit-btn" onclick="submitPhotoEntry()">Add to count</button>
   </div>
 </div>
@@ -2940,7 +2946,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.50';
+const APP_VERSION = '1.51';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4939,6 +4945,13 @@ function isValidUuid(v) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(v || ''));
 }
 
+/* Counters/managers should never see raw UUIDs. Show a sku/identifier only
+   when it's human-meaningful (e.g. a scanned UPC); hide master_items UUIDs. */
+function visibleSku(sku) {
+  const s = String(sku || '').trim();
+  return (s && !isValidUuid(s)) ? s : '';
+}
+
 async function startNetworkedAudit(venue) {
   const role = appState.user && appState.user.role;
   if (role !== 'corporate' && role !== 'manager') {
@@ -5954,6 +5967,111 @@ function addCustomItem(name, brand, category, subcategory, upc) {
 
   console.log('Custom item added: ' + name + ' (ID: ' + id + ')');
   return id;
+}
+
+/* ---------- Admin: create a catalog (master_items) row from the app ----------
+   Corporate-only. RLS migration 0028 authorizes corporate JWTs to INSERT
+   master_items directly, and 0027 lets them attach the UPC to
+   master_item_upcs — so a signed-in corporate admin creates the item straight
+   from the phone, no admin-desktop round-trip. The new row is pushed into the
+   local catalog so the in-progress count links to it immediately. Returns the
+   new master_items id, or null on failure. */
+function isCorporateUser() {
+  return !!(appState.user && appState.user.role === 'corporate');
+}
+
+function masterCategoryForCreate(appCategory) {
+  // Map the app's coarse category selector onto the catalog's convention.
+  var map = {
+    wine: 'Wine Cost',
+    spirits: 'Liquor Cost', liquor: 'Liquor Cost',
+    beer: 'Beer Cost',
+    na: 'N/A Beverage Cost', 'n/a': 'N/A Beverage Cost', non_alcoholic_beverage: 'N/A Beverage Cost',
+    food: 'Bar Consumables', other: 'Bar Consumables', consumable: 'Bar Consumables',
+  };
+  return map[String(appCategory || '').toLowerCase().trim()] || 'Bar Consumables';
+}
+
+function parseBottleSize(text) {
+  var m = String(text || '').match(/(\d+(?:\.\d+)?)\s*(ml|cl|l|oz|each|ea)\b/i);
+  if (!m) return { size: null, unit: null };
+  var size = parseFloat(m[1]), unit = m[2].toLowerCase();
+  if (unit === 'cl') { size *= 10; unit = 'ml'; }
+  return { size: isFinite(size) ? size : null, unit: unit };
+}
+
+let _defaultOrgId = null;
+async function getDefaultOrgId() {
+  if (_defaultOrgId) return _defaultOrgId;
+  try {
+    var r = await supabaseRest.query('master_items', 'select=organization_id&organization_id=not.is.null&limit=1');
+    if (r.data && r.data[0]) _defaultOrgId = r.data[0].organization_id;
+  } catch (e) {}
+  return _defaultOrgId;
+}
+
+async function createMasterItemFromApp(payload) {
+  if (!isCorporateUser()) { showToast('Only corporate admins can add catalog items', 'error'); return null; }
+  if (!currentSupabaseJwt) { showToast('Sign in to add to the catalog', 'error'); return null; }
+  var name = String((payload && payload.name) || '').trim();
+  if (!name) { showToast('Item name required', 'error'); return null; }
+
+  // Compose a catalog-style display name: "<Brand> <Name> <Size>".
+  var brand = String(payload.brand || '').trim();
+  var composed = name;
+  if (brand && composed.toLowerCase().indexOf(brand.toLowerCase()) === -1) composed = brand + ' ' + composed;
+  var sizeText = String(payload.size || payload.details || '').trim();
+  var sizeTok = sizeText.match(/(\d+(?:\.\d+)?)\s*(ml|cl|l|oz)\b/i);
+  if (sizeTok) {
+    var compact = sizeTok[0].replace(/\s+/g, '');
+    if (composed.toLowerCase().indexOf(compact.toLowerCase()) === -1) composed += ' ' + compact;
+  }
+  composed = composed.replace(/\s+/g, ' ').trim();
+
+  var parsed = parseBottleSize(sizeText || name);
+  var row = {
+    name: composed,
+    category: masterCategoryForCreate(payload.category),
+    base_size: parsed.size,
+    base_unit: parsed.unit,
+    is_active: true,
+  };
+  var org = await getDefaultOrgId();
+  if (org) row.organization_id = org;
+
+  var resp = await supabaseRest.insert('master_items', row);
+  if (resp.error || !resp.data || !resp.data[0]) {
+    var msg = String((resp.error && resp.error.message) || resp.error || 'unknown');
+    if (/42501|row-level security|403/i.test(msg)) showToast('Not allowed — sign in as a corporate admin to add catalog items', 'error');
+    else showToast('Could not add to catalog: ' + msg.slice(0, 90), 'error');
+    return null;
+  }
+  var master = resp.data[0];
+
+  // Attach the UPC so future scans match this master (best-effort).
+  var upcDigits = String(payload.upc || '').replace(/\D/g, '').replace(/^0+/, '');
+  if (upcDigits) {
+    supabaseRest.insert('master_item_upcs', {
+      master_item_id: master.id,
+      upc_raw: String(payload.upc).trim(),
+      upc_normalized: upcDigits,
+      source: 'app_admin_create',
+      notes: 'Created in-app by ' + ((appState.user && appState.user.email) || 'admin'),
+      added_by_email: (appState.user && appState.user.email) || null,
+    }).catch(function () {});
+  }
+
+  // Make it usable in this count immediately: add to the live catalog +
+  // carried set so it links now and shows in search for the rest of the audit.
+  itemMaster.push({
+    id: master.id, name: master.name, brand: brand || '',
+    category: master.category, subcategory: '',
+    sku: upcDigits || '', upc: upcDigits || '', par: 0, expectedQty: 0,
+  });
+  try { carriedSet.add(String(master.id)); } catch (e) {}
+  logActivity('Created catalog item "' + master.name + '"');
+  showToast('Added to catalog: ' + master.name, 'success');
+  return master.id;
 }
 
 /* ================================================================
@@ -7361,6 +7479,87 @@ function updateHeaderCount() {
   }
 }
 
+/* All Count view: 'zone' = current zone (default, inline-editable),
+   'all' = every zone's totals per item, expandable to a per-zone breakdown
+   that's also editable. */
+let countView = 'zone';
+const allCountExpanded = new Set();
+
+function setCountView(v) {
+  countView = (v === 'all') ? 'all' : 'zone';
+  renderGuidedMode();
+}
+
+function toggleAllCountRow(keyEnc) {
+  const key = decodeURIComponent(keyEnc);
+  if (allCountExpanded.has(key)) allCountExpanded.delete(key); else allCountExpanded.add(key);
+  renderGuidedMode();
+}
+
+/* Aggregate every zone's entries by item (master id, else name). Each group
+   carries the cross-zone total plus the individual per-zone rows (so the
+   breakdown can edit each zone's entry directly). */
+function getAllCountAggregated() {
+  const groups = {};
+  Object.entries(appState.audit.counts).forEach(function ([zone, items]) {
+    items.forEach(function (item) {
+      const key = item.masterId || ('n:' + String(item.name || '').toLowerCase());
+      if (!groups[key]) groups[key] = { key: key, name: item.name, category: item.category, total: 0, rows: [] };
+      groups[key].total += Number(item.qty) || 0;
+      groups[key].rows.push({ zone: zone, entryId: item.id, qty: item.qty });
+    });
+  });
+  return Object.values(groups).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+}
+
+function renderAllCountList() {
+  const groups = getAllCountAggregated();
+  if (groups.length === 0) {
+    return '<div class="empty-state">' +
+      '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
+      '<p>Nothing counted yet across any zone.</p></div>';
+  }
+  const isLocked = appState.audit.status === 'submitted';
+  let h = '<div class="list-header"><h3>All zones — totals</h3><span class="total">' + groups.length + ' item' + (groups.length === 1 ? '' : 's') + '</span></div>';
+  h += groups.map(function (g) {
+    const expanded = allCountExpanded.has(g.key);
+    let row = '<div class="c-item fade-in" style="flex-direction:column;align-items:stretch;gap:10px">';
+    row += '<div style="display:flex;align-items:center;gap:12px;cursor:pointer" onclick="toggleAllCountRow(\'' + encodeURIComponent(g.key) + '\')">' +
+        '<div class="c-thumb" style="color:' + getCategoryColor(g.category) + '">' + getCategoryLabel(g.category) + '</div>' +
+        '<div class="c-info"><div class="c-name">' + esc(g.name) + '</div>' +
+          '<div class="c-meta"><span>' + g.rows.length + ' zone' + (g.rows.length === 1 ? '' : 's') + '</span></div></div>' +
+        '<div class="qty-val" style="font-size:22px">' + formatQty(g.total) + '</div>' +
+        '<div style="color:var(--text-dim);width:18px;text-align:center;font-size:14px">' + (expanded ? '▾' : '▸') + '</div>' +
+      '</div>';
+    if (expanded) {
+      const sorted = g.rows.slice().sort(function (a, b) { return String(a.zone).localeCompare(String(b.zone)); });
+      row += '<div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px">';
+      row += sorted.map(function (r) {
+        return '<div style="display:flex;align-items:center;gap:10px">' +
+          '<div style="flex:1;font-size:13px;color:var(--text-muted)">' + esc(r.zone) + '</div>' +
+          (isLocked
+            ? '<span class="qty-val">' + formatQty(r.qty) + '</span>'
+            : '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', -1)">-</button>' +
+              '<span class="qty-val" style="min-width:30px;text-align:center">' + formatQty(r.qty) + '</span>' +
+              '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', 1)">+</button>') +
+        '</div>';
+      }).join('');
+      row += '</div>';
+    }
+    row += '</div>';
+    return row;
+  }).join('');
+  return h;
+}
+
+/* Adjust an entry from the All Count view, where the entry may live in a zone
+   other than the current one. Find its zone, then delegate to adjustQuantity. */
+function adjustEntryById(entryId, delta) {
+  for (const [zone, items] of Object.entries(appState.audit.counts)) {
+    if (items.some(function (i) { return i.id === entryId; })) { adjustQuantity(entryId, delta, zone); return; }
+  }
+}
+
 /* ================================================================
    GUIDED MODE
    ================================================================ */
@@ -7381,6 +7580,12 @@ function renderGuidedMode() {
   // Search results appear here
   html += '<div id="guidedSearchResults"></div>';
 
+  // Tab toggle just below the search bar: current zone vs all-zone totals.
+  html += '<div class="mode-toggle" style="margin-bottom:12px">' +
+    '<button class="mode-btn ' + (countView === 'zone' ? 'active' : '') + '" onclick="setCountView(\'zone\')">This Zone</button>' +
+    '<button class="mode-btn ' + (countView === 'all' ? 'active' : '') + '" onclick="setCountView(\'all\')">All Count</button>' +
+  '</div>';
+
   // Scan buttons for quick entry
   html += '<div class="scan-actions" style="margin-bottom:12px">' +
     '<button class="scan-btn barcode ' + (isLocked ? 'locked' : '') + '" onclick="openBarcodeScanner()">' +
@@ -7393,6 +7598,13 @@ function renderGuidedMode() {
       '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3l2 2-8 8H4v-3z"/></svg></span>' +
       'Manual</button>' +
   '</div>';
+
+  // "All Count" → every zone's totals; "This Zone" → current zone inline list.
+  if (countView === 'all') {
+    html += renderAllCountList();
+    document.getElementById('guidedContent').innerHTML = html;
+    return;
+  }
 
   // Unified count: the current zone's counted items, inline-editable. Use
   // −/+ to adjust, ⇄ to move zones, and tap the name to open the full editor
@@ -7417,7 +7629,7 @@ function renderGuidedMode() {
           '<div class="c-name">' + esc(item.name) + '</div>' +
           '<div class="c-meta">' +
             '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
-            (item.sku ? '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' : '') +
+            (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
             (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
           '</div>' +
         '</div>' +
@@ -7479,7 +7691,7 @@ function doGuidedSearch(value) {
         '<div class="c-name">' + esc(item.name) + '</div>' +
         '<div class="c-meta">' +
           '<span>' + esc(item.brand) + '</span>' +
-          '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' +
+          (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
           (isCounted ? '<span class="method-badge guided">counted: ' + formatQty(entry.qty) + '</span>' : '') +
         '</div>' +
       '</div>' +
@@ -7517,7 +7729,7 @@ function openGuidedEntry(masterId) {
     const parts = [];
     if (item.brand) parts.push(esc(item.brand));
     if (item.category) parts.push(esc(getCategoryLabel(item.category)));
-    if (item.sku) parts.push('UPC ' + esc(item.sku));
+    if (visibleSku(item.sku)) parts.push('UPC ' + esc(visibleSku(item.sku)));
     if (item.expectedQty != null) parts.push('PAR ' + item.expectedQty);
     heroMeta.innerHTML = parts.join(' · ');
   }
@@ -7831,7 +8043,7 @@ function renderFreeList() {
         '<div class="c-name">' + esc(item.name) + '</div>' +
         '<div class="c-meta">' +
           '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
-          (item.sku ? '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' : '') +
+          (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
           (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
         '</div>' +
       '</div>' +
@@ -8409,10 +8621,12 @@ function clearExtraLocations(containerId) {
    CORE: ADJUST QUANTITY
    FIX #1: Lock check
    ================================================================ */
-function adjustQuantity(itemId, delta) {
+function adjustQuantity(itemId, delta, zoneOverride) {
   if (isAuditLocked()) return; // FIX #1
 
-  const items = appState.audit.counts[appState.currentZone] || [];
+  // zoneOverride lets the All Count breakdown edit an entry in any zone.
+  const zone = zoneOverride || appState.currentZone;
+  const items = appState.audit.counts[zone] || [];
   const item = items.find(i => i.id === itemId);
   if (!item) return;
 
@@ -8423,7 +8637,7 @@ function adjustQuantity(itemId, delta) {
       const supabaseId = item.supabaseId;
       const index = items.indexOf(item);
       if (index > -1) items.splice(index, 1);
-      logActivity('Removed ' + item.name + ' from ' + appState.currentZone);
+      logActivity('Removed ' + item.name + ' from ' + zone);
       saveState();
       refreshCountList();
       updateHeaderCount();
@@ -8486,7 +8700,7 @@ function adjustQuantity(itemId, delta) {
     // success syncEntryToSupabase stamps item.supabaseId so later ± edits
     // take the direct-UPDATE path above. Outage orphans have no remote row,
     // so the 23505 merge branch inside the sync won't double-count.
-    syncEntryToSupabase(item, appState.currentZone).catch(function (err) {
+    syncEntryToSupabase(item, zone).catch(function (err) {
       console.warn('[audit] adjustQuantity heal-insert failed:', err);
       updateOfflineBannerState('error');
     });
@@ -9327,21 +9541,18 @@ function detectCategoryFromText(text) {
 function onPhotoSearch(value) {
   const resultsEl = document.getElementById('photoSearchResults');
   const query = String(value || '').trim();
+  // Typing a new name invalidates any prior catalog selection.
+  document.getElementById('photoName').dataset.masterId = '';
 
-  if (query.length < 2) {
-    resultsEl.innerHTML = '';
-    return;
-  }
+  if (query.length < 2) { resultsEl.innerHTML = ''; updatePhotoSuggestBtn(); return; }
 
-  // Route through searchItemMaster so this honors the carried-items
-  // priority (and now strict-carried mode). The previous direct loop over
-  // itemMaster bypassed carriedSet entirely — typing in the photo
-  // override field would surface results from the full 20k catalog
-  // even when the venue's carried list had perfectly good matches.
+  // searchItemMaster ranks carried items first, then falls through to the
+  // full catalog (so countable variants surface even if not flagged carried).
   const matches = searchItemMaster(query, 8);
 
   if (matches.length === 0) {
-    resultsEl.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">No items in this venue\'s inventory match. Type the full name to add as a new item.</div>';
+    resultsEl.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:var(--text-muted)">No catalog match. Use the button below to add it (admins) or suggest it for approval.</div>';
+    updatePhotoSuggestBtn();
     return;
   }
 
@@ -9351,6 +9562,7 @@ function onPhotoSearch(value) {
       '<span style="color:var(--text-dim);font-size:11px">' + esc(item.brand) + '</span>' +
     '</div>'
   ).join('');
+  updatePhotoSuggestBtn();
 }
 
 function selectPhotoItem(id) {
@@ -9366,6 +9578,59 @@ function selectPhotoItem(id) {
   document.getElementById('parsingStatus').style.animation = 'none';
   document.getElementById('photoDupeWarning').innerHTML =
     renderDupeWarning(item.id, item.sku);
+  updatePhotoSuggestBtn();
+}
+
+/* Photo: toggle the corporate "Add to catalog" vs everyone-else "Suggest"
+   button based on whether the typed/extracted name matches the catalog. */
+function updatePhotoSuggestBtn() {
+  const nameEl = document.getElementById('photoName');
+  if (!nameEl) return;
+  const name = (nameEl.value || '').trim();
+  const masterId = nameEl.dataset.masterId || '';
+  const exact = name && itemMaster.find(i => i.name.toLowerCase() === name.toLowerCase());
+  const needsCatalog = !!name && !masterId && !exact && supabaseLoaded;
+  const corp = isCorporateUser();
+  const short = name.length > 34 ? name.slice(0, 32) + '…' : name;
+  const createBtn = document.getElementById('photoCreateBtn');
+  const createLbl = document.getElementById('photoCreateName');
+  if (createBtn) { createBtn.style.display = (needsCatalog && corp) ? 'block' : 'none'; if (createLbl) createLbl.textContent = needsCatalog ? short : ''; }
+  const suggestBtn = document.getElementById('photoSuggestBtn');
+  const suggestLbl = document.getElementById('photoSuggestName');
+  if (suggestBtn) { suggestBtn.style.display = (needsCatalog && !corp) ? 'block' : 'none'; if (suggestLbl) suggestLbl.textContent = needsCatalog ? short : ''; }
+}
+
+/* Corporate-only: create the photographed item in the catalog and link it. */
+async function createPhotoForCatalog() {
+  if (isAuditLocked()) return;
+  const nameEl = document.getElementById('photoName');
+  const name = (nameEl.value || '').trim();
+  if (!name) { showToast('Enter the item name first', 'error'); return; }
+  const newId = await createMasterItemFromApp({
+    name: name,
+    category: document.getElementById('photoCategory').value,
+    size: document.getElementById('photoDetails').value,
+    upc: nameEl.dataset.upc || '',
+  });
+  if (newId) {
+    nameEl.dataset.masterId = newId;
+    document.getElementById('photoDupeWarning').innerHTML = '';
+    updatePhotoSuggestBtn();
+  }
+}
+
+async function suggestPhotoForCatalog() {
+  if (isAuditLocked()) return;
+  const name = (document.getElementById('photoName').value || '').trim();
+  if (!name) { showToast('Enter the item name first', 'error'); return; }
+  const ok = await submitPendingItem({
+    name: name,
+    category: document.getElementById('photoCategory').value,
+    size: document.getElementById('photoDetails').value,
+    upc: document.getElementById('photoName').dataset.upc || '',
+    notes: document.getElementById('photoIssueNotes').value,
+  });
+  if (ok) { const b = document.getElementById('photoSuggestBtn'); if (b) b.style.display = 'none'; }
 }
 
 /* Preprocess image for better OCR — increase contrast, convert to grayscale */
@@ -9631,7 +9896,7 @@ function onManualSearch(value) {
     return divider +
       '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectMasterItem(\'' + item.id + '\')">' +
         '<span style="font-weight:500">' + esc(item.name) + '</span> ' +
-        '<span style="color:var(--text-dim);font-size:11px">' + esc(item.sku) + '</span>' +
+        (visibleSku(item.sku) ? '<span style="color:var(--text-dim);font-size:11px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
       '</div>';
   }).join('');
   updateManualSuggestBtn();
@@ -9641,15 +9906,40 @@ function onManualSearch(value) {
    AND there's no exact-name match in itemMaster. We don't want to nag with
    the suggest button on items that already exist. */
 function updateManualSuggestBtn() {
-  const btn  = document.getElementById('manualSuggestBtn');
-  const lbl  = document.getElementById('manualSuggestName');
-  if (!btn || !lbl) return;
   const name = (document.getElementById('manualName').value || '').trim();
   const masterId = document.getElementById('manualName').dataset.masterId || '';
   const exact = name && itemMaster.find(i => i.name.toLowerCase() === name.toLowerCase());
-  const show = !!name && !masterId && !exact && supabaseLoaded;
-  btn.style.display = show ? 'block' : 'none';
-  lbl.textContent = show ? (name.length > 40 ? name.slice(0, 38) + '…' : name) : '';
+  const needsCatalog = !!name && !masterId && !exact && supabaseLoaded;
+  const corp = isCorporateUser();
+  const short = name.length > 38 ? name.slice(0, 36) + '…' : name;
+  // Corporate admins create the item directly; everyone else suggests it for
+  // approval. Show exactly one of the two when the typed item isn't matched.
+  const createBtn = document.getElementById('manualCreateBtn');
+  const createLbl = document.getElementById('manualCreateName');
+  if (createBtn) { createBtn.style.display = (needsCatalog && corp) ? 'block' : 'none'; if (createLbl) createLbl.textContent = needsCatalog ? short : ''; }
+  const btn = document.getElementById('manualSuggestBtn');
+  const lbl = document.getElementById('manualSuggestName');
+  if (btn) { btn.style.display = (needsCatalog && !corp) ? 'block' : 'none'; if (lbl) lbl.textContent = needsCatalog ? short : ''; }
+}
+
+/* Corporate-only: create the typed item in the catalog, then link the pending
+   manual entry to it so "Add to count" records against the new master. */
+async function createManualForCatalog() {
+  if (isAuditLocked()) return;
+  const nameEl = document.getElementById('manualName');
+  const name = (nameEl.value || '').trim();
+  if (!name) { showToast('Type the item name first', 'error'); return; }
+  const newId = await createMasterItemFromApp({
+    name: name,
+    brand: name.includes(' — ') ? name.split(' — ')[0] : '',
+    category: document.getElementById('manualCategory').value,
+    upc: document.getElementById('manualSku').value,
+  });
+  if (newId) {
+    nameEl.dataset.masterId = newId;
+    document.getElementById('manualDupeWarning').innerHTML = '';
+    updateManualSuggestBtn();
+  }
 }
 
 async function suggestManualForCatalog() {
