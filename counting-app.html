@@ -1380,6 +1380,27 @@ html, body {
   pointer-events: none;
 }
 
+.quick-tile .qt-minus {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.quick-tile .qt-minus:active { transform: scale(0.9); background: var(--danger); color: #000; }
+
 .quick-tile .qt-name {
   font-size: 14px;
   font-weight: 700;
@@ -2916,7 +2937,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.46';
+const APP_VERSION = '1.47';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -5289,14 +5310,20 @@ async function syncEntryToSupabase(entry, zone, opts) {
   const methodIsScan = entry.method === 'barcode' || entry.method === 'photo';
   const skuVal = entry.sku || null;
   // Post Path-B, the phone's itemMaster is sourced from master_items, so
-  // entry.masterId IS a master_items.id. Write it to BOTH the legacy
-  // item_id (back-compat for any older reader) AND the new master_item_id
-  // column. Once the rewrite is fully deployed and stable, a follow-up
-  // can drop the item_id write.
+  // entry.masterId IS a master_items.id — write it to master_item_id only.
+  //
+  // Do NOT write the master id into the legacy `item_id` column. `item_id`
+  // has a foreign key to purchase_items(id) (migration 0001) that was never
+  // dropped, so a master_items id there fails the FK with 23503 and the
+  // whole insert is rejected — which surfaced to counters as the persistent
+  // "Database error — changes paused" banner. Post Path-B the phone no
+  // longer carries a purchase_items id, so item_id is simply null on new
+  // rows; the merge unique index falls back to lower(item_name), which the
+  // collision lookup below already handles.
   const masterIdVal = isValidUuid(entry.masterId) ? entry.masterId : null;
   const payload = {
     audit_id: auditId,
-    item_id: masterIdVal,
+    item_id: null,
     master_item_id: masterIdVal,
     item_name: entry.name,
     category: entry.category || null,
@@ -7360,8 +7387,13 @@ function renderGuidedMode() {
   const allCounted = getAllCountedItems();
   if (allCounted.length > 0) {
     html += '<div class="list-header"><h3>Recently counted (' + allCounted.length + ')</h3></div>';
-    html += allCounted.slice(0, 20).map(item =>
-      '<div class="c-item counted">' +
+    html += allCounted.slice(0, 20).map(item => {
+      // Counter feedback: let people reopen a counted ("blue") item to edit
+      // or subtract it, instead of only being able to add more. Tapping
+      // reopens the guided entry pre-filled with the current qty.
+      const canEdit = !isLocked && item.masterId;
+      const tap = canEdit ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer"' : '';
+      return '<div class="c-item counted"' + tap + '>' +
         '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
         '<div class="c-info">' +
           '<div class="c-name">' + esc(item.name) + '</div>' +
@@ -7371,8 +7403,9 @@ function renderGuidedMode() {
           '</div>' +
         '</div>' +
         '<div class="qty-val">' + formatQty(item.qty) + '</div>' +
-      '</div>'
-    ).join('');
+        (canEdit ? '<div style="color:var(--text-dim);margin-left:6px">›</div>' : '') +
+      '</div>';
+    }).join('');
     if (allCounted.length > 20) {
       html += '<div style="text-align:center;padding:8px;font-size:12px;color:var(--text-dim)">+ ' + (allCounted.length - 20) + ' more items. Use Search tab to see all.</div>';
     }
@@ -7477,10 +7510,13 @@ function openGuidedEntry(masterId) {
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'count';
 
-  // Reset issue chips
+  // Reset issue chips + notes. The notes field used to keep the previous
+  // product's text, forcing counters to delete it on every new item.
   document.querySelectorAll('#guidedIssueChips .issue-chip').forEach(chip => {
     chip.classList.toggle('selected', chip.dataset.issue === 'none');
   });
+  const guidedNotesEl = document.getElementById('guidedIssueNotes');
+  if (guidedNotesEl) guidedNotesEl.value = '';
 
   setTimeout(() => document.getElementById('guidedQty').focus(), 100);
 }
@@ -7679,6 +7715,15 @@ function submitGuidedEntry() {
       supabaseRest.update('kount_entries', _filter, _body)
         .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
         .catch(_enqueue);
+    } else if (appState.audit && appState.audit.supabaseId && !sameZoneEntry.supabaseId) {
+      // Heal an orphan counted during the item_id FK-bug outage (no
+      // supabaseId, so its insert never landed): re-run the full insert with
+      // the edited qty/issue/notes. syncEntryToSupabase stamps supabaseId on
+      // success so subsequent edits mirror via the direct-UPDATE path above.
+      syncEntryToSupabase(sameZoneEntry, appState.currentZone).catch(function (err) {
+        console.warn('[audit] guided edit-in-place heal-insert failed:', err);
+        updateOfflineBannerState('error');
+      });
     }
   } else {
     // No existing entry in current zone — fresh insert via addCountEntry,
@@ -7794,6 +7839,7 @@ function renderQuickMode() {
       const item = itemMaster.find(i => i.id === masterId);
       if (!item) return '';
       return '<div class="quick-tile has-count' + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + masterId + '\')">' +
+        (isLocked ? '' : '<button class="qt-minus" onclick="event.stopPropagation();quickTapMinus(\'' + masterId + '\')" aria-label="subtract one">−</button>') +
         '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
         '<div class="qt-count">' + qty + '</div>' +
         '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
@@ -7848,6 +7894,7 @@ function doQuickSearch(value) {
   resultsEl.innerHTML = '<div class="quick-grid">' + matches.map(item => {
     const count = countedMap[item.id] || 0;
     return '<div class="quick-tile ' + (count > 0 ? 'has-count' : '') + (isLocked ? ' locked' : '') + '" onclick="quickTap(\'' + item.id + '\')">' +
+      (count > 0 && !isLocked ? '<button class="qt-minus" onclick="event.stopPropagation();quickTapMinus(\'' + item.id + '\')" aria-label="subtract one">−</button>' : '') +
       '<div class="qt-name">' + esc(item.name.split(' ').slice(0, 3).join(' ')) + '</div>' +
       '<div class="qt-count">' + count + '</div>' +
       '<div class="qt-cat">' + esc(item.category || '') + '</div>' +
@@ -7891,6 +7938,23 @@ function quickTap(masterId) {
 
   if (navigator.vibrate) navigator.vibrate(30);
   saveState();
+  renderQuickMode();
+  renderProgress();
+  updateHeaderCount();
+}
+
+/* Quick-mode −1. Counter feedback: the quick tiles could only add, with no
+   way to undo an accidental tap. Decrements the current-zone entry for this
+   master, reusing adjustQuantity so the −1 inherits the absolute-qty sync,
+   remove-at-zero confirm, and the orphan-heal added for the FK-outage rows. */
+function quickTapMinus(masterId) {
+  if (isAuditLocked()) return;
+  if (!appState.audit) return;
+  const zoneItems = appState.audit.counts[appState.currentZone] || [];
+  const existing = zoneItems.find(i => i.masterId === masterId);
+  if (!existing) { showToast('Not counted in this zone yet', 'warn'); return; }
+  adjustQuantity(existing.id, -1);
+  if (navigator.vibrate) navigator.vibrate(20);
   renderQuickMode();
   renderProgress();
   updateHeaderCount();
@@ -8284,6 +8348,17 @@ function adjustQuantity(itemId, delta) {
     supabaseRest.update('kount_entries', _filter, _body)
       .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
       .catch(_enqueue);
+  } else if (appState.audit && appState.audit.supabaseId && !item.supabaseId) {
+    // Heal an orphan: this item was counted while the item_id FK bug was
+    // rejecting inserts, so it has no supabaseId and never reached the
+    // server. Re-run the full insert with the current absolute qty; on
+    // success syncEntryToSupabase stamps item.supabaseId so later ± edits
+    // take the direct-UPDATE path above. Outage orphans have no remote row,
+    // so the 23505 merge branch inside the sync won't double-count.
+    syncEntryToSupabase(item, appState.currentZone).catch(function (err) {
+      console.warn('[audit] adjustQuantity heal-insert failed:', err);
+      updateOfflineBannerState('error');
+    });
   }
 }
 
@@ -10658,36 +10733,48 @@ function closeCount2() {
     return;
   }
 
-  // Strict validation — every recount row needs a manager decision
-  // (auditResult), a reason, and a recountQty. Closing without all three
-  // would submit an immutable audit containing rows that can never be
-  // filled in afterward; the rows would sit with status='pending' and
-  // count2_qty=null forever. We block close until the recount is actually
-  // complete.
+  // -------------------------------------------------------------------------
+  // TEMPORARY (2026-05-27): relaxed close-Count-2 gate.
+  //
+  // Normally every recount row must have a manager decision (auditResult), a
+  // reason, AND a recountQty before close — closing with gaps finalizes an
+  // immutable audit whose incomplete rows stay status='pending' /
+  // count2_qty=null forever. After the item_id FK outage left counts
+  // incomplete, we're temporarily letting a manager close Count 2 with rows
+  // still blank, behind an explicit warning + confirm rather than a hard stop.
+  //
+  // TO REVERT: replace this block with the original three hard-return checks
+  // (missingResult / missingReason / missingQty), each showToast(...)+return,
+  // followed by the plain "Close recount and generate the final report?"
+  // confirm.
+  // -------------------------------------------------------------------------
   const recounts = appState.audit.recounts || {};
   const entries = Object.entries(recounts);
   const missingResult = entries.filter(([, r]) => !r.auditResult);
-  if (missingResult.length > 0) {
-    const sample = missingResult.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingResult.length > 3 ? '…' : '');
-    showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
-    return;
-  }
   const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
-  if (missingReason.length > 0) {
-    const sample = missingReason.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingReason.length > 3 ? '…' : '');
-    showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
-    return;
-  }
-  const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
-  if (missingQty.length > 0) {
-    const sample = missingQty.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingQty.length > 3 ? '…' : '');
-    showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
+  const missingQty    = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
+  const incompleteCount = new Set([].concat(
+    missingResult.map(([k]) => k),
+    missingReason.map(([k]) => k),
+    missingQty.map(([k]) => k)
+  )).size;
+
+  const proceed = function () { finalizeCount2(); };
+
+  if (incompleteCount > 0) {
+    const parts = [];
+    if (missingResult.length) parts.push(missingResult.length + ' missing a decision');
+    if (missingReason.length) parts.push(missingReason.length + ' missing a reason');
+    if (missingQty.length)    parts.push(missingQty.length + ' missing a quantity');
+    showConfirm(
+      'Close recount with ' + incompleteCount + ' incomplete item' + (incompleteCount === 1 ? '' : 's') +
+      ' (' + parts.join(', ') + ')? Those rows finalize as-is and CANNOT be edited once the audit is submitted.',
+      proceed
+    );
     return;
   }
 
-  showConfirm('Close recount and generate the final report?', function() {
-    finalizeCount2();
-  });
+  showConfirm('Close recount and generate the final report?', proceed);
 }
 
 /* ================================================================
@@ -12315,12 +12402,13 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
       try { onPhotoSearch(displayName); } catch (e) {}
     }
 
-    // No catalog match → flag the entry so admin sees it on the Issues
-    // page and can add it to the catalog. Counter can still override the
-    // chip selection before saving.
-    appState.photoIssue = 'not-in-craftable';
+    // No exact catalog match. Per counter feedback we no longer auto-select
+    // the "Not in Craftable" issue here — counters were having to un-select
+    // it on every photo even when the extracted info was usable. Leave the
+    // issue unset; the counter tags it only if they actually want to.
+    appState.photoIssue = 'none';
     document.querySelectorAll('#photoIssueChips .issue-chip').forEach(function (chip) {
-      chip.classList.toggle('selected', chip.dataset.issue === 'not-in-craftable');
+      chip.classList.toggle('selected', chip.dataset.issue === 'none');
     });
   }
 
