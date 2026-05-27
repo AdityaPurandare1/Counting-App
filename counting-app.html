@@ -2200,7 +2200,10 @@ html, body {
       <div id="lastUpcErrorBanner"></div>
       <div id="countProgress" class="progress-wrap"></div>
       <div class="zone-tabs" id="zoneTabs"></div>
-      <div class="mode-toggle">
+      <!-- Mode toggle hidden: Guided is now the single unified count view
+           (search + scan/photo/manual + inline-editable list). Kept in the
+           DOM so setCountMode/render logic still resolves the buttons. -->
+      <div class="mode-toggle" style="display:none">
         <button class="mode-btn active" data-mode="guided" onclick="setCountMode('guided')">Guided</button>
         <button class="mode-btn" data-mode="free" onclick="setCountMode('free')">Free count</button>
         <button class="mode-btn" data-mode="quick" onclick="setCountMode('quick')">Quick tap</button>
@@ -2937,7 +2940,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.48';
+const APP_VERSION = '1.49';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6846,7 +6849,10 @@ function renderCountPage() {
     updateHeaderCount();
     startTimer();
 
-    // Update mode toggle
+    // Unified count: the Free/Quick tabs are hidden, so the count screen
+    // always renders the single Guided view. Pin the mode so a previously
+    // persisted 'free'/'quick' preference can't strand a counter off it.
+    appState.countMode = 'guided';
     const mode = appState.countMode;
     document.querySelectorAll('.mode-btn[data-mode]').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.mode === mode);
@@ -7388,36 +7394,40 @@ function renderGuidedMode() {
       'Manual</button>' +
   '</div>';
 
-  // Show recently counted items (last 20)
-  const allCounted = getAllCountedItems();
-  if (allCounted.length > 0) {
-    html += '<div class="list-header"><h3>Recently counted (' + allCounted.length + ')</h3></div>';
-    html += allCounted.slice(0, 20).map(item => {
-      // Counter feedback: let people reopen a counted ("blue") item to edit
-      // or subtract it, instead of only being able to add more. Tapping
-      // reopens the guided entry pre-filled with the current qty.
-      const canEdit = !isLocked && item.masterId;
-      const tap = canEdit ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer"' : '';
-      return '<div class="c-item counted"' + tap + '>' +
+  // Unified count: the current zone's counted items, inline-editable. Use
+  // −/+ to adjust, ⇄ to move zones, and tap the name to open the full editor
+  // (issue / notes / multi-zone). This replaces the old read-only list and
+  // the separate Free-count tab — finding and adjusting now live on one screen.
+  const zoneItems = appState.audit.counts[appState.currentZone] || [];
+  if (zoneItems.length > 0) {
+    html += '<div class="list-header"><h3>' + esc(appState.currentZone) + ' — counted</h3><span class="total">' + zoneItems.length + '</span></div>';
+    html += zoneItems.map(item => {
+      const nameTap = (!isLocked && item.masterId) ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer"' : '';
+      const controls = isLocked
+        ? '<div class="qty-val">' + formatQty(item.qty) + '</div>'
+        : '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:14px;margin-right:2px">⇄</button>' +
+          '<div class="c-qty">' +
+            '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
+            '<span class="qty-val">' + formatQty(item.qty) + '</span>' +
+            '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', 1)">+</button>' +
+          '</div>';
+      return '<div class="c-item fade-in">' +
         '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
-        '<div class="c-info">' +
+        '<div class="c-info"' + nameTap + '>' +
           '<div class="c-name">' + esc(item.name) + '</div>' +
           '<div class="c-meta">' +
             '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
-            '<span>' + esc(item.zone) + '</span>' +
+            (item.sku ? '<span style="font-family:var(--mono);font-size:10px">' + esc(item.sku) + '</span>' : '') +
+            (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
           '</div>' +
         '</div>' +
-        '<div class="qty-val">' + formatQty(item.qty) + '</div>' +
-        (canEdit ? '<div style="color:var(--text-dim);margin-left:6px">›</div>' : '') +
+        controls +
       '</div>';
     }).join('');
-    if (allCounted.length > 20) {
-      html += '<div style="text-align:center;padding:8px;font-size:12px;color:var(--text-dim)">+ ' + (allCounted.length - 20) + ' more items. Use Search tab to see all.</div>';
-    }
   } else {
     html += '<div class="empty-state">' +
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
-      '<p>Search for an item above, scan a barcode, or take a photo to start counting.</p>' +
+      '<p>Nothing counted in ' + esc(appState.currentZone) + ' yet. Search above, scan, or add manually.</p>' +
     '</div>';
   }
 
@@ -7783,6 +7793,16 @@ function closeGuidedEntry(event) {
 /* ================================================================
    FREE COUNT MODE
    ================================================================ */
+/* Re-render whichever count view is active. adjustQuantity & friends used to
+   hard-call renderFreeList(), which only refreshes the (now hidden) Free
+   list; the unified Guided view needs its own re-render after an inline edit. */
+function refreshCountList() {
+  const mode = appState.countMode;
+  if (mode === 'quick') renderQuickMode();
+  else if (mode === 'free') renderFreeList();
+  else renderGuidedMode();
+}
+
 function renderFreeList() {
   const items = appState.audit?.counts[appState.currentZone] || [];
   const search = (document.getElementById('searchInput')?.value || '').toLowerCase();
@@ -8405,7 +8425,7 @@ function adjustQuantity(itemId, delta) {
       if (index > -1) items.splice(index, 1);
       logActivity('Removed ' + item.name + ' from ' + appState.currentZone);
       saveState();
-      renderFreeList();
+      refreshCountList();
       updateHeaderCount();
       renderProgress();
 
@@ -8433,7 +8453,7 @@ function adjustQuantity(itemId, delta) {
 
   item.qty = newQty;
   saveState();
-  renderFreeList();
+  refreshCountList();
   updateHeaderCount();
 
   // Mirror the absolute qty to Supabase by direct update on supabaseId.
