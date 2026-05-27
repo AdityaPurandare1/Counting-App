@@ -2937,7 +2937,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.47';
+const APP_VERSION = '1.48';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3293,19 +3293,24 @@ function searchItemMaster(query, limit) {
   const useCarried = carriedSet.size > 0;
 
   if (useCarried) {
+    // Carried items first — the venue's actual stocked inventory.
     for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
       const item = itemMaster[i];
-      if (carriedSet.has(String(item.id))) {
-        if (match(item)) results.push(item);
+      if (carriedSet.has(String(item.id)) && match(item)) results.push(item);
+    }
+    // Then append non-carried catalog matches to fill the remaining slots.
+    // Counter feedback: variants they actually count (e.g. "Clase Azul
+    // Reposado 750ml") weren't flagged "carried", so typed search hid them
+    // and only scanning could find them. We still rank carried first;
+    // callers draw a "Not in your inventory list" divider (via carriedSet
+    // membership) so the two groups stay visually distinct.
+    if (results.length < limit) {
+      const have = new Set(results.map(function (r) { return r.id; }));
+      for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
+        const item = itemMaster[i];
+        if (!carriedSet.has(String(item.id)) && !have.has(item.id) && match(item)) results.push(item);
       }
     }
-    // Strict carried-only when the venue HAS uploaded inventory: never
-    // fall through to the full 20k catalog for typed search. If a
-    // counter's query doesn't match anything carried, surfacing
-    // visually-similar non-carried items just adds noise — the user
-    // would have to manually verify each one isn't actually stocked.
-    // The fallback below only runs when carriedSet is empty (no
-    // inventory uploaded yet), so the app still works pre-onboarding.
     return results;
   }
 
@@ -7447,10 +7452,18 @@ function doGuidedSearch(value) {
     return;
   }
 
+  const showDivider = carriedSet.size > 0;
+  let lastCarried = null;
   resultsEl.innerHTML = matches.map(item => {
+    const carried = carriedSet.has(String(item.id));
+    let divider = '';
+    if (showDivider && !carried && lastCarried !== false) {
+      divider = '<div style="padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim)">Not in your inventory list</div>';
+    }
+    lastCarried = carried;
     const isCounted = countedIds.has(item.id);
     const entry = isCounted ? findCountEntry(item.id) : null;
-    return '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
+    return divider + '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
       '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
       '<div class="c-info">' +
         '<div class="c-name">' + esc(item.name) + '</div>' +
@@ -7802,6 +7815,7 @@ function renderFreeList() {
           (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '') +
         '</div>' +
       '</div>' +
+      '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:14px;margin-right:2px">⇄</button>' +
       '<div class="c-qty">' +
         '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
         '<span class="qty-val">' + formatQty(item.qty) + '</span>' +
@@ -7811,6 +7825,103 @@ function renderFreeList() {
   ).join('');
 }
 
+/* ---------- Move a counted entry to a different zone ----------
+   Counter feedback: items entered in the wrong location had to be deleted
+   and re-added. This relocates the existing row instead. If the target zone
+   already holds the same item we merge (sum qty + drop the moved row);
+   otherwise we just flip the row's zone column. */
+function showMoveMenu(entryId) {
+  if (isAuditLocked()) return;
+  const venue = appState.currentVenue;
+  if (!venue || !venue.zones) return;
+  const others = venue.zones.filter(z => z !== appState.currentZone);
+  if (others.length === 0) { showToast('No other zones to move to', 'warn'); return; }
+  let modal = document.getElementById('moveZoneModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'moveZoneModal';
+    modal.className = 'modal-overlay';
+    modal.addEventListener('click', function (e) { if (e.target === modal) closeMoveMenu(); });
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML =
+    '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:340px">' +
+      '<h3>Move to zone</h3>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin:4px 0 12px">From ' + esc(appState.currentZone) + '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:8px">' +
+        others.map(function (z) {
+          return '<button class="submit-btn secondary" data-zone="' + esc(z) + '" onclick="moveEntryToZone(\'' + entryId + '\', this.dataset.zone)">' + esc(z) + '</button>';
+        }).join('') +
+      '</div>' +
+      '<button class="submit-btn secondary" style="margin-top:12px;opacity:0.7" onclick="closeMoveMenu()">Cancel</button>' +
+    '</div>';
+  modal.classList.remove('hide');
+}
+
+function closeMoveMenu() {
+  const m = document.getElementById('moveZoneModal');
+  if (m) m.classList.add('hide');
+}
+
+function moveEntryToZone(entryId, toZone) {
+  closeMoveMenu();
+  if (isAuditLocked() || !appState.audit || !toZone) return;
+  const fromZone = appState.currentZone;
+  if (toZone === fromZone) return;
+  const fromItems = appState.audit.counts[fromZone] || [];
+  const idx = fromItems.findIndex(function (i) { return i.id === entryId; });
+  if (idx === -1) return;
+  const entry = fromItems[idx];
+  if (!appState.audit.counts[toZone]) appState.audit.counts[toZone] = [];
+  const toItems = appState.audit.counts[toZone];
+  const networked = !!(appState.audit && appState.audit.supabaseId);
+
+  // Mirror the existing sync sites: retry queue on transient errors, error
+  // banner otherwise.
+  const runUpdate = function (filter, body, label) {
+    supabaseRest.update('kount_entries', filter, body)
+      .then(function (r) { if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body }, { label: label }); updateOfflineBannerState('error'); } })
+      .catch(function (e) { if (isRetryableError(e)) enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body }, { label: label }); updateOfflineBannerState('error'); });
+  };
+  const runDelete = function (filter, label) {
+    supabaseRest.deleteRows('kount_entries', filter)
+      .then(function (r) { if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: filter }, { label: label }); updateOfflineBannerState('error'); } })
+      .catch(function (e) { if (isRetryableError(e)) enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: filter }, { label: label }); updateOfflineBannerState('error'); });
+  };
+
+  const dup = toItems.find(function (i) {
+    return entry.masterId ? i.masterId === entry.masterId
+                          : i.name.toLowerCase() === entry.name.toLowerCase();
+  });
+
+  if (dup) {
+    dup.qty = (Number(dup.qty) || 0) + (Number(entry.qty) || 0);
+    fromItems.splice(idx, 1);
+    logActivity('Moved ' + entry.name + ' from ' + fromZone + ' to ' + toZone + ' (merged)');
+    saveState();
+    if (networked) {
+      if (dup.supabaseId) runUpdate('id=eq.' + encodeURIComponent(dup.supabaseId), { qty: Number(dup.qty) || 0, timestamp: new Date().toISOString() }, 'move-merge update');
+      else syncEntryToSupabase(dup, toZone).catch(function () { updateOfflineBannerState('error'); });
+      if (entry.supabaseId) runDelete('id=eq.' + encodeURIComponent(entry.supabaseId), 'move-merge delete');
+    }
+    showToast('Moved & merged into ' + toZone, 'success');
+  } else {
+    fromItems.splice(idx, 1);
+    toItems.unshift(entry);
+    logActivity('Moved ' + entry.name + ' from ' + fromZone + ' to ' + toZone);
+    saveState();
+    if (networked) {
+      if (entry.supabaseId) runUpdate('id=eq.' + encodeURIComponent(entry.supabaseId), { zone: toZone, timestamp: new Date().toISOString() }, 'move zone');
+      else syncEntryToSupabase(entry, toZone).catch(function () { updateOfflineBannerState('error'); });
+    }
+    showToast('Moved to ' + toZone, 'success');
+  }
+  renderCountPage();
+}
+
+/* ================================================================
+   QUICK TAP MODE
+   ================================================================ */
 /* ================================================================
    QUICK TAP MODE
    ================================================================ */
@@ -8588,11 +8699,35 @@ async function openNativeBarcodeScanner() {
     // Flash binds to the actual video track from this stream. Guard against
     // permission-deferred WebViews that hand back a stream with no tracks.
     var nativeTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
-    bindFlashTrack(nativeTracks.length > 0 ? nativeTracks[0] : null);
+    var primaryTrack = nativeTracks.length > 0 ? nativeTracks[0] : null;
+    bindFlashTrack(primaryTrack);
 
-    const detector = new BarcodeDetector({
-      formats: ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'qr_code']
-    });
+    // Nudge the camera into continuous autofocus + auto-exposure where the
+    // device allows it. Helps the "sometimes quick, sometimes slow to lock"
+    // complaint and poorly-lit shelves. Best-effort; most of these are
+    // ignored or unsupported on iOS Safari, hence the try/catch.
+    if (primaryTrack && typeof primaryTrack.applyConstraints === 'function') {
+      try {
+        await primaryTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }] });
+      } catch (e) {}
+    }
+
+    // Build the detector from the intersection of what we want and what the
+    // device actually supports — passing an unsupported format to the
+    // constructor throws on some engines. Includes ITF (ITF-14 case barcodes)
+    // since counters scan a lot of full cases, plus code_93/codabar.
+    var wantedFormats = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf', 'qr_code'];
+    var useFormats = wantedFormats;
+    try {
+      if (typeof BarcodeDetector.getSupportedFormats === 'function') {
+        var sup = await BarcodeDetector.getSupportedFormats();
+        if (Array.isArray(sup) && sup.length) {
+          var filtered = wantedFormats.filter(function (f) { return sup.indexOf(f) !== -1; });
+          if (filtered.length) useFormats = filtered;
+        }
+      }
+    } catch (e) {}
+    const detector = new BarcodeDetector({ formats: useFormats });
 
     nativeScanInterval = setInterval(async () => {
       if (!barcodeActive || video.readyState < 2) return;
@@ -8710,7 +8845,9 @@ function openQuaggaBarcodeScanner() {
       },
     },
     decoder: {
-      readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader'],
+      // i2of5 covers ITF-14 case barcodes; code_93/codabar broaden coverage
+      // for the iOS path (no native BarcodeDetector → Quagga does the work).
+      readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader', 'code_93_reader', 'codabar_reader'],
     },
     locate: true,
     frequency: 10,
@@ -9459,15 +9596,24 @@ function onManualSearch(value) {
     return;
   }
 
-  // v1.14: narrow to carried items first; fall back to full catalog if none match.
-  const matches = searchItemMaster(value, 6);
-
-  document.getElementById('manualSuggestions').innerHTML = matches.map(item =>
-    '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectMasterItem(\'' + item.id + '\')">' +
-      '<span style="font-weight:500">' + esc(item.name) + '</span> ' +
-      '<span style="color:var(--text-dim);font-size:11px">' + esc(item.sku) + '</span>' +
-    '</div>'
-  ).join('');
+  // Carried items first, then a divider + non-carried catalog matches so
+  // countable variants that aren't flagged "carried" still surface.
+  const matches = searchItemMaster(value, 8);
+  const showDivider = carriedSet.size > 0;
+  let lastCarried = null;
+  document.getElementById('manualSuggestions').innerHTML = matches.map(item => {
+    const carried = carriedSet.has(String(item.id));
+    let divider = '';
+    if (showDivider && !carried && lastCarried !== false) {
+      divider = '<div style="padding:4px 10px;font-size:10px;text-transform:uppercase;letter-spacing:0.5px;color:var(--text-dim);background:var(--surface2)">Not in your inventory list</div>';
+    }
+    lastCarried = carried;
+    return divider +
+      '<div style="padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px" onclick="selectMasterItem(\'' + item.id + '\')">' +
+        '<span style="font-weight:500">' + esc(item.name) + '</span> ' +
+        '<span style="color:var(--text-dim);font-size:11px">' + esc(item.sku) + '</span>' +
+      '</div>';
+  }).join('');
   updateManualSuggestBtn();
 }
 
