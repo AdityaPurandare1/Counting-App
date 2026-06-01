@@ -3765,7 +3765,7 @@ async function approveUPCPending(id) {
       title: p.item_name,
       brand: p.item_brand || '',
       category: p.item_category || 'other',
-      masterId: p.purchase_item_id ? String(p.purchase_item_id) : null,
+      masterId: p.master_item_id ? String(p.master_item_id) : null,
       barcode: p.barcode_raw,
       approvedAt: new Date().toISOString(),
     };
