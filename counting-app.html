@@ -3312,6 +3312,11 @@ let avtReportsChannel = null;
 // they uploaded. Cleared a few seconds later in case the event arrives
 // later than expected. The id matches kount_avt_reports.id.
 let _avtSelfUploadedReportId = null;
+// Same idea for the RPC-triggered (source='computed') insert that fires
+// right after this phone finalizes a count. The RPC returns a fresh uuid
+// each idempotent call, so we key the echo-suppression on audit_id
+// instead of report id, and only honor it when source === 'computed'.
+let _avtSelfComputedAuditId = null;
 
 function startAvtReportsRealtime() {
   if (!supabaseClient) return;
@@ -3343,6 +3348,19 @@ async function onAvtReportInserted(evt) {
   // "Fresh AVT loaded" toast right after the user uploaded.
   const incomingId = evt && evt.new && evt.new.id;
   if (incomingId && incomingId === _avtSelfUploadedReportId) {
+    return;
+  }
+  // Same suppression for the RPC-triggered computed insert this phone
+  // just kicked off. We only suppress when the incoming row is a
+  // 'computed' report for the same audit — an admin's upload that
+  // happens to share the audit_id still gets the toast + refetch.
+  const incomingSource = evt && evt.new && evt.new.source;
+  const incomingAuditId = evt && evt.new && evt.new.audit_id;
+  if (
+    incomingSource === 'computed' &&
+    incomingAuditId &&
+    incomingAuditId === _avtSelfComputedAuditId
+  ) {
     return;
   }
   // Pull the fresh AVT — same code path the boot loader uses, so cache
@@ -4340,6 +4358,59 @@ function saveUpcWriteQueue() {
   try { localStorage.setItem(WRITE_QUEUE_STORAGE_KEY, JSON.stringify(upcWriteQueue)); } catch (e) {}
 }
 
+// Queue of audit ids whose compute_avt_for_audit RPC failed (offline or
+// transient). Mirrors the upc write-queue shape. The RPC is idempotent on
+// audit_id so dedupe is last-write-wins, and replay is safe.
+const KOUNT_AVT_COMPUTE_QUEUE = 'hwood_avt_compute_queue';
+let avtComputeQueue = [];
+try { avtComputeQueue = JSON.parse(localStorage.getItem(KOUNT_AVT_COMPUTE_QUEUE) || '[]'); } catch (e) {}
+if (!Array.isArray(avtComputeQueue)) avtComputeQueue = [];
+function saveAvtComputeQueue() {
+  try { localStorage.setItem(KOUNT_AVT_COMPUTE_QUEUE, JSON.stringify(avtComputeQueue)); } catch (e) {}
+}
+function enqueueComputeAvt(auditId) {
+  if (!auditId) return;
+  // Dedupe by auditId — last write wins. Drop any earlier entry for the
+  // same audit so the queue stays bounded under repeated failure.
+  avtComputeQueue = avtComputeQueue.filter(function (e) { return e && e.auditId !== auditId; });
+  avtComputeQueue.push({ auditId: auditId, queuedAt: new Date().toISOString() });
+  saveAvtComputeQueue();
+}
+async function flushAvtComputeQueue() {
+  if (avtComputeQueue.length === 0) return;
+  if (!navigator.onLine) return;
+  const queue = avtComputeQueue.slice();
+  const remaining = [];
+  let flushed = 0;
+  for (const entry of queue) {
+    if (!entry || !entry.auditId) continue;
+    const { data: reportId, error } = await supabaseRest.rpc(
+      'compute_avt_for_audit',
+      { p_audit_id: entry.auditId }
+    );
+    if (error) {
+      const msg = (error && error.message) ? String(error.message) : '';
+      // 4xx is non-retryable (bad uuid, RLS, audit gone). Drop it.
+      if (/HTTP 4\d\d/.test(msg)) {
+        console.warn('[avt] dropping non-retryable queued compute:', msg, entry);
+      } else {
+        remaining.push(entry);
+      }
+    } else {
+      flushed++;
+      // Suppress the realtime echo for our own RPC-triggered insert.
+      _avtSelfComputedAuditId = entry.auditId;
+      setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+      console.log('[avt] flushed queued compute for', entry.auditId, '->', reportId);
+    }
+  }
+  avtComputeQueue = remaining;
+  saveAvtComputeQueue();
+  if (flushed > 0) {
+    console.log('[avt] flushed ' + flushed + ' queued compute request(s)');
+  }
+}
+
 // Count of pending approvals (for Summary badge)
 let pendingApprovalsCount = 0;
 
@@ -4574,6 +4645,7 @@ function initUpcMappingsSync() {
   loadApprovedUpcMappings(true);
   loadPendingApprovalsCount();
   flushUpcWriteQueue();
+  flushAvtComputeQueue().catch(function () {});
   // Migration runs lazily on first login — see runMigrationIfLoggedIn()
   runMigrationIfLoggedIn();
   // If already logged in (session restored from localStorage), open realtime
@@ -4593,6 +4665,7 @@ function initUpcMappingsSync() {
   // Flush queue + re-establish realtime when connection comes back
   window.addEventListener('online', () => {
     flushUpcWriteQueue();
+    flushAvtComputeQueue().catch(() => {});
     if (typeof flushPendingRecountSyncs === 'function') flushPendingRecountSyncs().catch(() => {});
     loadApprovedUpcMappings(true);
     runMigrationIfLoggedIn();
@@ -11205,11 +11278,41 @@ function finalizeCount2() {
 
   // Propagate to Supabase so the desktop moves this audit from Active to
   // Historic live (v1.7). Fire-and-forget; local state change proceeds.
+  // After the meta-sync succeeds, also kick off compute_avt_for_audit so
+  // the variance screen populates without an admin Craftable upload.
+  // The RPC is idempotent on (audit_id) so retries are safe. Failures
+  // here MUST NOT block audit close — log + queue, never throw.
+  const _auditSupabaseIdForAvt = appState.audit.supabaseId;
   syncAuditMetaToSupabase({
     count_phase: 'final',
     count2_closed_at: appState.audit.count2ClosedAt,
     completed_at:    appState.audit.completedAt,
     status: 'submitted',
+  }).then(async function () {
+    // Solo (offline-only) audits have no supabaseId — nothing to compute.
+    if (!_auditSupabaseIdForAvt) return;
+    try {
+      if (navigator.onLine) {
+        const { data: reportId, error } = await supabaseRest.rpc(
+          'compute_avt_for_audit',
+          { p_audit_id: _auditSupabaseIdForAvt }
+        );
+        if (error) {
+          console.warn('[avt] compute_avt_for_audit RPC failed:', error.message || error);
+          enqueueComputeAvt(_auditSupabaseIdForAvt);
+        } else {
+          // Suppress the realtime echo for our own RPC-triggered insert.
+          _avtSelfComputedAuditId = _auditSupabaseIdForAvt;
+          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+          console.log('[avt] computed report id:', reportId);
+        }
+      } else {
+        enqueueComputeAvt(_auditSupabaseIdForAvt);
+      }
+    } catch (e) {
+      console.warn('[avt] compute_avt_for_audit threw:', e);
+      enqueueComputeAvt(_auditSupabaseIdForAvt);
+    }
   }).catch(() => {});
 
   // Mark recount items as resolved
