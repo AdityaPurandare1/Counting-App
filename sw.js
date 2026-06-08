@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hwood-count-v1.53';
+const CACHE_NAME = 'hwood-count-v1.54';
 
 // Allowlist: only same-origin static assets are cached. Anything dynamic
 // (Supabase REST, Edge Functions, auth, third-party CDNs) passes through

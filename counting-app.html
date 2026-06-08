@@ -3154,39 +3154,53 @@ function searchItemMaster(query, limit) {
     for (let i = 0; i < words.length; i++) if (!hay.includes(words[i])) return false;
     return true;
   }
+  // Counter feedback: when both "Komos Reserva Anejo" and "Komos Reserva
+  // Anejo 750ml" exist, search would surface the un-sized variant first
+  // (natural array order). Counters tap the wrong row and the placeholder
+  // SKU accumulates counts. Within each tier (carried, non-carried) we now
+  // surface rows with an explicit size BEFORE rows without.
+  function hasSize(item) {
+    if (!item) return false;
+    if (typeof item.base_size === 'number' && item.base_size > 0) return true;
+    return /\b\d+\s*(ml|l|oz|cl|liter|litre)\b/i.test(item.name || '');
+  }
 
   const results = [];
+  const have = new Set();
   const useCarried = carriedSet.size > 0;
+
+  function pushFiltered(carriedWanted, sizedWanted) {
+    for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
+      const item = itemMaster[i];
+      if (have.has(item.id)) continue;
+      const isCarried = useCarried && carriedSet.has(String(item.id));
+      if (carriedWanted !== null && isCarried !== carriedWanted) continue;
+      if (hasSize(item) !== sizedWanted) continue;
+      if (!match(item)) continue;
+      results.push(item);
+      have.add(item.id);
+    }
+  }
 
   if (useCarried) {
     // Carried items first — the venue's actual stocked inventory.
-    for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
-      const item = itemMaster[i];
-      if (carriedSet.has(String(item.id)) && match(item)) results.push(item);
-    }
-    // Then append non-carried catalog matches to fill the remaining slots.
-    // Counter feedback: variants they actually count (e.g. "Clase Azul
-    // Reposado 750ml") weren't flagged "carried", so typed search hid them
-    // and only scanning could find them. We still rank carried first;
-    // callers draw a "Not in your inventory list" divider (via carriedSet
-    // membership) so the two groups stay visually distinct.
-    if (results.length < limit) {
-      const have = new Set(results.map(function (r) { return r.id; }));
-      for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
-        const item = itemMaster[i];
-        if (!carriedSet.has(String(item.id)) && !have.has(item.id) && match(item)) results.push(item);
-      }
-    }
+    // Within carried: sized variants before un-sized (so "Komos Reserva
+    // Anejo 750ml" wins over "Komos Reserva Anejo"). Then non-carried with
+    // the same sized-first ordering. Callers draw a "Not in your inventory
+    // list" divider on carriedSet membership so the two groups stay
+    // visually distinct regardless of this internal ordering.
+    pushFiltered(true,  true);
+    pushFiltered(true,  false);
+    pushFiltered(false, true);
+    pushFiltered(false, false);
     return results;
   }
 
   // Fallback — only reached when this venue has no carried set at all
   // (carriedSet.size === 0). Searches the full master so a brand-new
-  // venue with nothing uploaded yet can still count.
-  for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
-    const item = itemMaster[i];
-    if (match(item)) results.push(item);
-  }
+  // venue with nothing uploaded yet can still count. Same sized-first rule.
+  pushFiltered(null, true);
+  pushFiltered(null, false);
   return results;
 }
 
