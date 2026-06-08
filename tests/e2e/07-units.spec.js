@@ -38,6 +38,31 @@ test.describe('unit: load-bearing helpers', () => {
     expect(names.join(' | ')).toContain('Don Julio 1942');
   });
 
+  test('stripSizeTokens collapses size-only variants to the same base key', async ({ page }) => {
+    // Used by findSizeSiblings (Fix B) to detect that Belvedere 1L and
+    // Belvedere 1.75L are the same product in different sizes.
+    const r = await page.evaluate(() => ({
+      ml:       window.stripSizeTokens('Belvedere 750ml'),
+      l:        window.stripSizeTokens('Belvedere 1L'),
+      bigL:     window.stripSizeTokens('Belvedere 1.75L'),
+      mlBase:   window.stripSizeTokens('Belvedere'),
+      oz:       window.stripSizeTokens('Red Bull 8.4oz'),
+      flOz:     window.stripSizeTokens('Stella 12fl.oz'),
+      cl:       window.stripSizeTokens('Whisky 70cl'),
+      gal:      window.stripSizeTokens('Beer Keg 15.5gal'),
+      compound: window.stripSizeTokens('  Belvedere 1.75 L  '),
+    }));
+    expect(r.ml).toBe('belvedere');
+    expect(r.l).toBe('belvedere');
+    expect(r.bigL).toBe('belvedere');
+    expect(r.mlBase).toBe('belvedere');
+    expect(r.oz).toBe('red bull');
+    expect(r.flOz).toBe('stella');
+    expect(r.cl).toBe('whisky');
+    expect(r.gal).toBe('beer keg');
+    expect(r.compound).toBe('belvedere');
+  });
+
   test('isDoNotCountName flags poisoned-row name conventions (Jonathan @ Poppy 2026-06)', async ({ page }) => {
     // Inventory convention: master_items prefixed/marked "DO NOT USE",
     // "DNC", or with a "(Do not Use-...)" parenthetical are kept for

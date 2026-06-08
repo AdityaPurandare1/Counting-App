@@ -3162,6 +3162,44 @@ function bigramSimilarity(a, b) {
   return inter / (A.size + B.size - inter); // Jaccard
 }
 
+/* Strip size tokens from a product name so two SKUs that differ only by
+   bottle size collapse to the same base. Used by findSizeSiblings to
+   detect cases where Claude's photo match was the right product but
+   wrong size variant (Jonathan @ Poppy 2026-06: photo of a 1.5L matched
+   the 750ml row because the size on the label wasn't legible). */
+function stripSizeTokens(name) {
+  return String(name || '')
+    .toLowerCase()
+    // sizes: 750ml, 1.5L, 8.4oz, 12fl.oz, 15.5gal, 70cl, 1 liter, etc.
+    .replace(/\b\d+(?:\.\d+)?\s*(?:ml|cl|l|oz|fl\.?\s*oz|liter|litre|gal)\b/gi, ' ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/* Returns other itemMaster rows that share matchedItem's base name (i.e.,
+   are size variants of the same product). Excludes the matchedItem itself,
+   un-sized placeholder rows, and DO-NOT-USE rows. */
+function findSizeSiblings(matchedItem) {
+  if (!matchedItem || !matchedItem.name) return [];
+  const baseKey = stripSizeTokens(matchedItem.name);
+  if (!baseKey || baseKey.length < 3) return [];
+  const SIZE_IN_NAME = /\b\d+(?:\.\d+)?\s*(?:ml|cl|l|oz|liter|litre|gal)\b/i;
+  const out = [];
+  for (let i = 0; i < itemMaster.length; i++) {
+    const it = itemMaster[i];
+    if (!it || !it.name) continue;
+    if (String(it.id) === String(matchedItem.id)) continue;
+    if (isDoNotCountName(it.name)) continue;
+    // Only suggest peers that themselves carry a size — un-sized placeholder
+    // rows would be misleading as "alternative sizes" (Fix D demoted them).
+    const hasSize = (it.size && String(it.size).trim()) || SIZE_IN_NAME.test(it.name);
+    if (!hasSize) continue;
+    if (stripSizeTokens(it.name) === baseKey) out.push(it);
+  }
+  return out;
+}
+
 /* Returns up to `limit` itemMaster rows that look similar to `query`,
    each scored by bigram Jaccard similarity. Filters out exact-name hits
    (the caller already handled those) and DO-NOT-USE rows (defense in
@@ -8146,6 +8184,60 @@ function closeFuzzyMatchPicker() {
   if (m) m.classList.add('hide');
 }
 
+/* Size-variant disambiguation after photo OCR (Jonathan @ Poppy 2026-06:
+   "It does not pick up that it's 1.5 liters.. it thinks it's 750ml").
+   When Claude matches a photo to a catalog row that has other size
+   variants, give the counter a one-tap pick before the count is locked
+   in. callback receives the chosen item (matchedItem if user confirms,
+   a sibling if they switch, or null on cancel). */
+function showSizePicker(matchedItem, siblings, callback) {
+  let modal = document.getElementById('sizePickerModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'sizePickerModal';
+    modal.className = 'modal-overlay';
+    modal.addEventListener('click', function (e) { if (e.target === modal) { closeSizePicker(); callback(null); } });
+    document.body.appendChild(modal);
+  }
+  const all = [matchedItem].concat(siblings);
+  const rows = all.map(function (it, idx) {
+    const isMatched = idx === 0;
+    const sizeLabel = it.size ? esc(String(it.size)) : '';
+    const ribbon = isMatched ? '<span style="color:var(--success);font-size:11px;margin-left:6px">photo match</span>' : '';
+    return '<button class="submit-btn ' + (isMatched ? '' : 'secondary') + ' size-pick" data-idx="' + idx + '" ' +
+             'style="display:flex;justify-content:space-between;align-items:center;text-align:left;width:100%;gap:10px">' +
+             '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + esc(it.name) + ribbon + '</span>' +
+             (sizeLabel ? '<span style="color:var(--text-muted);font-size:12px;flex-shrink:0">' + sizeLabel + '</span>' : '') +
+           '</button>';
+  }).join('');
+  modal.innerHTML =
+    '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:380px">' +
+      '<h3 style="margin:0 0 4px">Which size?</h3>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">' +
+        'The label image can blur out the size on the bottle. Pick the variant in front of you.' +
+      '</div>' +
+      '<div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto">' + rows + '</div>' +
+      '<button id="sizePickerCancelBtn" class="submit-btn secondary" style="width:100%;margin-top:12px;opacity:0.7">Keep photo match</button>' +
+    '</div>';
+  modal.classList.remove('hide');
+  modal.querySelectorAll('.size-pick').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const idx = Number(btn.dataset.idx);
+      closeSizePicker();
+      callback(all[idx] || null);
+    });
+  });
+  modal.querySelector('#sizePickerCancelBtn').addEventListener('click', function () {
+    closeSizePicker();
+    callback(matchedItem); // explicit "Keep" → reuse original match
+  });
+}
+
+function closeSizePicker() {
+  const m = document.getElementById('sizePickerModal');
+  if (m) m.classList.add('hide');
+}
+
 function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   closeMoveMenu();
   if (isAuditLocked() || !appState.audit || !toZone) return;
@@ -12786,21 +12878,45 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
   else if (parsed && parsed.upc)      resolvedUpc = String(parsed.upc).trim();
 
   if (matchedItem) {
-    nameInput.value = matchedItem.name;
-    catSelect.value = matchedItem.category || parsed.category || 'other';
-    nameInput.dataset.masterId = matchedItem.id;
-    if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
-    else delete nameInput.dataset.upc;
-    var detailBits = [];
-    if (parsed.vintage) detailBits.push(parsed.vintage);
-    if (parsed.size && parsed.size !== matchedItem.size) detailBits.push(parsed.size);
-    if (parsed.details) detailBits.push(parsed.details);
-    detailsInput.value = detailBits.join(' · ');
+    // Apply the matched item to the form. Pulled out so we can re-apply
+    // after the size-variant picker resolves (Fix B: photo can't reliably
+    // see size on tall bottles, so we let the counter switch variants).
+    var applyMatch = function (item, opts) {
+      opts = opts || {};
+      var upc = '';
+      if (item && item.upc) upc = String(item.upc);
+      else if (!opts.switched && parsed && parsed.upc) upc = String(parsed.upc).trim();
+      nameInput.value = item.name;
+      catSelect.value = item.category || parsed.category || 'other';
+      nameInput.dataset.masterId = item.id;
+      if (upc) nameInput.dataset.upc = upc;
+      else delete nameInput.dataset.upc;
+      var detailBits = [];
+      if (parsed.vintage) detailBits.push(parsed.vintage);
+      if (parsed.size && parsed.size !== item.size) detailBits.push(parsed.size);
+      if (parsed.details) detailBits.push(parsed.details);
+      detailsInput.value = detailBits.join(' · ');
+      var matchSuffix = upc ? ' · UPC ' + upc : '';
+      var prefix = opts.switched ? 'Size switched to: ' : 'Matched: ';
+      statusEl.textContent = prefix + item.name + (opts.switched ? '' : ' (' + (parsed.confidence || 'AI') + ')') + matchSuffix;
+      statusEl.style.animation = 'none';
+      statusEl.style.color = 'var(--success)';
+    };
+    applyMatch(matchedItem, { switched: false });
 
-    var matchSuffix = resolvedUpc ? ' · UPC ' + resolvedUpc : '';
-    statusEl.textContent = 'Matched: ' + matchedItem.name + ' (' + (parsed.confidence || 'AI') + ')' + matchSuffix;
-    statusEl.style.animation = 'none';
-    statusEl.style.color = 'var(--success)';
+    // If the matched product comes in multiple sizes, prompt before locking
+    // in. Counter feedback (Jonathan @ Poppy 2026-06): photo recognized
+    // "Komos Reserva Anejo" but couldn't see the size, so a 1.5L got
+    // counted as 750ml. The picker pre-selects Claude's match — one tap
+    // confirms; one tap switches.
+    var siblings = findSizeSiblings(matchedItem);
+    if (siblings.length > 0) {
+      showSizePicker(matchedItem, siblings, function (chosen) {
+        if (!chosen) return; // user dismissed by tapping outside — keep current
+        if (String(chosen.id) === String(matchedItem.id)) return; // confirmed original
+        applyMatch(chosen, { switched: true });
+      });
+    }
   } else {
     var displayName = parsed.name || '';
     if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {

@@ -79,6 +79,68 @@ test.describe('catalog create + matching', () => {
     expect(db.t.master_items.length).toBe(masterBefore);
   });
 
+  test('Photo OCR size picker offers other sized siblings when matched product has multi-size variants (Fix B)', async ({ page }) => {
+    // Counter feedback (Jonathan @ Poppy 2026-06): photo recognized the
+    // product but matched the 750ml row when the actual bottle was a 1.5L.
+    // After Claude returns a matchedId, if the product has size siblings,
+    // a one-tap picker lets the counter switch — pre-selected to the
+    // photo's match so confirming is also one tap.
+    await startAuditAs(page, 'manager');
+    // Wait for itemMaster to load both Belvedere variants. itemMaster is
+    // a top-level `let` (not on window) so we probe via the search helper.
+    await expect.poll(() => page.evaluate(() =>
+      window.searchItemMaster('Belvedere', 10).filter(i => /^Belvedere/.test(i.name)).length
+    )).toBe(2);
+
+    // Call populatePhotoFormFromParsed directly. The form inputs live in
+    // #photoReviewModal which is hidden, but the DOM nodes exist.
+    await page.evaluate((belvId) => {
+      const status = document.getElementById('parsingStatus');
+      window.populatePhotoFormFromParsed({
+        matchedId: belvId, name: 'Belvedere', brand: '', vintage: '',
+        size: '', details: '', category: 'spirits', confidence: 'high',
+      }, status);
+    }, M.belv);
+
+    // Form populates with the 750ml/1L match first.
+    expect(await page.evaluate(() => document.getElementById('photoName').value)).toBe('Belvedere 1L');
+    expect(await page.evaluate(() => document.getElementById('photoName').dataset.masterId)).toBe(M.belv);
+
+    // ...AND the size picker pops up because Belvedere 1.75L is a sibling.
+    await page.locator('#sizePickerModal').waitFor({ state: 'visible' });
+    await expect(page.locator('#sizePickerModal')).toContainText('Which size?');
+    await expect(page.locator('#sizePickerModal')).toContainText('Belvedere 1L');
+    await expect(page.locator('#sizePickerModal')).toContainText('Belvedere 1.75L');
+
+    // Pick the 1.75L variant.
+    await page.locator('#sizePickerModal .size-pick').nth(1).click();
+    await page.locator('#sizePickerModal').waitFor({ state: 'hidden' });
+
+    // Form now reflects the switched variant.
+    expect(await page.evaluate(() => document.getElementById('photoName').value)).toBe('Belvedere 1.75L');
+    expect(await page.evaluate(() => document.getElementById('photoName').dataset.masterId)).toBe(M.belv175);
+  });
+
+  test('Photo OCR size picker does NOT appear when matched product is a singleton (no siblings)', async ({ page }) => {
+    // Don Julio 1942 is the only Don Julio variant in the seed → no picker.
+    await startAuditAs(page, 'manager');
+    await expect.poll(() => page.evaluate(() =>
+      window.searchItemMaster('Don Julio', 10).filter(i => /Don Julio/.test(i.name)).length
+    )).toBe(1);
+
+    await page.evaluate((djId) => {
+      const status = document.getElementById('parsingStatus');
+      window.populatePhotoFormFromParsed({
+        matchedId: djId, name: 'Don Julio 1942', brand: '', vintage: '',
+        size: '', details: '', category: 'spirits', confidence: 'high',
+      }, status);
+    }, M.dj1942);
+
+    expect(await page.evaluate(() => document.getElementById('photoName').dataset.masterId)).toBe(M.dj1942);
+    // Picker should NOT appear.
+    await expect(page.locator('#sizePickerModal')).toHaveCount(0);
+  });
+
   test('Fuzzy gate: "Add as new" still creates the custom item when there is no plausible existing match', async ({ page, db }) => {
     await startAuditAs(page, 'manager');
     const masterBefore = db.t.master_items.length;
