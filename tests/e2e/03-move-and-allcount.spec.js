@@ -45,6 +45,36 @@ test.describe('move between zones + All Count', () => {
     await expect.poll(() => page.evaluate(() => window.getAllCountAggregated().find(g => g.name === 'Belvedere 1L').total)).toBe(beforeTotal + 1);
   });
 
+  test('All Count: explicit "+N" button opens the input pre-filled with "+" (Anna feedback round 2)', async ({ page, db }) => {
+    // After the first round of Fix C, Anna told us she didn't notice the
+    // qty cell was tappable — "I didnt see a button for +6 addition."
+    // We added a literal +N button so the bulk-add path is discoverable.
+    // It delegates into startEditQty with prefill="+" so the counter just
+    // types the number and Enter.
+    await addManual(page, 'Belvedere 1L', 3);
+    await page.getByRole('button', { name: 'All Count', exact: true }).click();
+    await page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' }).click();
+
+    // Tap the explicit +N button.
+    const card = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' });
+    await card.getByRole('button', { name: /Add multiple at once/i }).click();
+
+    // Input opens with "+" already typed.
+    const input = card.locator('input.qty-editable').first();
+    await input.waitFor({ state: 'visible' });
+    await expect(input).toHaveValue('+');
+
+    // Counter types just the number — "6" — and Enter.
+    await input.press('6');
+    await input.press('Enter');
+
+    // Qty went 3 → 9 (3 + 6).
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L' && i.zone === 'Liquor Room');
+      return it ? it.qty : null;
+    }).toBe(9);
+  });
+
   test('All Count: tap-to-edit qty supports +N add syntax (Anna @ Poppy, 2026-06)', async ({ page, db }) => {
     // "In Craftable we can +6 to an existing total without having to add
     // each bottle individually". Tapping the qty value opens an inline

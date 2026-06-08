@@ -7610,20 +7610,33 @@ function renderAllCountList() {
         // delta is computed and routed through adjustQuantity so the
         // Supabase sync + remove-confirm + offline queue all reuse the
         // existing +/- button code path.
+        // qty cell is the tap-to-set target. We make it look like a button
+        // (background tint + subtle border) because a dashed underline by
+        // itself reads as text, not an interactive control — counters at
+        // Poppy (2026-06) didn't notice it was tappable.
         const qtyCell = isLocked
           ? '<span class="qty-val" style="min-width:50px;text-align:center">' + formatQty(r.qty) + '</span>'
           : '<span class="qty-val qty-editable" data-entry="' + r.entryId + '" data-zone="' + esc(r.zone) + '" data-qty="' + r.qty + '" ' +
               'onclick="startEditQty(this.dataset.entry, this.dataset.zone, Number(this.dataset.qty), this)" ' +
-              'title="Tap to set, or type +N to add" ' +
-              'style="min-width:50px;text-align:center;cursor:pointer;padding:6px 4px;border-radius:6px;border-bottom:1px dashed var(--text-dim)">' +
+              'title="Tap to set qty" ' +
+              'style="min-width:50px;text-align:center;cursor:pointer;padding:6px 8px;border-radius:6px;background:var(--surface2);border:1px solid var(--border)">' +
               formatQty(r.qty) + '</span>';
-        return '<div style="display:flex;align-items:center;gap:10px">' +
-          '<div style="flex:1;font-size:13px;color:var(--text-muted)">' + esc(r.zone) + '</div>' +
+        // Explicit "+N" button — Anna @ Poppy 2026-06 expected a dedicated
+        // bulk-add control matching Craftable's "+6". This delegates into
+        // startEditQty with prefill="+" so the input opens with the plus
+        // sign pre-typed; the counter only enters the number and Enter.
+        const plusNBtn = '<button class="qty-btn" data-entry="' + r.entryId + '" data-zone="' + esc(r.zone) + '" data-qty="' + r.qty + '" ' +
+              'onclick="startEditQty(this.dataset.entry, this.dataset.zone, Number(this.dataset.qty), null, \'+\')" ' +
+              'title="Add multiple at once" aria-label="Add multiple at once" ' +
+              'style="min-width:46px;height:40px;padding:0 8px;font-weight:600;font-size:13px">+N</button>';
+        return '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+          '<div style="flex:1;min-width:80px;font-size:13px;color:var(--text-muted)">' + esc(r.zone) + '</div>' +
           (isLocked
             ? qtyCell
             : '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', -1)">-</button>' +
               qtyCell +
               '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', 1)">+</button>' +
+              plusNBtn +
               '<button class="qty-btn" data-entry="' + r.entryId + '" data-from="' + esc(r.zone) + '" onclick="showMoveMenu(this.dataset.entry, this.dataset.from)" title="Move to another zone" aria-label="Move to another zone" style="width:40px;height:40px;background:transparent;font-size:16px">⇄</button>') +
         '</div>';
       }).join('');
@@ -7655,13 +7668,23 @@ function adjustEntryById(entryId, delta) {
    Underneath it all just computes a delta and calls adjustQuantity, so
    Supabase sync, dup-detect, remove-confirm, and offline queue paths
    stay identical to the +/- buttons. */
-function startEditQty(entryId, zone, currentQty, spanEl) {
+function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
   if (isAuditLocked()) return;
+  // If called without a direct spanEl handle (e.g. from the +N button)
+  // find the corresponding qty cell on the page by entry+zone. This lets
+  // the +N button delegate into the same in-place editor without needing
+  // a separate code path.
+  if (!spanEl) {
+    spanEl = document.querySelector('.qty-editable[data-entry="' + entryId + '"][data-zone="' + (zone == null ? '' : String(zone).replace(/"/g, '&quot;')) + '"]');
+  }
   if (!spanEl) return;
   const input = document.createElement('input');
   input.type = 'text';
   input.inputMode = 'numeric';
-  input.value = String(currentQty);
+  // `prefill` is set by the +N button so the user sees "+" already typed
+  // and just needs the number. Without it (direct tap on the qty value),
+  // we pre-fill the existing qty and select it — SET mode.
+  input.value = prefill ? String(prefill) : String(currentQty);
   input.className = spanEl.className;
   // Match the span's width so the layout doesn't reflow.
   input.style.cssText = 'min-width:50px;width:60px;text-align:center;padding:6px 4px;border:1px solid var(--accent);border-radius:6px;font-size:inherit;font-weight:inherit';
@@ -7681,7 +7704,13 @@ function startEditQty(entryId, zone, currentQty, spanEl) {
   });
   spanEl.replaceWith(input);
   input.focus();
-  input.select();
+  if (prefill) {
+    // Cursor after the prefilled "+" so the user types the number next.
+    const end = input.value.length;
+    try { input.setSelectionRange(end, end); } catch (e) {}
+  } else {
+    input.select();
+  }
 }
 
 function applyQtyEdit(entryId, zone, raw, currentQty) {
