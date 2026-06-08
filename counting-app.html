@@ -4579,9 +4579,12 @@ async function loadApprovedUpcMappings(force) {
   let totalRows = 0;
   // Embed-join to master_items so we can show the master's name when the
   // counter scans a barcode that wasn't recently in the itemMaster cache.
+  // is_active is pulled too so we can filter out archived rows below —
+  // matches the Fix F admin workflow where bad/legacy variants are
+  // soft-deleted but their UPCs stay in master_item_upcs.
   for (let page = 0; page < MAX_PAGES; page++) {
     const offset = page * PAGE_SIZE;
-    const qs = 'select=upc_raw,upc_normalized,master_item_id,added_at,master_items(name,category)&order=id&limit=' + PAGE_SIZE + '&offset=' + offset;
+    const qs = 'select=upc_raw,upc_normalized,master_item_id,added_at,master_items(name,category,is_active)&order=id&limit=' + PAGE_SIZE + '&offset=' + offset;
     const { data, error } = await supabaseRest.query('master_item_upcs', qs);
     if (error) {
       console.warn('master_item_upcs load failed — using cached copy:', error);
@@ -4597,6 +4600,11 @@ async function loadApprovedUpcMappings(force) {
       // a photo / types the right SKU instead of counting against the
       // poisoned row. (Jonathan @ Poppy, 2026-06.)
       if (isDoNotCountName(mi && mi.name)) continue;
+      // Same treatment for items the admin archived via Fix F. Without this
+      // filter, scanning an archived item's UPC still resolves it — the
+      // master_item_upcs row stays put even after the master is soft-
+      // deleted. With it, the scan falls through to the unmapped flow.
+      if (mi && mi.is_active === false) continue;
       next[key] = {
         title: (mi && mi.name) || '',
         brand: '',  // master_items has no brand column
