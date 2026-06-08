@@ -3130,6 +3130,62 @@ function stopPeriodicCatalogSync() {
   }
 }
 
+/* ================================================================
+   FUZZY MATCH (for the "Did you mean?" gate on new items)
+   ================================================================
+   Counter feedback (Anna @ Poppy, 2026-06): typing a name that almost-
+   matches an existing inventory item creates a NEW master_items row
+   instead of linking — exactly the Craftable duplicate-variant problem
+   we're trying to escape. addCountEntry now runs these helpers before
+   falling through to addCustomItem, and surfaces a modal when there
+   are plausible existing candidates the counter might have meant.
+
+   Bigram (character 2-gram) Jaccard similarity is the scorer:
+   - Word-order invariant ("Komos Anejo Reserva" vs "Komos Reserva
+     Anejo" still scores high)
+   - Typo-tolerant ("Bombay Saphire" vs "Bombay Sapphire" scores high)
+   - Cheap enough to run against the full itemMaster client-side. */
+function _miBigrams(s) {
+  s = ' ' + String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim() + ' ';
+  if (s.length < 2) return new Set();
+  const out = new Set();
+  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
+  return out;
+}
+
+function bigramSimilarity(a, b) {
+  const A = _miBigrams(a);
+  const B = _miBigrams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  return inter / (A.size + B.size - inter); // Jaccard
+}
+
+/* Returns up to `limit` itemMaster rows that look similar to `query`,
+   each scored by bigram Jaccard similarity. Filters out exact-name hits
+   (the caller already handled those) and DO-NOT-USE rows (defense in
+   depth — they shouldn't be in itemMaster post-Fix G but skip anyway).
+   Sorted by score desc. minSim caps the floor at ~"plausible match". */
+function findFuzzyMasterMatches(query, limit, minSim) {
+  const q = String(query || '').toLowerCase().trim();
+  if (q.length < 3) return [];
+  const threshold = (minSim != null) ? minSim : 0.45;
+  const exactKey = q;
+  const out = [];
+  for (let i = 0; i < itemMaster.length; i++) {
+    const it = itemMaster[i];
+    if (!it || !it.name) continue;
+    if (isDoNotCountName(it.name)) continue;
+    const nameKey = String(it.name).toLowerCase().trim();
+    if (nameKey === exactKey) continue; // exact match — caller handles it
+    const score = bigramSimilarity(q, it.name);
+    if (score >= threshold) out.push({ item: it, score: score });
+  }
+  out.sort(function (a, b) { return b.score - a.score; });
+  return out.slice(0, limit || 5);
+}
+
 /* Shared search helper used by every scan/type path. Always prefers the
    carried subset when it's populated; falls back to the full itemMaster
    if the carried subset yields zero matches for the query. This is how
@@ -8031,6 +8087,65 @@ function closeMoveMenu() {
   if (m) m.classList.add('hide');
 }
 
+/* "Did you mean?" picker — shown when a counter submits a new-looking
+   item name and the catalog has plausible existing matches (Anna @
+   Poppy, 2026-06: typing a near-name was creating duplicate variants,
+   the same Craftable-era pain point). callback receives
+   {action: 'pick' | 'add' | 'cancel', masterId?}. */
+function showFuzzyMatchPicker(typedName, candidates, callback) {
+  let modal = document.getElementById('fuzzyMatchPickerModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'fuzzyMatchPickerModal';
+    modal.className = 'modal-overlay';
+    modal.addEventListener('click', function (e) { if (e.target === modal) { closeFuzzyMatchPicker(); callback({ action: 'cancel' }); } });
+    document.body.appendChild(modal);
+  }
+  const safeTyped = esc(typedName);
+  const rows = candidates.map(function (c, i) {
+    const pct = Math.round(c.score * 100);
+    const sizeNote = c.item.size ? ' · ' + esc(c.item.size) : '';
+    return '<button class="submit-btn secondary fuzzy-pick" data-idx="' + i + '" style="display:flex;justify-content:space-between;align-items:center;text-align:left;width:100%;gap:10px">' +
+             '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + esc(c.item.name) + sizeNote + '</span>' +
+             '<span style="color:var(--text-muted);font-size:12px;flex-shrink:0">' + pct + '% match</span>' +
+           '</button>';
+  }).join('');
+  modal.innerHTML =
+    '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:380px">' +
+      '<h3 style="margin:0 0 4px">Did you mean?</h3>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">You typed: <strong>' + safeTyped + '</strong></div>' +
+      '<div style="display:flex;flex-direction:column;gap:8px;max-height:50vh;overflow-y:auto">' + rows + '</div>' +
+      '<div style="border-top:1px solid var(--border);margin:12px 0 8px"></div>' +
+      '<button id="fuzzyAddNewBtn" class="submit-btn" style="width:100%;margin-bottom:6px">Add "' + safeTyped + '" as a new item</button>' +
+      '<button id="fuzzyCancelBtn" class="submit-btn secondary" style="width:100%;opacity:0.7">Cancel</button>' +
+    '</div>';
+  modal.classList.remove('hide');
+  // Wire button handlers (avoiding inline onclick because typedName might
+  // contain quotes that would corrupt a JS-string literal).
+  modal.querySelectorAll('.fuzzy-pick').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const idx = Number(btn.dataset.idx);
+      const picked = candidates[idx];
+      if (!picked) return;
+      closeFuzzyMatchPicker();
+      callback({ action: 'pick', masterId: picked.item.id });
+    });
+  });
+  modal.querySelector('#fuzzyAddNewBtn').addEventListener('click', function () {
+    closeFuzzyMatchPicker();
+    callback({ action: 'add' });
+  });
+  modal.querySelector('#fuzzyCancelBtn').addEventListener('click', function () {
+    closeFuzzyMatchPicker();
+    callback({ action: 'cancel' });
+  });
+}
+
+function closeFuzzyMatchPicker() {
+  const m = document.getElementById('fuzzyMatchPickerModal');
+  if (m) m.classList.add('hide');
+}
+
 function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   closeMoveMenu();
   if (isAuditLocked() || !appState.audit || !toZone) return;
@@ -8202,14 +8317,39 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   const clamped = clampQty(qty);
   const parsedQty = Number.isFinite(clamped) ? clamped : 1;
 
-  // If no masterId, try to find one by name match, or create a custom item
+  // If no masterId, try to find one by exact-name match first. If that
+  // fails, run a fuzzy similarity check against itemMaster — if any
+  // plausible candidates exist, open the "Did you mean?" picker and
+  // defer the rest of this function until the user resolves the
+  // choice. This is the Fix A gate (Anna @ Poppy, 2026-06): typing
+  // "Patron El Cielo" was creating a brand-new custom_item even though
+  // "Patron El Cielo 700ml" already existed.
   if (!masterId) {
     const nameKey = name.toLowerCase().trim();
     const masterMatch = itemMaster.find(i => i.name.toLowerCase().trim() === nameKey);
     if (masterMatch) {
       masterId = masterMatch.id;
     } else {
-      // New item not in master — add to custom items for future audits
+      const candidates = findFuzzyMasterMatches(name, 4, 0.45);
+      if (candidates.length > 0) {
+        showFuzzyMatchPicker(name, candidates, function (choice) {
+          if (choice.action === 'cancel') return;
+          if (choice.action === 'pick') {
+            // Re-enter with the user's chosen masterId. All downstream
+            // state (counts, syncs, dup-detect) runs on the recursive
+            // call, NOT here — keep this branch a clean tail-call.
+            addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, choice.masterId);
+            return;
+          }
+          // 'add' — user confirmed it really is a new item. Mint the
+          // custom-item row and re-enter so the count gets recorded.
+          const brand = name.includes(' — ') ? name.split(' — ')[0] : '';
+          const newId = addCustomItem(name, brand, category, '', sku);
+          addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, newId);
+        });
+        return; // wait for modal callback
+      }
+      // No plausible existing match → genuinely new item.
       const brand = name.includes(' — ') ? name.split(' — ')[0] : '';
       masterId = addCustomItem(name, brand, category, '', sku);
     }
