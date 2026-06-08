@@ -7477,13 +7477,19 @@ function renderAllCountList() {
       const sorted = g.rows.slice().sort(function (a, b) { return String(a.zone).localeCompare(String(b.zone)); });
       row += '<div style="display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--border);padding-top:10px">';
       row += sorted.map(function (r) {
+        // Move button on each zone row so a wrong-zone entry can be relocated
+        // without delete/re-enter (Anna @ Poppy, 2026-06). The backend
+        // (showMoveMenu/moveEntryToZone) already exists for the "This Zone"
+        // view; here we pass the entry's actual zone explicitly because in
+        // All Count it doesn't have to equal appState.currentZone.
         return '<div style="display:flex;align-items:center;gap:10px">' +
           '<div style="flex:1;font-size:13px;color:var(--text-muted)">' + esc(r.zone) + '</div>' +
           (isLocked
             ? '<span class="qty-val">' + formatQty(r.qty) + '</span>'
             : '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', -1)">-</button>' +
               '<span class="qty-val" style="min-width:30px;text-align:center">' + formatQty(r.qty) + '</span>' +
-              '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', 1)">+</button>') +
+              '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', 1)">+</button>' +
+              '<button class="qty-btn" data-entry="' + r.entryId + '" data-from="' + esc(r.zone) + '" onclick="showMoveMenu(this.dataset.entry, this.dataset.from)" title="Move to another zone" aria-label="Move to another zone" style="width:40px;height:40px;background:transparent;font-size:16px">⇄</button>') +
         '</div>';
       }).join('');
       row += '</div>';
@@ -7962,11 +7968,14 @@ function refreshCountList() {
    and re-added. This relocates the existing row instead. If the target zone
    already holds the same item we merge (sum qty + drop the moved row);
    otherwise we just flip the row's zone column. */
-function showMoveMenu(entryId) {
+function showMoveMenu(entryId, fromZoneOverride) {
   if (isAuditLocked()) return;
   const venue = appState.currentVenue;
   if (!venue || !venue.zones) return;
-  const others = venue.zones.filter(z => z !== appState.currentZone);
+  // fromZoneOverride is set when called from the All Count tab, where the
+  // entry can live in any zone — not necessarily appState.currentZone.
+  const fromZone = fromZoneOverride || appState.currentZone;
+  const others = venue.zones.filter(z => z !== fromZone);
   if (others.length === 0) { showToast('No other zones to move to', 'warn'); return; }
   let modal = document.getElementById('moveZoneModal');
   if (!modal) {
@@ -7979,10 +7988,10 @@ function showMoveMenu(entryId) {
   modal.innerHTML =
     '<div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:340px">' +
       '<h3>Move to zone</h3>' +
-      '<div style="font-size:12px;color:var(--text-muted);margin:4px 0 12px">From ' + esc(appState.currentZone) + '</div>' +
+      '<div style="font-size:12px;color:var(--text-muted);margin:4px 0 12px">From ' + esc(fromZone) + '</div>' +
       '<div style="display:flex;flex-direction:column;gap:8px">' +
         others.map(function (z) {
-          return '<button class="submit-btn secondary" data-zone="' + esc(z) + '" onclick="moveEntryToZone(\'' + entryId + '\', this.dataset.zone)">' + esc(z) + '</button>';
+          return '<button class="submit-btn secondary" data-zone="' + esc(z) + '" data-from="' + esc(fromZone) + '" onclick="moveEntryToZone(\'' + entryId + '\', this.dataset.zone, this.dataset.from)">' + esc(z) + '</button>';
         }).join('') +
       '</div>' +
       '<button class="submit-btn secondary" style="margin-top:12px;opacity:0.7" onclick="closeMoveMenu()">Cancel</button>' +
@@ -7995,10 +8004,12 @@ function closeMoveMenu() {
   if (m) m.classList.add('hide');
 }
 
-function moveEntryToZone(entryId, toZone) {
+function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   closeMoveMenu();
   if (isAuditLocked() || !appState.audit || !toZone) return;
-  const fromZone = appState.currentZone;
+  // fromZoneOverride is set when triggered from the All Count tab; otherwise
+  // the entry is assumed to live in the current zone.
+  const fromZone = fromZoneOverride || appState.currentZone;
   if (toZone === fromZone) return;
   const fromItems = appState.audit.counts[fromZone] || [];
   const idx = fromItems.findIndex(function (i) { return i.id === entryId; });

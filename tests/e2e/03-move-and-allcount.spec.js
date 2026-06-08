@@ -44,4 +44,39 @@ test.describe('move between zones + All Count', () => {
       .getByRole('button', { name: '+', exact: true }).first().click();
     await expect.poll(() => page.evaluate(() => window.getAllCountAggregated().find(g => g.name === 'Belvedere 1L').total)).toBe(beforeTotal + 1);
   });
+
+  test('All Count: move a per-zone entry to another zone (counter feedback @ Poppy, 2026-06)', async ({ page, db }) => {
+    // Counter put an item in the wrong zone — previously they had to delete
+    // and re-add. Now there's a ⇄ button on each zone row in All Count.
+    await addManual(page, "Tito's Handmade Vodka 750ml", 6);    // Liquor Room
+    await switchZone(page, 'Bar');
+    await addManual(page, "Tito's Handmade Vodka 750ml", 2);    // Bar
+    await expect.poll(() => db.t.kount_entries.length).toBe(2);
+
+    // Switch to the All Count tab and expand the item's row.
+    await page.getByRole('button', { name: 'All Count', exact: true }).click();
+    await page.locator('#guidedContent .c-item', { hasText: "Tito's Handmade Vodka 750ml" }).click();
+
+    // The "Liquor Room" entry (6) was actually counted in the Service Well —
+    // move it. There are TWO per-zone rows visible; the ⇄ button targets the
+    // Liquor Room one (first match in the breakdown's alphabetical order is
+    // "Bar", so Liquor Room is the second move button).
+    await page.locator('#guidedContent .c-item', { hasText: "Tito's Handmade Vodka 750ml" })
+      .getByRole('button', { name: /Move to another zone/i }).nth(1).click();
+    await page.locator('#moveZoneModal').waitFor({ state: 'visible' });
+    // The "From" header should reflect the moved entry's actual zone, not
+    // appState.currentZone (which is currently 'Bar' from the earlier
+    // switchZone). This was the bug: showMoveMenu used to hard-code From.
+    await expect(page.locator('#moveZoneModal')).toContainText('From Liquor Room');
+    await page.locator('#moveZoneModal').getByRole('button', { name: 'Service Well', exact: true }).click();
+
+    // The Liquor Room row is gone; Service Well now holds the 6.
+    await expect.poll(() => db.t.kount_entries.find(r => r.item_name === "Tito's Handmade Vodka 750ml" && r.zone === 'Liquor Room')).toBeUndefined();
+    await expect.poll(() => {
+      const sw = db.t.kount_entries.find(r => r.item_name === "Tito's Handmade Vodka 750ml" && r.zone === 'Service Well');
+      return sw ? sw.qty : null;
+    }).toBe(6);
+    // Total across zones still 8 (6 Service Well + 2 Bar).
+    await expect.poll(() => page.evaluate(() => window.getAllCountAggregated().find(g => g.name === "Tito's Handmade Vodka 750ml").total)).toBe(8);
+  });
 });
