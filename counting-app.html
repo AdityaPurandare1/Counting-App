@@ -3142,6 +3142,10 @@ function searchItemMaster(query, limit) {
   if (words.length === 0) return [];
   function match(item) {
     if (!item) return false;
+    // Defense in depth: itemMaster is already filtered at load time
+    // (mapSupabaseToItemMaster drops DO-NOT-USE rows), but if a test or
+    // future code pushes one in directly, hide it from search too.
+    if (isDoNotCountName(item.name)) return false;
     const hay = (
       (item.name || '') + ' ' +
       (item.brand || '') + ' ' +
@@ -3480,6 +3484,21 @@ async function loadAvtFromSupabase() {
   }
 }
 
+/* Inventory convention: master_items names prefixed with "DO NOT USE",
+   "***Do NOT USE!", "DNC", or carrying a "(Do not Use-...)" parenthetical
+   are poisoned rows kept for legacy/reference — counters must never tap,
+   scan, photo-match, or otherwise route counts to them. There is no flag
+   column on master_items for this today; the name prefix is the convention.
+   Counter feedback 2026-06 (Jonathan @ Poppy, IMG_1518): a scan was
+   resolving to one of these rows and counts were piling up against it. */
+function isDoNotCountName(name) {
+  if (!name) return false;
+  const n = String(name).toLowerCase();
+  return /^\s*[\*!\s]*do\s*not\b/.test(n)
+      || /\(do\s*not\b/.test(n)
+      || /^\s*dnc\b/.test(n);
+}
+
 function mapSupabaseToItemMaster(items) {
   // Maps master_items rows into the itemMaster shape used by search,
   // scan, and the photo-parse Edge Function. Key differences from the
@@ -3489,7 +3508,10 @@ function mapSupabaseToItemMaster(items) {
   //     "Don Julio 1942 1.75L" already embed brand + product + size
   //   - size is composed from base_size + base_unit when the name
   //     doesn't already include it
-  return items.map(function(row, i) {
+  // Filtering: "DO NOT USE"-prefixed rows are dropped here so they never
+  // appear in search, the photo Claude prompt, or any post-load lookup.
+  return items.filter(function (row) { return !isDoNotCountName(row && row.name); })
+              .map(function(row, i) {
     var sizeStr = '';
     if (row.base_size != null && row.base_unit) {
       sizeStr = String(row.base_size) + String(row.base_unit).toLowerCase();
@@ -4476,6 +4498,11 @@ async function loadApprovedUpcMappings(force) {
       const key = row.upc_normalized || normalizeBarcode(row.upc_raw);
       if (!key) continue;
       const mi = row.master_items || null;
+      // Skip UPCs that resolve to a "DO NOT USE" master — scanning these
+      // bottles must behave like an unmapped barcode so the counter takes
+      // a photo / types the right SKU instead of counting against the
+      // poisoned row. (Jonathan @ Poppy, 2026-06.)
+      if (isDoNotCountName(mi && mi.name)) continue;
       next[key] = {
         title: (mi && mi.name) || '',
         brand: '',  // master_items has no brand column

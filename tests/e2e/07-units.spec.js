@@ -37,4 +37,41 @@ test.describe('unit: load-bearing helpers', () => {
     const names = await page.evaluate(() => window.searchItemMaster('Don Julio', 8).map(i => i.name));
     expect(names.join(' | ')).toContain('Don Julio 1942');
   });
+
+  test('isDoNotCountName flags poisoned-row name conventions (Jonathan @ Poppy 2026-06)', async ({ page }) => {
+    // Inventory convention: master_items prefixed/marked "DO NOT USE",
+    // "DNC", or with a "(Do not Use-...)" parenthetical are kept for
+    // legacy references but must never receive counts. There's no flag
+    // column; the helper is the single source of truth and is used at
+    // itemMaster load, in searchItemMaster's match predicate, and in
+    // the upc_mappings cache loader.
+    const cases = await page.evaluate(() => ({
+      // Real examples pulled from master_items 2026-06:
+      doNotUseDashed:      window.isDoNotCountName('DO NOT USE - Aqua Panna Still Water 300ml 330ml'),
+      stars:               window.isDoNotCountName('***Do NOT USE! Use 11.2oz Stella Liberte 12fl.oz'),
+      bangs:               window.isDoNotCountName('DO NOT USE!!! Hoegaarden 12fl.oz'),
+      starsSuffix:         window.isDoNotCountName('DO NOT USE*** MICHELOB ULTRA 12fl.oz'),
+      paren:               window.isDoNotCountName('Aqua Panna (Do NOT Use- Use Acqua Panna) 1L'),
+      dnc:                 window.isDoNotCountName('DNC Legacy Cordial'),
+      // Must NOT trip on these regular names:
+      donJulio:            window.isDoNotCountName('Don Julio 1942 750ml'),
+      donut:               window.isDoNotCountName('Donut Glaze Syrup'),
+      indonesian:          window.isDoNotCountName('Indonesian Coffee Beans'),
+      empty:               window.isDoNotCountName(''),
+      nullName:            window.isDoNotCountName(null),
+    }));
+    expect(cases).toEqual({
+      doNotUseDashed: true,
+      stars:          true,
+      bangs:          true,
+      starsSuffix:    true,
+      paren:          true,
+      dnc:            true,
+      donJulio:       false,
+      donut:          false,
+      indonesian:     false,
+      empty:          false,
+      nullName:       false,
+    });
+  });
 });
