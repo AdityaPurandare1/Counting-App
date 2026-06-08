@@ -7603,12 +7603,26 @@ function renderAllCountList() {
         // (showMoveMenu/moveEntryToZone) already exists for the "This Zone"
         // view; here we pass the entry's actual zone explicitly because in
         // All Count it doesn't have to equal appState.currentZone.
+        //
+        // The qty value is tappable (Fix C, same Anna feedback): tap to
+        // open an inline input, type a number to SET or "+N" / "-N" to
+        // ADD/SUBTRACT, then Enter or blur applies it. Underneath, the
+        // delta is computed and routed through adjustQuantity so the
+        // Supabase sync + remove-confirm + offline queue all reuse the
+        // existing +/- button code path.
+        const qtyCell = isLocked
+          ? '<span class="qty-val" style="min-width:50px;text-align:center">' + formatQty(r.qty) + '</span>'
+          : '<span class="qty-val qty-editable" data-entry="' + r.entryId + '" data-zone="' + esc(r.zone) + '" data-qty="' + r.qty + '" ' +
+              'onclick="startEditQty(this.dataset.entry, this.dataset.zone, Number(this.dataset.qty), this)" ' +
+              'title="Tap to set, or type +N to add" ' +
+              'style="min-width:50px;text-align:center;cursor:pointer;padding:6px 4px;border-radius:6px;border-bottom:1px dashed var(--text-dim)">' +
+              formatQty(r.qty) + '</span>';
         return '<div style="display:flex;align-items:center;gap:10px">' +
           '<div style="flex:1;font-size:13px;color:var(--text-muted)">' + esc(r.zone) + '</div>' +
           (isLocked
-            ? '<span class="qty-val">' + formatQty(r.qty) + '</span>'
+            ? qtyCell
             : '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', -1)">-</button>' +
-              '<span class="qty-val" style="min-width:30px;text-align:center">' + formatQty(r.qty) + '</span>' +
+              qtyCell +
               '<button class="qty-btn" style="width:40px;height:40px" onclick="adjustEntryById(\'' + r.entryId + '\', 1)">+</button>' +
               '<button class="qty-btn" data-entry="' + r.entryId + '" data-from="' + esc(r.zone) + '" onclick="showMoveMenu(this.dataset.entry, this.dataset.from)" title="Move to another zone" aria-label="Move to another zone" style="width:40px;height:40px;background:transparent;font-size:16px">⇄</button>') +
         '</div>';
@@ -7627,6 +7641,68 @@ function adjustEntryById(entryId, delta) {
   for (const [zone, items] of Object.entries(appState.audit.counts)) {
     if (items.some(function (i) { return i.id === entryId; })) { adjustQuantity(entryId, delta, zone); return; }
   }
+}
+
+/* Tap-to-edit qty on the All Count breakdown. Anna @ Poppy 2026-06:
+   "In Craftable we can +6 to an existing total without having to add each
+   bottle individually" — clicking + sixteen times to record a fresh stack
+   of beer cases is exactly the workflow Craftable beat us on. The span
+   becomes an inline input; on blur or Enter we parse:
+     "6"   → SET qty to 6
+     "+6"  → ADD 6 to current
+     "-3"  → SUBTRACT 3 (clamped at 0)
+   Anything else → cancel, no-op. Empty/Escape → cancel.
+   Underneath it all just computes a delta and calls adjustQuantity, so
+   Supabase sync, dup-detect, remove-confirm, and offline queue paths
+   stay identical to the +/- buttons. */
+function startEditQty(entryId, zone, currentQty, spanEl) {
+  if (isAuditLocked()) return;
+  if (!spanEl) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.inputMode = 'numeric';
+  input.value = String(currentQty);
+  input.className = spanEl.className;
+  // Match the span's width so the layout doesn't reflow.
+  input.style.cssText = 'min-width:50px;width:60px;text-align:center;padding:6px 4px;border:1px solid var(--accent);border-radius:6px;font-size:inherit;font-weight:inherit';
+  let done = false;
+  const finalize = function (cancel) {
+    if (done) return;
+    done = true;
+    if (!cancel) applyQtyEdit(entryId, zone, input.value, currentQty);
+    // Re-render either way — the input gets replaced when refreshCountList
+    // runs (or, on cancel/no-change, we render once to swap input → span).
+    refreshCountList();
+  };
+  input.addEventListener('blur', function () { finalize(false); });
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter')  { e.preventDefault(); finalize(false); }
+    if (e.key === 'Escape') { e.preventDefault(); finalize(true); }
+  });
+  spanEl.replaceWith(input);
+  input.focus();
+  input.select();
+}
+
+function applyQtyEdit(entryId, zone, raw, currentQty) {
+  const trimmed = String(raw == null ? '' : raw).trim();
+  if (!trimmed) return; // empty → cancel
+  let newQty;
+  if (/^[+\-]\s*\d/.test(trimmed)) {
+    // Delta syntax: "+6", "-3", "+ 12".
+    const delta = Number(trimmed.replace(/\s+/g, ''));
+    if (!Number.isFinite(delta)) return;
+    newQty = Number(currentQty) + delta;
+  } else {
+    // Absolute setter.
+    const parsed = Number(trimmed);
+    if (!Number.isFinite(parsed)) return;
+    newQty = parsed;
+  }
+  newQty = Math.max(0, newQty);
+  const delta = newQty - Number(currentQty);
+  if (delta === 0) return;
+  adjustQuantity(entryId, delta, zone);
 }
 
 /* ================================================================

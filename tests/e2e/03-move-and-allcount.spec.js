@@ -45,6 +45,72 @@ test.describe('move between zones + All Count', () => {
     await expect.poll(() => page.evaluate(() => window.getAllCountAggregated().find(g => g.name === 'Belvedere 1L').total)).toBe(beforeTotal + 1);
   });
 
+  test('All Count: tap-to-edit qty supports +N add syntax (Anna @ Poppy, 2026-06)', async ({ page, db }) => {
+    // "In Craftable we can +6 to an existing total without having to add
+    // each bottle individually". Tapping the qty value opens an inline
+    // input; typing "+6" ADDS 6 to the current count, not sets to 6.
+    await addManual(page, 'Belvedere 1L', 3);             // Liquor Room
+    await page.getByRole('button', { name: 'All Count', exact: true }).click();
+    await page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' }).click();
+
+    // Tap the qty value cell → it turns into an input pre-filled with the current.
+    const qtyCell = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('.qty-editable').first();
+    await qtyCell.click();
+    const input = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('input.qty-editable').first();
+    await input.waitFor({ state: 'visible' });
+    await expect(input).toHaveValue('3');
+
+    // Replace contents with "+6" and press Enter.
+    await input.fill('+6');
+    await input.press('Enter');
+
+    // Qty for the Liquor Room entry is now 9 (3 + 6).
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L' && i.zone === 'Liquor Room');
+      return it ? it.qty : null;
+    }).toBe(9);
+    // The DB row was updated in place (single row, qty=9).
+    await expect.poll(() => {
+      const row = db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L');
+      return row ? row.qty : null;
+    }).toBe(9);
+  });
+
+  test('All Count: tap-to-edit qty supports absolute set + ignores garbage input', async ({ page, db }) => {
+    await addManual(page, 'Belvedere 1L', 3);
+    await page.getByRole('button', { name: 'All Count', exact: true }).click();
+    await page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' }).click();
+
+    // Absolute SET: typing "10" replaces the qty.
+    let qtyCell = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('.qty-editable').first();
+    await qtyCell.click();
+    let input = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('input.qty-editable').first();
+    await input.fill('10');
+    await input.press('Enter');
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L');
+      return it ? it.qty : null;
+    }).toBe(10);
+
+    // Garbage input ("not a number") cancels — qty stays at 10.
+    qtyCell = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('.qty-editable').first();
+    await qtyCell.click();
+    input = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .locator('input.qty-editable').first();
+    await input.fill('not a number');
+    await input.press('Enter');
+    // Still 10.
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L');
+      return it ? it.qty : null;
+    }).toBe(10);
+  });
+
   test('All Count: move a per-zone entry to another zone (counter feedback @ Poppy, 2026-06)', async ({ page, db }) => {
     // Counter put an item in the wrong zone — previously they had to delete
     // and re-add. Now there's a ⇄ button on each zone row in All Count.
