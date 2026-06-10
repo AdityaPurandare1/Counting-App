@@ -52,8 +52,13 @@ test.describe('M1: kount_recounts.master_item_id', () => {
     // the active venue (v-delilah) or generateRecountFromAvt filters it out.
     // We drive the app's real loadAvtFromSupabase() (reads kount_avt_reports +
     // kount_avt_rows) rather than poking module-private appState directly.
+    // v1.62: report selection filters venue_ids (text[]) with the PostgREST
+    // contains operator (`venue_ids=cs.{venue}`) and prefers source ASC
+    // ('computed' < 'uploaded'), newest first — so the seed must carry the
+    // venue_ids array or the report is correctly filtered out.
     db.t.kount_avt_reports = [{
-      id: 'avt-rep-1', venue_id: 'v-delilah', uploaded_at: '2026-05-27T12:00:00Z',
+      id: 'avt-rep-1', venue_id: 'v-delilah', venue_ids: ['v-delilah'],
+      source: 'uploaded', uploaded_at: '2026-05-27T12:00:00Z',
     }];
     db.t.kount_avt_rows = [{
       id: 'avt-row-1', report_id: 'avt-rep-1', store: 'Delilah LA',

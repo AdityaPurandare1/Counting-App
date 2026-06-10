@@ -2101,7 +2101,7 @@ html, body {
         <span id="timerDisplay">00:00</span>
         <span style="flex:1"></span>
         <span id="auditStatusLabel" class="audit-badge active">In progress</span>
-        <button onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:10px;padding:2px 8px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:6px">Cancel</button>
+        <button id="cancelAuditBtn" onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:10px;padding:2px 8px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:6px">Cancel</button>
       </div>
       <div id="closeCount1Bar" class="hide" style="margin-bottom:10px">
         <button class="submit-btn" onclick="closeCount1()" style="font-size:13px;padding:10px">Close Count 1 → Generate recount list</button>
@@ -2803,7 +2803,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.53';
+const APP_VERSION = '1.62';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3495,8 +3495,20 @@ async function onAvtReportInserted(evt) {
 async function loadAvtFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
-    // Latest report overall — server picks one row; our reports query is cheap
-    var repResp = await supabaseRest.query('kount_avt_reports', 'select=*&order=uploaded_at.desc&limit=1');
+    // v1.62: venue-scoped, computed-first report pick. The old global
+    // `order=uploaded_at.desc&limit=1` broke once per-venue computed
+    // reports existed — a corporate user could land on another venue's
+    // report and see zero matching rows. Filter to reports covering the
+    // current venue (venue_ids is text[]; PostgREST contains = `cs.{...}`)
+    // and prefer source='computed' over 'uploaded': source.asc sorts
+    // 'computed' first alphabetically, then most recent wins (computed
+    // reports get uploaded_at = computed_at = now() at insert). No venue
+    // selected yet → keep the legacy global pick.
+    var avtVenueId = appState.currentVenue && appState.currentVenue.id;
+    var repQs = 'select=*'
+      + (avtVenueId ? '&venue_ids=cs.{' + encodeURIComponent(avtVenueId) + '}' : '')
+      + '&order=source.asc,uploaded_at.desc&limit=1';
+    var repResp = await supabaseRest.query('kount_avt_reports', repQs);
     if (repResp.error || !repResp.data || repResp.data.length === 0) return false;
     var report = repResp.data[0];
 
@@ -3647,20 +3659,6 @@ function guessCategory(cat) {
    - Admin (corporate): writes directly
    - Counter/Manager: queues for admin approval
    ================================================================ */
-async function writeUPCToSupabase(supabaseId, upc) {
-  if (!supabaseId || !supabaseLoaded) return false;
-  const { data, error } = await supabaseRest.update(
-    'purchase_items',
-    'id=eq.' + encodeURIComponent(supabaseId),
-    { upc: upc }
-  );
-  if (error) { console.error('UPC write failed:', error); showToast('Failed to save UPC to database', 'error'); return false; }
-  return true;
-}
-
-let pendingUPCApprovals = []; // legacy — kept for migration reference only, no longer written to
-function savePendingApprovals() { /* no-op — legacy shim */ }
-
 /* Decide the policy for linking a barcode to an item.
    Returns { action: 'approve' | 'pending' | 'block', reason: string, isUpdate: boolean }.
 
@@ -3795,12 +3793,15 @@ async function linkUPCToItem(barcode, item) {
         notes: 'Approved inline via linkUPCToItem (' + policy.reason + ')',
         added_by_email: email,
       };
-      supabaseRest.insert('master_item_upcs', miuPayload).catch(function(e) {
-        // If the unique constraint fires (someone else already linked this
-        // UPC to a different master), the upc_mappings row is still
-        // 'approved' but the master_item_upcs insert fails. Surface a
-        // warning so admin sees the conflict.
-        console.warn('[upc] master_item_upcs insert failed (likely unique violation):', e);
+      supabaseRest.insert('master_item_upcs', miuPayload).then(function(resp) {
+        // supabaseRest never throws — failures (e.g. someone else already
+        // linked this UPC to a different master, or RLS denial) come back
+        // in resp.error. The upc_mappings row may read 'approved' while the
+        // master link never landed, so warn the user about the mismatch.
+        if (resp && resp.error) {
+          console.warn('[upc] master_item_upcs insert failed (likely unique violation):', resp.error);
+          showToast('UPC link not saved to catalog: ' + String(resp.error.message || resp.error).slice(0, 120), 'warn');
+        }
       });
       // Local itemMaster doesn't carry UPC fields anymore (post Path B)
       // — the upcMappingsCache update below is what serves the next scan.
@@ -5061,14 +5062,20 @@ async function startNetworkedAudit(venue) {
   }
   const audit = inserted[0];
 
-  // 3) add the starter as an audit member (fire-and-forget)
+  // 3) add the starter as an audit member (fire-and-forget; supabaseRest
+  // never throws, so failures land in resp.error — surface them).
   supabaseRest.insert('kount_members', {
     audit_id: audit.id,
     user_email: appState.user.email,
     user_name: appState.user.name,
     role: appState.user.role,
     assigned_zones: [],
-  }).catch(err => console.warn('[audit] insert starter member failed:', err));
+  }).then(resp => {
+    if (resp && resp.error) {
+      console.warn('[audit] insert starter member failed:', resp.error);
+      showToast('Could not register you on the member list', 'warn');
+    }
+  });
 
   subscribeToAuditRealtime(audit.id);
   return audit;
@@ -5394,7 +5401,18 @@ function entryFromSupabaseRow(row) {
     counterName: row.counted_by_name,
     timestamp: row.timestamp,
     isRecount: row.is_recount,
+    // v1.62: the phone-generated id this row was first inserted with —
+    // carried through so re-syncs of a hydrated entry stay idempotent.
+    clientEntryId: row.client_entry_id || null,
   };
+}
+
+/* Escape a literal value for a PostgREST like/ilike filter: \ % _ would
+   otherwise act as pattern metacharacters. (PostgREST also translates a
+   bare `*` to `%` — there's no escape for that, but item names with `*`
+   don't occur in the catalog.) */
+function escapeIlikeValue(value) {
+  return String(value).replace(/([\\%_])/g, '\\$1');
 }
 
 /* Mirror a local entry to Supabase. Tries INSERT; on unique-violation
@@ -5445,6 +5463,11 @@ async function syncEntryToSupabase(entry, zone, opts) {
     is_recount: isRecount,
     photo_id: entry.photoId || null,
     timestamp: entry.timestamp || new Date().toISOString(),
+    // v1.62: idempotency key. The local 'E…' id (addCountEntry) rides along
+    // so a replay of an insert whose response was lost can recognise its own
+    // committed row in the 23505 path below instead of double-merging qty.
+    // Unique per (audit_id, client_entry_id) server-side.
+    client_entry_id: entry.clientEntryId || entry.id || null,
   };
 
   // Track the most informative failure across insert + merge steps so the
@@ -5460,29 +5483,65 @@ async function syncEntryToSupabase(entry, zone, opts) {
   }
   lastError = error;
 
-  // Unique-key collision — merge with the existing row
+  // Unique-key collision — merge with the existing row. The lookup must be
+  // case-insensitive (ilike, with like-metachars escaped) because the merge
+  // unique index is on lower(item_name); an eq. filter on a case-mismatched
+  // name finds 0 rows and the count silently vanishes.
   if (error && /duplicate key|23505/i.test(error.message || '')) {
-    const idFilter = payload.item_id
-      ? 'item_id=eq.' + payload.item_id
-      : 'item_id=is.null&item_name=eq.' + encodeURIComponent(payload.item_name);
-    const qs = 'audit_id=eq.' + auditId +
-               '&zone=eq.' + encodeURIComponent(zone) +
-               '&is_recount=eq.' + isRecount +
-               '&' + idFilter + '&select=*';
-    const lookup = await supabaseRest.query('kount_entries', qs);
-    if (lookup.error) {
-      lastError = lookup.error;
-    } else if (lookup.data && lookup.data[0]) {
-      const existing = lookup.data[0];
-      const mergedQty = Number(existing.qty) + Number(payload.qty);
-      const upd = await supabaseRest.update('kount_entries', 'id=eq.' + existing.id, {
-        qty: mergedQty,
-        issue: payload.issue !== 'none' ? payload.issue : existing.issue,
-        issue_notes: payload.issue_notes || existing.issue_notes,
-        timestamp: new Date().toISOString(),
-      });
-      if (!upd.error) { entry.supabaseId = existing.id; return upd.data && upd.data[0]; }
-      lastError = upd.error;
+    // Client-key collision (kount_entries_client_key): a replay of OUR OWN
+    // insert whose response was lost — e.g. a zone-move re-insert that
+    // committed server-side before another move changed the zone. The
+    // committed row already carries this payload's data, so look it up by
+    // (audit_id, client_entry_id) and adopt its id WITHOUT a qty merge.
+    // The zone+name lookup below would miss it whenever the committed
+    // row's zone no longer matches the replayed payload's zone, and the
+    // move would be dropped as non-retryable.
+    if (payload.client_entry_id && /kount_entries_client_key/i.test(error.message || '')) {
+      const ck = await supabaseRest.query('kount_entries',
+        'audit_id=eq.' + auditId +
+        '&client_entry_id=eq.' + encodeURIComponent(payload.client_entry_id) +
+        '&select=*');
+      if (ck.error) {
+        lastError = ck.error;
+      } else if (ck.data && ck.data[0]) {
+        entry.supabaseId = ck.data[0].id;
+        return ck.data[0];
+      }
+      // Row vanished between the 23505 and the lookup (concurrent delete) —
+      // fall through to the warn/queue logic with the original error.
+    } else {
+      // Merge-key collision (kount_entries_merge_key): a genuinely separate
+      // scan of the same (zone, item) — merge qty into the existing row.
+      const idFilter = payload.item_id
+        ? 'item_id=eq.' + payload.item_id
+        : 'item_id=is.null&item_name=ilike.' + encodeURIComponent(escapeIlikeValue(payload.item_name));
+      const qs = 'audit_id=eq.' + auditId +
+                 '&zone=eq.' + encodeURIComponent(zone) +
+                 '&is_recount=eq.' + isRecount +
+                 '&' + idFilter + '&select=*';
+      const lookup = await supabaseRest.query('kount_entries', qs);
+      if (lookup.error) {
+        lastError = lookup.error;
+      } else if (lookup.data && lookup.data[0]) {
+        const existing = lookup.data[0];
+        // Idempotency: if the existing row carries OUR client_entry_id, the
+        // original insert actually committed and only the response was lost
+        // (offline replay, flaky network). Adopt the row — merging qty here
+        // would double-count.
+        if (payload.client_entry_id && existing.client_entry_id === payload.client_entry_id) {
+          entry.supabaseId = existing.id;
+          return existing;
+        }
+        const mergedQty = Number(existing.qty) + Number(payload.qty);
+        const upd = await supabaseRest.update('kount_entries', 'id=eq.' + existing.id, {
+          qty: mergedQty,
+          issue: payload.issue !== 'none' ? payload.issue : existing.issue,
+          issue_notes: payload.issue_notes || existing.issue_notes,
+          timestamp: new Date().toISOString(),
+        });
+        if (!upd.error) { entry.supabaseId = existing.id; return upd.data && upd.data[0]; }
+        lastError = upd.error;
+      }
     }
   }
 
@@ -5543,6 +5602,7 @@ function snapshotEntry(entry) {
   return {
     id: entry.id,
     supabaseId: entry.supabaseId,
+    clientEntryId: entry.clientEntryId,
     name: entry.name,
     category: entry.category,
     qty: entry.qty,
@@ -5717,12 +5777,19 @@ function mergeRemoteEntryIntoLocal(row, evtType) {
   const zone = row.zone;
   if (!appState.audit.counts[zone]) appState.audit.counts[zone] = [];
   const zoneItems = appState.audit.counts[zone];
-  const existing = zoneItems.find(e => e.supabaseId === row.id);
+  // Match by supabaseId first; fall back to client_entry_id so our OWN
+  // insert echo (realtime event landing before the REST response stamped
+  // supabaseId) merges into the local entry instead of duplicating it.
+  const existing = zoneItems.find(e => e.supabaseId === row.id) ||
+    (row.client_entry_id
+      ? zoneItems.find(e => e.id === row.client_entry_id || e.clientEntryId === row.client_entry_id)
+      : null);
   if (existing) {
     if (evtType === 'DELETE') {
       const idx = zoneItems.indexOf(existing);
       if (idx !== -1) zoneItems.splice(idx, 1);
     } else {
+      existing.supabaseId = row.id;
       existing.qty = Number(row.qty);
       existing.issue = row.issue || 'none';
       existing.notes = row.issue_notes;
@@ -6146,7 +6213,14 @@ async function createMasterItemFromApp(payload) {
       source: 'app_admin_create',
       notes: 'Created in-app by ' + ((appState.user && appState.user.email) || 'admin'),
       added_by_email: (appState.user && appState.user.email) || null,
-    }).catch(function () {});
+    }).then(function (resp) {
+      // supabaseRest never throws — surface the resp.error so a failed UPC
+      // link isn't silently lost (the item lands in the catalog either way).
+      if (resp && resp.error) {
+        console.warn('[catalog] master_item_upcs insert failed:', resp.error);
+        showToast('Item added, but UPC link not saved: ' + String(resp.error.message || resp.error).slice(0, 100), 'warn');
+      }
+    });
   }
 
   // Make it usable in this count immediately: add to the live catalog +
@@ -6258,6 +6332,16 @@ let timerInterval = null;
 function startTimer() {
   if (timerInterval) clearInterval(timerInterval);
   document.getElementById('auditTimer').classList.remove('hide');
+
+  // Counters in a networked audit can't cancel the whole team's audit —
+  // hide the Cancel button for them (endAuditEarly is also role-gated,
+  // this is just the UI mirror). Solo audits keep the button for everyone.
+  const cancelBtn = document.getElementById('cancelAuditBtn');
+  if (cancelBtn) {
+    const role = appState.user && appState.user.role;
+    const networked = !!(appState.audit && appState.audit.supabaseId);
+    cancelBtn.classList.toggle('hide', networked && role !== 'manager' && role !== 'corporate');
+  }
 
   timerInterval = setInterval(() => {
     if (!appState.audit) return;
@@ -7232,8 +7316,20 @@ function startFreshAfterSubmit() {
 function endAuditEarly() {
   if (!appState.audit) return;
 
-  const itemCount = getAllCountedItems().length;
   const networked = !!appState.audit.supabaseId;
+
+  // Networked audits are shared — cancelling discards the whole team's
+  // counts, so gate it to manager+corporate (same permission as closing
+  // counts). Solo/local audits stay cancellable by whoever started them.
+  if (networked) {
+    const role = appState.user && appState.user.role;
+    if (role !== 'manager' && role !== 'corporate') {
+      showToast('Only managers can cancel a shared audit', 'error');
+      return;
+    }
+  }
+
+  const itemCount = getAllCountedItems().length;
   const completedAt = new Date().toISOString();
 
   const doCancel = (note) => {
@@ -8588,7 +8684,19 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
       // its running total locally; supabaseId is propagated back so future
       // realtime echoes can match.
       if (appState.audit && appState.audit.supabaseId) {
-        const deltaEntry = Object.assign({}, duplicateInZone, { qty: parsedQty });
+        // v1.62: each increment is a DISTINCT mutation, so it gets a fresh
+        // idempotency key. Copying duplicateInZone verbatim would carry its
+        // local id into payload.client_entry_id — matching the committed
+        // row's client_entry_id from the original insert — and the 23505
+        // merge path would mistake this delta for a replay of that insert
+        // and adopt the row WITHOUT adding qty (increment silently lost).
+        // A fresh key keeps replay-detection working for THIS delta (if its
+        // own insert wins a race and commits, a retry adopts instead of
+        // double-merging) while the original row's key stays distinct.
+        const deltaEntry = Object.assign({}, duplicateInZone, {
+          qty: parsedQty,
+          clientEntryId: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+        });
         syncEntryToSupabase(deltaEntry, appState.currentZone).then(function () {
           if (!duplicateInZone.supabaseId && deltaEntry.supabaseId) {
             duplicateInZone.supabaseId = deltaEntry.supabaseId;
@@ -11099,8 +11207,15 @@ function updateVarianceActions() {
   const e1Btn = document.getElementById('exportCount1Btn');
   const e2Btn = document.getElementById('exportCount2Btn');
 
+  // Role gates only protect SHARED audits (same pattern as endAuditEarly):
+  // a counter running a personal solo/local audit closes their own counts.
+  const networked = !!(appState.audit && appState.audit.supabaseId);
+
   if (phase === 'count1' || phase === 'avt' || phase === 'pre') {
-    c1Btn.classList.remove('hide');
+    // Closing a shared Count 1 is manager+corporate only — same permission
+    // as the recount close. Counters keep counting; a manager flips the
+    // phase. Solo audits are exempt.
+    c1Btn.classList.toggle('hide', networked && !canCloseRecount);
     c2Btn.classList.add('hide');
     e1Btn.classList.remove('hide');
     e2Btn.classList.add('hide');
@@ -11144,8 +11259,34 @@ function getCountedMap() {
    Compares counted data against AVT, generates severity scores,
    and creates the recount focus list for counters.
    ================================================================ */
+let _closingCount1 = false;
+
 function closeCount1() {
   if (!appState.audit) { showToast('No active audit', 'error'); return; }
+
+  // Guard against double-fire (same pattern as finalizeCount2).
+  if (_closingCount1) return;
+
+  // Manager-only gate (same permission as closing the recount). The button
+  // is role-gated in updateVarianceActions / renderCountPage, but a counter
+  // with a stale tab still reaches this branch — defense-in-depth.
+  // Networked audits only (same pattern as endAuditEarly): a solo/local
+  // audit is personal, so its counter may close their own Count 1.
+  const networked = !!appState.audit.supabaseId;
+  const role = appState.user && appState.user.role;
+  if (networked && role !== 'manager' && role !== 'corporate') {
+    showToast('Only managers can close Count 1', 'error');
+    return;
+  }
+
+  // Phase gate: once the audit moved past count1 (review/count2/final), a
+  // re-run here would regenerate the recount list and wipe in-progress
+  // recounts via the delete-and-reinsert sync. Stale tabs hit this.
+  const currentPhase = appState.audit.countPhase || 'count1';
+  if (currentPhase === 'review' || currentPhase === 'count2' || currentPhase === 'final') {
+    showToast('Count 1 already closed', 'error');
+    return;
+  }
 
   const allItems = getAllCountedItems();
   if (allItems.length === 0) {
@@ -11161,122 +11302,140 @@ function closeCount1() {
     : 'Close Count 1? No AVT data uploaded — the recount list will include all counted items for verification. Upload an AVT report on the Variance tab for full variance analysis.';
 
   showConfirm(msg, () => {
-    // Save Count 1 data snapshot
-    appState.audit.count1Data = JSON.parse(JSON.stringify(appState.audit.counts));
-    appState.audit.count1ClosedAt = new Date().toISOString();
-    appState.audit.countPhase = 'review';
-
-    // Propagate to Supabase so the desktop sees the phase flip live (v1.7).
-    syncAuditMetaToSupabase({
-      count_phase: 'review',
-      count1_closed_at: appState.audit.count1ClosedAt,
-    }).catch(() => {});
-
-    // Generate recount list
-    appState.audit.recounts = {};
-
-    // v1.41: per-zone recount rows. closeCount1 generates one recount entry
-    // per (item, zone) instead of one per item with a multi-zone hint. Each
-    // zone independently tracks count1Qty / recountQty / auditResult, so
-    // multiple counters can recount the same item in different zones.
-    // Recounts dict key is `<itemName>|<zone>` to allow multiple rows per
-    // item; rec.itemName carries the clean name for sync to kount_recounts.
-    const recountKey = function (name, zone) { return String(name) + '|' + String(zone || ''); };
-
-    if (hasAvt) {
-      // AVT-based recount: flag items with high variance from Craftable data
-      const recountItems = generateRecountFromAvt();
-      let totalRows = 0;
-      recountItems.forEach(item => {
-        const zoneTotals = findCountedZonesForAvtItem(item.avt);
-        // No counted zones → still create one row with zone='' so the item
-        // doesn't disappear from the recount list. User answer #3: items
-        // should always be in a zone, but we surface the unzoned ones
-        // explicitly rather than hiding them — counter notices and fixes.
-        const zonesList = zoneTotals.length > 0
-          ? zoneTotals
-          : [{ zone: '', qty: 0 }];
-        zonesList.forEach(({ zone, qty }) => {
-          appState.audit.recounts[recountKey(item.avt.itemName, zone)] = {
-            itemName: item.avt.itemName,
-            avtItem: item.avt,
-            // AVT rows are name-derived from the variance report and carry no
-            // master_items id; they legitimately sync master_item_id = null.
-            masterId: null,
-            severity: item.severity,
-            varianceValue: item.avt.varianceValue,
-            variance: item.avt.variance,
-            actual: item.avt.actual,
-            theo: item.avt.theo,
-            count1Qty: qty,                  // per-zone qty
-            recountQty: null,                // per-zone recount qty
-            status: 'pending',
-            notes: '',
-            zone: zone,
-            category: item.avt.category || '',
-            auditResult: null,
-            auditReason: '',
-          };
-          totalRows++;
-        });
-      });
-      logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items / ' + totalRows + ' zone rows flagged for recount.');
-      showToast('Count 1 closed. ' + totalRows + ' rows need recount across ' + recountItems.length + ' items.', 'success');
-    } else {
-      // No AVT: create recount rows from ALL counted items so counters can verify.
-      // One row per (item, zone) so the same item across zones gets multiple
-      // independent recount targets.
-      const byName = {};
-      allItems.forEach(item => {
-        const key = item.name;
-        if (!byName[key]) {
-          byName[key] = {
-            name: item.name,
-            category: item.category || '',
-            // Counted entries carry a master_items id; preserve it so the
-            // recount row can write master_item_id (Path B). First non-empty
-            // masterId wins — same name across zones maps to one master.
-            masterId: item.masterId || null,
-            zoneQtys: {},
-          };
-        }
-        if (!byName[key].masterId && item.masterId) byName[key].masterId = item.masterId;
-        const zone = item.zone || '';
-        byName[key].zoneQtys[zone] = (byName[key].zoneQtys[zone] || 0) + (Number(item.qty) || 0);
-      });
-      let totalRows = 0;
-      Object.values(byName).forEach(entry => {
-        Object.entries(entry.zoneQtys).forEach(([zone, qty]) => {
-          appState.audit.recounts[recountKey(entry.name, zone)] = {
-            itemName: entry.name,
-            avtItem: null,
-            masterId: entry.masterId || null,
-            severity: 'MEDIUM',
-            varianceValue: 0,
-            variance: 0,
-            actual: qty,
-            theo: 0,
-            count1Qty: qty,                  // per-zone qty
-            recountQty: null,
-            status: 'pending',
-            notes: 'No AVT data — verify count',
-            zone: zone,
-            category: entry.category,
-            auditResult: null,
-            auditReason: '',
-          };
-          totalRows++;
-        });
-      });
-      logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
-      showToast('Count 1 closed. ' + totalRows + ' rows listed for recount verification.', 'success');
+    if (_closingCount1) return;
+    // Re-check the phase at confirm-accept time: the dialog can sit open
+    // while another manager closes Count 1 (realtime flips countPhase), and
+    // accepting then would regenerate the recount list and wipe the peer's
+    // in-progress recounts. Same gate as the pre-dialog check above.
+    const phaseNow = appState.audit ? (appState.audit.countPhase || 'count1') : null;
+    if (!appState.audit || phaseNow === 'review' || phaseNow === 'count2' || phaseNow === 'final') {
+      showToast('Count 1 already closed', 'error');
+      return;
     }
+    _closingCount1 = true;
+    try {
 
-    saveState();
-    // Push the recount list to Supabase so the desktop Recount screen can
-    // render it live. Fire-and-forget; solo audits no-op inside the helper.
-    syncRecountsToSupabase().catch(function() {});
-    showPage('recount');
+      // Save Count 1 data snapshot
+      appState.audit.count1Data = JSON.parse(JSON.stringify(appState.audit.counts));
+      appState.audit.count1ClosedAt = new Date().toISOString();
+      appState.audit.countPhase = 'review';
+
+      // Propagate to Supabase so the desktop sees the phase flip live (v1.7).
+      syncAuditMetaToSupabase({
+        count_phase: 'review',
+        count1_closed_at: appState.audit.count1ClosedAt,
+      }).catch(() => {});
+
+      // Generate recount list
+      appState.audit.recounts = {};
+
+      // v1.41: per-zone recount rows. closeCount1 generates one recount entry
+      // per (item, zone) instead of one per item with a multi-zone hint. Each
+      // zone independently tracks count1Qty / recountQty / auditResult, so
+      // multiple counters can recount the same item in different zones.
+      // Recounts dict key is `<itemName>|<zone>` to allow multiple rows per
+      // item; rec.itemName carries the clean name for sync to kount_recounts.
+      const recountKey = function (name, zone) { return String(name) + '|' + String(zone || ''); };
+
+      if (hasAvt) {
+        // AVT-based recount: flag items with high variance from Craftable data
+        const recountItems = generateRecountFromAvt();
+        let totalRows = 0;
+        recountItems.forEach(item => {
+          const zoneTotals = findCountedZonesForAvtItem(item.avt);
+          // No counted zones → still create one row with zone='' so the item
+          // doesn't disappear from the recount list. User answer #3: items
+          // should always be in a zone, but we surface the unzoned ones
+          // explicitly rather than hiding them — counter notices and fixes.
+          const zonesList = zoneTotals.length > 0
+            ? zoneTotals
+            : [{ zone: '', qty: 0 }];
+          zonesList.forEach(({ zone, qty }) => {
+            appState.audit.recounts[recountKey(item.avt.itemName, zone)] = {
+              itemName: item.avt.itemName,
+              avtItem: item.avt,
+              // AVT rows are name-derived from the variance report and carry no
+              // master_items id; they legitimately sync master_item_id = null.
+              masterId: null,
+              severity: item.severity,
+              varianceValue: item.avt.varianceValue,
+              variance: item.avt.variance,
+              actual: item.avt.actual,
+              theo: item.avt.theo,
+              count1Qty: qty,                  // per-zone qty
+              recountQty: null,                // per-zone recount qty
+              status: 'pending',
+              notes: '',
+              zone: zone,
+              category: item.avt.category || '',
+              auditResult: null,
+              auditReason: '',
+            };
+            totalRows++;
+          });
+        });
+        logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items / ' + totalRows + ' zone rows flagged for recount.');
+        showToast('Count 1 closed. ' + totalRows + ' rows need recount across ' + recountItems.length + ' items.', 'success');
+      } else {
+        // No AVT: create recount rows from ALL counted items so counters can verify.
+        // One row per (item, zone) so the same item across zones gets multiple
+        // independent recount targets.
+        const byName = {};
+        allItems.forEach(item => {
+          const key = item.name;
+          if (!byName[key]) {
+            byName[key] = {
+              name: item.name,
+              category: item.category || '',
+              // Counted entries carry a master_items id; preserve it so the
+              // recount row can write master_item_id (Path B). First non-empty
+              // masterId wins — same name across zones maps to one master.
+              masterId: item.masterId || null,
+              zoneQtys: {},
+            };
+          }
+          if (!byName[key].masterId && item.masterId) byName[key].masterId = item.masterId;
+          const zone = item.zone || '';
+          byName[key].zoneQtys[zone] = (byName[key].zoneQtys[zone] || 0) + (Number(item.qty) || 0);
+        });
+        let totalRows = 0;
+        Object.values(byName).forEach(entry => {
+          Object.entries(entry.zoneQtys).forEach(([zone, qty]) => {
+            appState.audit.recounts[recountKey(entry.name, zone)] = {
+              itemName: entry.name,
+              avtItem: null,
+              masterId: entry.masterId || null,
+              severity: 'MEDIUM',
+              varianceValue: 0,
+              variance: 0,
+              actual: qty,
+              theo: 0,
+              count1Qty: qty,                  // per-zone qty
+              recountQty: null,
+              status: 'pending',
+              notes: 'No AVT data — verify count',
+              zone: zone,
+              category: entry.category,
+              auditResult: null,
+              auditReason: '',
+            };
+            totalRows++;
+          });
+        });
+        logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
+        showToast('Count 1 closed. ' + totalRows + ' rows listed for recount verification.', 'success');
+      }
+
+      saveState();
+      // Push the recount list to Supabase so the desktop Recount screen can
+      // render it live. Fire-and-forget; solo audits no-op inside the helper.
+      syncRecountsToSupabase().catch(function() {});
+      showPage('recount');
+    } finally {
+      // Always release the double-fire guard — an exception above would
+      // otherwise leave closeCount1 permanently locked out.
+      _closingCount1 = false;
+    }
   });
 }
 
@@ -11329,48 +11488,32 @@ function closeCount2() {
     return;
   }
 
-  // -------------------------------------------------------------------------
-  // TEMPORARY (2026-05-27): relaxed close-Count-2 gate.
-  //
-  // Normally every recount row must have a manager decision (auditResult), a
-  // reason, AND a recountQty before close — closing with gaps finalizes an
-  // immutable audit whose incomplete rows stay status='pending' /
-  // count2_qty=null forever. After the item_id FK outage left counts
-  // incomplete, we're temporarily letting a manager close Count 2 with rows
-  // still blank, behind an explicit warning + confirm rather than a hard stop.
-  //
-  // TO REVERT: replace this block with the original three hard-return checks
-  // (missingResult / missingReason / missingQty), each showToast(...)+return,
-  // followed by the plain "Close recount and generate the final report?"
-  // confirm.
-  // -------------------------------------------------------------------------
-  const recounts = appState.audit.recounts || {};
-  const entries = Object.entries(recounts);
+  // Strict close gate restored 2026-06-09 (was temporarily relaxed on
+  // 2026-05-27 after the item_id FK outage left counts incomplete). The
+  // item_id fix + orphan heal paths have shipped, so every recount row must
+  // again carry a manager decision, a reason, and a numeric recountQty
+  // before close — mirrors submitRecount's three hard checks.
+  const entries = Object.entries(appState.audit.recounts || {});
   const missingResult = entries.filter(([, r]) => !r.auditResult);
+  if (missingResult.length > 0) {
+    const sample = missingResult.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingResult.length > 3 ? '…' : '');
+    showToast(missingResult.length + ' item' + (missingResult.length === 1 ? '' : 's') + ' still need a recount decision: ' + sample, 'error');
+    return;
+  }
   const missingReason = entries.filter(([, r]) => !r.auditReason || !String(r.auditReason).trim());
-  const missingQty    = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
-  const incompleteCount = new Set([].concat(
-    missingResult.map(([k]) => k),
-    missingReason.map(([k]) => k),
-    missingQty.map(([k]) => k)
-  )).size;
-
-  const proceed = function () { finalizeCount2(); };
-
-  if (incompleteCount > 0) {
-    const parts = [];
-    if (missingResult.length) parts.push(missingResult.length + ' missing a decision');
-    if (missingReason.length) parts.push(missingReason.length + ' missing a reason');
-    if (missingQty.length)    parts.push(missingQty.length + ' missing a quantity');
-    showConfirm(
-      'Close recount with ' + incompleteCount + ' incomplete item' + (incompleteCount === 1 ? '' : 's') +
-      ' (' + parts.join(', ') + ')? Those rows finalize as-is and CANNOT be edited once the audit is submitted.',
-      proceed
-    );
+  if (missingReason.length > 0) {
+    const sample = missingReason.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingReason.length > 3 ? '…' : '');
+    showToast(missingReason.length + ' item' + (missingReason.length === 1 ? '' : 's') + ' missing a reason: ' + sample, 'error');
+    return;
+  }
+  const missingQty = entries.filter(([, r]) => r.recountQty == null || !Number.isFinite(Number(r.recountQty)));
+  if (missingQty.length > 0) {
+    const sample = missingQty.slice(0, 3).map(([k, r]) => (r.itemName || k.split('|')[0]) + (r.zone ? ' (' + r.zone + ')' : '')).join(', ') + (missingQty.length > 3 ? '…' : '');
+    showToast(missingQty.length + ' item' + (missingQty.length === 1 ? '' : 's') + ' missing a recount quantity: ' + sample, 'error');
     return;
   }
 
-  showConfirm('Close recount and generate the final report?', proceed);
+  showConfirm('Close recount and generate the final report?', function () { finalizeCount2(); });
 }
 
 /* ================================================================
@@ -12007,10 +12150,26 @@ async function syncIssueResolutionToSupabase(issue) {
   };
   const appendNote = issue.resolveNotes ? ' [resolved: ' + issue.resolveNotes + ']' : '';
 
+  // supabaseRest never throws — failures come back in resp.error. Surface
+  // them and hand transient ones to the retry queue (same pattern as the
+  // guided edit-in-place sync) so the desktop Issues screen heals.
+  const _onFail = function (err, filter, body) {
+    console.warn('[issue] resolution sync failed:', err);
+    showToast('Issue resolution not synced to server', 'warn');
+    if (isRetryableError(err)) {
+      enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body },
+        { label: 'issue resolution (' + (issue.itemName || 'unknown') + ')' });
+    } else {
+      console.error('[issue] resolution sync non-retryable, dropping:', err);
+    }
+  };
+
   try {
     if (issue.entrySupabaseId) {
-      await supabaseRest.update('kount_entries', 'id=eq.' + encodeURIComponent(issue.entrySupabaseId),
-        Object.assign({}, patch, appendNote ? { issue_notes: (issue.notes || '') + appendNote } : {}));
+      const filter = 'id=eq.' + encodeURIComponent(issue.entrySupabaseId);
+      const body = Object.assign({}, patch, appendNote ? { issue_notes: (issue.notes || '') + appendNote } : {});
+      const resp = await supabaseRest.update('kount_entries', filter, body);
+      if (resp && resp.error) _onFail(resp.error, filter, body);
       return;
     }
     if (issue.auditSupabaseId && issue.itemName && issue.zone) {
@@ -12018,7 +12177,8 @@ async function syncIssueResolutionToSupabase(issue) {
         'audit_id=eq.' + encodeURIComponent(issue.auditSupabaseId) +
         '&zone=eq.'    + encodeURIComponent(issue.zone) +
         '&item_name=eq.' + encodeURIComponent(issue.itemName);
-      await supabaseRest.update('kount_entries', match, patch);
+      const resp = await supabaseRest.update('kount_entries', match, patch);
+      if (resp && resp.error) _onFail(resp.error, match, patch);
     }
   } catch (e) {
     console.warn('[issue] resolution sync failed:', e);
@@ -12618,6 +12778,15 @@ function submitAudit() {
   showConfirm('Submit this audit? It will be locked from editing.', () => {
     appState.audit.status = 'submitted';
     appState.audit.completedAt = new Date().toISOString();
+    // Stamp the AVT window (H1): the compute RPC bounds its depletion query
+    // on count2_closed_at, and the phase indicator keys off count_phase.
+    // finalizeCount2 stamps both when it runs; submitAudit was the asymmetric
+    // path that left count_phase / count2_closed_at behind. Don't overwrite a
+    // count2_closed_at that finalizeCount2 (or a realtime peer) already set.
+    appState.audit.countPhase = 'final';
+    if (!appState.audit.count2ClosedAt) {
+      appState.audit.count2ClosedAt = appState.audit.completedAt;
+    }
     document.getElementById('headerAuditBadge').className = 'audit-badge submitted';
     document.getElementById('headerAuditBadge').textContent = 'Submitted';
     logActivity('Audit submitted');
@@ -12638,6 +12807,8 @@ function submitAudit() {
       syncAuditMetaToSupabase({
         status: 'submitted',
         completed_at: appState.audit.completedAt,
+        count_phase: 'final',
+        count2_closed_at: appState.audit.count2ClosedAt,
       }).catch(err => {
         console.warn('[audit] submitAudit sync failed:', err);
         updateOfflineBannerState('error');

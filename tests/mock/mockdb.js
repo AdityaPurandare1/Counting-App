@@ -62,6 +62,18 @@ function matchFilter(row, f) {
   if (op.startsWith('lte.')) return cell != null && cell <= op.slice(4);
   if (op.startsWith('ilike.')) return cell != null && ilikeToRegex(op.slice(6)).test(String(cell));
   if (op.startsWith('like.')) return cell != null && ilikeToRegex(op.slice(5)).test(String(cell));
+  if (op.startsWith('cs.')) {
+    // PostgREST array "contains": col=cs.{a,b} → column (an array) must
+    // contain EVERY listed value. Used by the v1.62 AVT report selection
+    // (kount_avt_reports.venue_ids is text[]).
+    let list = op.slice(3);
+    if (list.startsWith('{') && list.endsWith('}')) list = list.slice(1, -1);
+    const wanted = list.split(',').map(function (s) {
+      s = s.trim(); if (s[0] === '"' && s[s.length - 1] === '"') s = s.slice(1, -1).replace(/\\"/g, '"'); return s;
+    }).filter(Boolean);
+    if (!Array.isArray(cell)) return false;
+    return wanted.every(function (w) { return cell.some(function (c) { return String(c) === w; }); });
+  }
   if (op.startsWith('in.')) {
     let list = op.slice(3);
     if (list.startsWith('(') && list.endsWith(')')) list = list.slice(1, -1);
@@ -76,12 +88,23 @@ function matchFilter(row, f) {
 function applyQuery(rows, q) {
   let out = rows.filter(function (r) { return q.filters.every(function (f) { return matchFilter(r, f); }); });
   if (q.order) {
-    const col = q.order.split('.')[0];
-    const desc = /\.desc/.test(q.order);
+    // PostgREST multi-column order: "col1.asc,col2.desc". The v1.62 AVT
+    // report selection orders by source.asc,uploaded_at.desc — a single-
+    // column parse would silently mis-sort it.
+    const keys = q.order.split(',').map(function (part) {
+      const bits = part.split('.');
+      return { col: bits[0], desc: bits.indexOf('desc') !== -1 };
+    });
     out = out.slice().sort(function (a, b) {
-      const av = a[col], bv = b[col];
-      if (av === bv) return 0;
-      return (av > bv ? 1 : -1) * (desc ? -1 : 1);
+      for (const k of keys) {
+        const av = a[k.col], bv = b[k.col];
+        if (av === bv) continue;
+        // Postgres defaults: ASC → NULLS LAST, DESC → NULLS FIRST.
+        if (av == null) return k.desc ? -1 : 1;
+        if (bv == null) return k.desc ? 1 : -1;
+        return (av > bv ? 1 : -1) * (k.desc ? -1 : 1);
+      }
+      return 0;
     });
   }
   if (q.offset) out = out.slice(q.offset);
@@ -142,6 +165,15 @@ class MockDB {
         const self = this;
         if (this.t.kount_entries.some(function (e) { return self.mergeKey(e) === key; }))
           return err(409, '23505', 'duplicate key value violates unique constraint "kount_entries_merge_key"');
+        // migration 0036: partial unique on (audit_id, client_entry_id)
+        // WHERE client_entry_id IS NOT NULL — replayed inserts collide with
+        // the committed row instead of double-merging qty.
+        if (row.client_entry_id != null &&
+            this.t.kount_entries.some(function (e) {
+              return e.audit_id === row.audit_id && e.client_entry_id != null &&
+                     String(e.client_entry_id) === String(row.client_entry_id);
+            }))
+          return err(409, '23505', 'duplicate key value violates unique constraint "kount_entries_client_key"');
         if (!row.id) row.id = uuid();
       }
 
