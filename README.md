@@ -1,4 +1,4 @@
-# HWOOD Count
+# Keva Inventory (Counting App)
 
 Mobile-first inventory counting app for H.Wood Group venues. PWA with barcode scanning, photo OCR, manual entry, Craftable AVT variance analysis, and Count 1 / Count 2 audit lifecycle.
 

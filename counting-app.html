@@ -6,13 +6,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#0a0a0a">
-<title>kΩunt</title>
+<title>Keva Inventory</title>
 <link rel="manifest" href="manifest.json">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <style>
 /* ============================================================
@@ -1779,35 +1778,6 @@ html, body {
   letter-spacing: 0.02em;
 }
 
-/* ---------- UPLOAD ZONE ---------- */
-.upload-zone {
-  border: 2px dashed var(--border-strong);
-  border-radius: var(--radius);
-  padding: 28px 16px;
-  text-align: center;
-  background: var(--surface);
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.upload-zone:active {
-  background: var(--surface2);
-  border-color: var(--accent);
-}
-
-.upload-zone .uz-label {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--primary);
-  margin-bottom: 4px;
-}
-
-.upload-zone .uz-hint {
-  font-size: 13px;
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
 /* ---------- COUNT PHASE ---------- */
 .count-phase {
   display: flex;
@@ -2124,7 +2094,7 @@ html, body {
   <!-- ========== LOGIN PAGE ========== -->
   <div class="page" id="page-login">
     <div style="padding:40px 0 20px;text-align:center">
-      <div style="font-family:var(--mono);font-size:28px;font-weight:700;color:var(--accent);letter-spacing:4px;margin-bottom:4px">HWOOD</div>
+      <div style="font-family:var(--mono);font-size:28px;font-weight:700;color:var(--accent);letter-spacing:4px;margin-bottom:4px">KEVA</div>
       <div style="font-size:13px;color:var(--text-muted)">Inventory counting system</div>
     </div>
     <div class="form-group">
@@ -2271,30 +2241,11 @@ html, body {
   <div class="page hide" id="page-variance">
     <!-- Count Phase Indicator -->
     <div class="count-phase" id="countPhaseIndicator">
-      <div class="phase" id="phaseAvt">AVT Upload</div>
+      <div class="phase" id="phaseAvt">AVT</div>
       <div class="phase" id="phaseCount1">Count 1</div>
       <div class="phase" id="phaseReview">Review</div>
       <div class="phase" id="phaseCount2">Count 2</div>
       <div class="phase" id="phaseFinal">Final</div>
-    </div>
-
-    <!-- AVT Upload Section (Admin only) -->
-    <div id="avtSection" class="admin-section">
-      <div class="admin-label">Admin only - AVT data</div>
-      <div id="avtStatus" style="font-size:13px;color:var(--text-muted);margin-bottom:10px">No AVT data loaded. Upload a Craftable AVT report to enable variance analysis.</div>
-      <div class="upload-zone" onclick="document.getElementById('avtFileInput').click()">
-        <div class="uz-label">Upload Craftable AVT Report</div>
-        <div class="uz-hint">XLSX or CSV from Craftable - Actual vs Theoretical</div>
-      </div>
-      <input type="file" id="avtFileInput" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleAvtUpload(event)">
-      <div id="avtStoreFilter" class="hide" style="margin-top:8px">
-        <div class="form-group" style="margin-bottom:0">
-          <label>Filter by store</label>
-          <select class="form-input" id="avtStoreSelect" onchange="renderVariancePage()">
-            <option value="">All stores</option>
-          </select>
-        </div>
-      </div>
     </div>
 
     <!-- Variance Stats -->
@@ -2916,7 +2867,7 @@ html, body {
 
 <script>
 /* ================================================================
-   HWOOD COUNTING APP v3
+   KEVA COUNTING APP v3
    All 12 diagnostic fixes applied:
    [1] Audit lock enforcement on all write operations
    [2] Deterministic expected quantities (seeded, cached)
@@ -2941,7 +2892,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.63';
+const APP_VERSION = '1.64';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3443,8 +3394,10 @@ function searchItemMaster(query, limit) {
 
 /* ================================================================
    AVT from Supabase (v1.5)
-   The desktop admin app uploads AVT reports into kount_avt_reports +
-   kount_avt_rows. On phone-app boot we pull the most recent report and
+   AVT reports live in kount_avt_reports + kount_avt_rows — today they
+   are computed server-side (compute_avt_for_audit RPC) when a count
+   closes; historic source='uploaded' reports remain in the DB and load
+   the same way. On phone-app boot we pull the most recent report and
    convert its rows back to the shape renderVariancePage / closeCount1
    already expect. If the local copy in localStorage is newer (e.g. a
    legacy upload from before v1.5 that never made it to Supabase) we
@@ -3549,23 +3502,21 @@ async function stopVenuesRealtime() {
 /* ================================================================
    REALTIME: AVT report refresh.
    Without this, loadAvtFromSupabase only runs at app boot — so when
-   admin uploads a fresh AVT mid-session, every connected counter
-   keeps using yesterday's variance and yesterday's auto-generated
-   recount list. Subscribe to kount_avt_reports INSERT events; on
-   fire, re-pull and surface a non-blocking toast so the counter
-   knows the numbers shifted under their feet.
+   a fresh AVT report lands mid-session (computed when another device
+   closes a count), every connected counter keeps using yesterday's
+   variance and yesterday's auto-generated recount list. Subscribe to
+   kount_avt_reports INSERT events; on fire, re-pull and surface a
+   non-blocking toast so the counter knows the numbers shifted under
+   their feet.
    Channel name uses the per-tab uuid (defined alongside the
    pending-items channel) to avoid collisions across tabs/devices. */
 let avtReportsChannel = null;
-// When THIS phone uploaded the AVT, we suppress the realtime echo so
-// the user doesn't get a confusing "Fresh AVT loaded" toast right after
-// they uploaded. Cleared a few seconds later in case the event arrives
-// later than expected. The id matches kount_avt_reports.id.
-let _avtSelfUploadedReportId = null;
-// Same idea for the RPC-triggered (source='computed') insert that fires
-// right after this phone finalizes a count. The RPC returns a fresh uuid
-// each idempotent call, so we key the echo-suppression on audit_id
-// instead of report id, and only honor it when source === 'computed'.
+// Echo suppression for the RPC-triggered (source='computed') insert that
+// fires right after this phone finalizes a count — without it the user
+// gets a confusing "Fresh AVT loaded" toast for their own action. The
+// RPC returns a fresh uuid each idempotent call, so we key the
+// suppression on audit_id instead of report id, and only honor it when
+// source === 'computed'.
 let _avtSelfComputedAuditId = null;
 
 function startAvtReportsRealtime() {
@@ -3593,16 +3544,9 @@ async function stopAvtReportsRealtime() {
 }
 
 async function onAvtReportInserted(evt) {
-  // Skip our own echo: when this phone just uploaded an AVT we don't
-  // want the realtime event to fire a redundant re-pull and a confusing
-  // "Fresh AVT loaded" toast right after the user uploaded.
-  const incomingId = evt && evt.new && evt.new.id;
-  if (incomingId && incomingId === _avtSelfUploadedReportId) {
-    return;
-  }
-  // Same suppression for the RPC-triggered computed insert this phone
-  // just kicked off. We only suppress when the incoming row is a
-  // 'computed' report for the same audit — an admin's upload that
+  // Skip our own echo: suppress the RPC-triggered computed insert this
+  // phone just kicked off. We only suppress when the incoming row is a
+  // 'computed' report for the same audit — anyone else's report that
   // happens to share the audit_id still gets the toast + refetch.
   const incomingSource = evt && evt.new && evt.new.source;
   const incomingAuditId = evt && evt.new && evt.new.audit_id;
@@ -4476,6 +4420,11 @@ async function savePhoto(id, data) {
 /* ================================================================
    FIX #12: DEBOUNCED STATE PERSISTENCE
    Prevents jank during rapid counting by batching localStorage writes
+
+   NOTE: all localStorage keys (hwood_v3, hwood_avt, hwood_upc*, …) and
+   the hwood_photos IndexedDB name keep the legacy "hwood_" prefix
+   deliberately after the Keva rebrand — renaming them would wipe every
+   device's saved state (counts, caches, learned UPCs) for zero benefit.
    ================================================================ */
 let saveTimeout = null;
 
@@ -10900,283 +10849,6 @@ function restoreCalcFabPos() {
 })();
 
 /* ================================================================
-   STORE NAME MAPPING
-   Maps AVT report store names to counting app venue names.
-   Add new mappings here when venues are added.
-   ================================================================ */
-const STORE_MAP = {
-  // The Birdstreet Club
-  'bird street': 'v4',
-  'birdstreet': 'v4',
-  'the birdstreet club': 'v4',
-  'birdstreet club': 'v4',
-  'bird street club': 'v4',
-  // Delilah LA
-  'delilah la': 'v1',
-  'delilah - la': 'v1',
-  'delilah': 'v1',
-  'delilah los angeles': 'v1',
-  'delilah west hollywood': 'v1',
-  // Delilah Miami
-  'delilah miami': 'v2',
-  'delilah - miami': 'v2',
-  'delilah mia': 'v2',
-  'delilah miami beach': 'v2',
-  // The Nice Guy
-  'the nice guy': 'v3',
-  'nice guy': 'v3',
-  'tng': 'v3',
-  // Poppy
-  'poppy': 'v5',
-  // Keys
-  'keys': 'v6',
-  'the keys': 'v6',
-  // Bootsy Bellows
-  'bootsy bellows': 'v7',
-  'bootsy': 'v7',
-  // The Fleur Room
-  'the fleur room': 'v8',
-  'fleur room': 'v8',
-  'fleur': 'v8',
-  // Harriets
-  'harriets': 'v9',
-  "harriet's": 'v9',
-  'harriets rooftop': 'v9',
-  // 40 Love
-  '40 love': 'v10',
-  'forty love': 'v10',
-};
-
-function mapStoreToVenueId(storeName) {
-  const normalized = (storeName || '').toLowerCase().trim();
-  return STORE_MAP[normalized] || null;
-}
-
-function mapStoreToVenueName(storeName) {
-  const vid = mapStoreToVenueId(storeName);
-  if (!vid) return storeName;
-  const venue = appState.venues.find(v => v.id === vid);
-  return venue ? venue.name : storeName;
-}
-
-/* ================================================================
-   AVT DATA MANAGEMENT
-   Parses Craftable AVT reports (XLSX or CSV).
-   Stores parsed data in appState.avtData[]
-   ================================================================ */
-async function handleAvtUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-
-  // Check admin access
-  if (appState.user?.role !== 'corporate' && appState.user?.role !== 'manager') {
-    showToast('Only admin/manager can upload AVT data', 'error');
-    event.target.value = '';
-    return;
-  }
-
-  showToast('Parsing AVT report...', '');
-
-  try {
-    const data = await file.arrayBuffer();
-    const workbook = XLSX.read(data, { type: 'array' });
-    const sheetName = workbook.SheetNames[0];
-    const sheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-
-    // Find header row (look for STORE, ITEM, VARIANCE etc)
-    let headerRow = -1;
-    let colMap = {};
-
-    for (let i = 0; i < Math.min(rows.length, 10); i++) {
-      const row = rows[i].map(c => String(c).trim().toUpperCase());
-      if (row.includes('STORE') || row.some(c => c.includes('STORE'))) {
-        headerRow = i;
-        row.forEach((cell, j) => {
-          const c = cell.replace(/\s+/g, ' ').trim();
-          if (c.includes('STORE')) colMap.store = j;
-          if (c === 'ITEM' || c.includes('ITEM')) colMap.item = j;
-          if (c === 'CATEGORY' || c.includes('CATEGORY')) colMap.category = j;
-          if (c === 'ACTUAL INVENTORY' || c.includes('ACTUAL')) colMap.actual = j;
-          if (c === 'THEO INVENTORY' || c.includes('THEO')) colMap.theo = j;
-          if (c === 'VARIANCE' && !c.includes('%') && !c.includes('VALUE')) colMap.variance = j;
-          if (c.includes('VARIANCE VALUE') || c.includes('VARIANCE $')) colMap.varianceValue = j;
-          if (c.includes('VARIANCE %') && c.includes('ACTUAL')) colMap.variancePctActual = j;
-          if (c.includes('VARIANCE %') && c.includes('DEPLETION')) colMap.variancePctDepl = j;
-          if (c === 'CU PRICE' || c.includes('PRICE')) colMap.cuPrice = j;
-          if (c === 'START' || c.includes('START')) colMap.start = j;
-          if (c === 'PURCHASES' || c.includes('PURCHASES')) colMap.purchases = j;
-          if (c === 'DEPLETIONS' || c.includes('DEPLETIONS')) colMap.depletions = j;
-          if (c === 'ID') colMap.id = j;
-        });
-        break;
-      }
-    }
-
-    if (headerRow === -1 || colMap.item === undefined) {
-      showToast('Could not find headers in AVT file. Expected: STORE, ITEM, ACTUAL INVENTORY, THEO INVENTORY', 'error');
-      event.target.value = '';
-      return;
-    }
-
-    // Parse data rows
-    const avtItems = [];
-    const stores = new Set();
-
-    for (let i = headerRow + 1; i < rows.length; i++) {
-      const row = rows[i];
-      const itemName = String(row[colMap.item] || '').trim();
-      if (!itemName) continue;
-
-      const store = String(row[colMap.store] || '').trim();
-      stores.add(store);
-
-      avtItems.push({
-        store: store,
-        venueId: mapStoreToVenueId(store),
-        venueName: mapStoreToVenueName(store),
-        itemName: itemName,
-        category: String(row[colMap.category] || '').trim(),
-        actual: parseFloat(row[colMap.actual]) || 0,
-        theo: parseFloat(row[colMap.theo]) || 0,
-        variance: parseFloat(row[colMap.variance]) || 0,
-        varianceValue: parseFloat(row[colMap.varianceValue]) || 0,
-        variancePct: parseFloat(row[colMap.variancePctActual]) || 0,
-        cuPrice: parseFloat(row[colMap.cuPrice]) || 0,
-        start: parseFloat(row[colMap.start]) || 0,
-        purchases: parseFloat(row[colMap.purchases]) || 0,
-        depletions: parseFloat(row[colMap.depletions]) || 0,
-      });
-    }
-
-    appState.avtData = avtItems;
-    appState.avtUploadedAt = new Date().toISOString();
-    appState.avtStores = [...stores];
-    saveState();
-
-    // Populate store filter
-    const storeSelect = document.getElementById('avtStoreSelect');
-    storeSelect.innerHTML = '<option value="">All stores</option>';
-    stores.forEach(s => {
-      const opt = document.createElement('option');
-      opt.value = s;
-      opt.textContent = s + ' (' + mapStoreToVenueName(s) + ')';
-      storeSelect.appendChild(opt);
-    });
-    document.getElementById('avtStoreFilter').classList.remove('hide');
-
-    // Cross-platform push: also write the AVT to Supabase so admin and
-    // every other phone see it via realtime. Mirrors AvtUpload.tsx in the
-    // admin app — same payload, same chunking. Rows that can't be mapped
-    // to a venue are skipped on the push (kount_avt_rows.venue_id is NOT
-    // NULL) but kept in local appState.avtData so the uploading phone's
-    // variance still includes them.
-    let pushedToCloud = false;
-    let pushedReportId = null;
-    let pushedRowCount = 0;
-    let skippedNoVenueCount = 0;
-    if (supabaseLoaded) {
-      try {
-        const cloudPayload = avtItems
-          .filter(it => {
-            const ok = !!it.venueId;
-            if (!ok) skippedNoVenueCount++;
-            return ok;
-          })
-          .map(it => ({
-            store:          it.store || null,
-            venue_id:       it.venueId,
-            venue_name:     it.venueName || null,
-            item_name:      it.itemName,
-            category:       it.category || null,
-            actual:         Number.isFinite(it.actual)        ? it.actual        : null,
-            theo:           Number.isFinite(it.theo)          ? it.theo          : null,
-            variance:       Number.isFinite(it.variance)      ? it.variance      : null,
-            variance_value: Number.isFinite(it.varianceValue) ? it.varianceValue : null,
-            variance_pct:   Number.isFinite(it.variancePct)   ? it.variancePct   : null,
-            cu_price:       Number.isFinite(it.cuPrice)       ? it.cuPrice       : null,
-            start_qty:      Number.isFinite(it.start)         ? it.start         : null,
-            purchases:      Number.isFinite(it.purchases)     ? it.purchases     : null,
-            depletions:     Number.isFinite(it.depletions)    ? it.depletions    : null,
-          }));
-
-        if (cloudPayload.length === 0) {
-          showToast('No rows mapped to a known venue — saved locally only', 'warn');
-        } else {
-          const venueIds = Array.from(new Set(cloudPayload.map(r => r.venue_id)));
-
-          // 1) report header row
-          const reportInsert = await supabaseRest.insert('kount_avt_reports', {
-            uploaded_by_email: (appState.user && appState.user.email) || 'unknown',
-            uploaded_by_name:  (appState.user && appState.user.name)  || 'Unknown',
-            file_name:         file.name,
-            row_count:         cloudPayload.length,
-            venue_ids:         venueIds,
-          });
-          if (reportInsert.error || !reportInsert.data || !reportInsert.data[0]) {
-            throw new Error(reportInsert.error?.message || 'report insert failed');
-          }
-          const report = reportInsert.data[0];
-          pushedReportId = report.id;
-
-          // Suppress own-echo before the realtime event arrives. Cleared
-          // ~10s later (well past Supabase's realtime delivery window).
-          _avtSelfUploadedReportId = report.id;
-          setTimeout(function() {
-            if (_avtSelfUploadedReportId === report.id) _avtSelfUploadedReportId = null;
-          }, 10000);
-
-          // 2) rows in 500-chunk batches (matches admin's CHUNK_SIZE)
-          const CHUNK = 500;
-          for (let i = 0; i < cloudPayload.length; i += CHUNK) {
-            const slice = cloudPayload.slice(i, i + CHUNK).map(r => Object.assign({}, r, { report_id: report.id }));
-            const ins = await supabaseRest.insert('kount_avt_rows', slice);
-            if (ins.error) throw new Error(ins.error.message || 'row chunk insert failed');
-          }
-
-          // Sync local timestamp to the server-stamped uploaded_at so the
-          // local-newer guard in loadAvtFromSupabase doesn't keep stale
-          // local data over the cloud copy.
-          if (report.uploaded_at) {
-            appState.avtUploadedAt = report.uploaded_at;
-            saveState();
-          }
-          pushedToCloud = true;
-          pushedRowCount = cloudPayload.length;
-        }
-      } catch (e) {
-        console.warn('[avt] cloud push failed:', e);
-        // Non-fatal — local data is preserved. Admin and other phones won't
-        // see this upload, but the uploading phone's count flow still works.
-        showToast('AVT saved locally — cloud sync failed: ' + (e.message || 'unknown'), 'warn');
-      }
-    }
-
-    document.getElementById('avtStatus').innerHTML =
-      '<span style="color:var(--success)">' + avtItems.length + ' items loaded from ' + stores.size + ' store(s).</span>' +
-      (pushedToCloud
-        ? '<br><span style="font-size:11px;color:var(--success)">✓ Synced to all devices (' + pushedRowCount + ' rows)' +
-          (skippedNoVenueCount > 0 ? ', ' + skippedNoVenueCount + ' rows skipped (unmapped store)' : '') + '</span>'
-        : '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + new Date().toLocaleString() + ' (local only)</span>');
-
-    if (pushedToCloud) {
-      logActivity('AVT uploaded + synced to cloud: ' + pushedRowCount + ' rows from ' + file.name);
-      showToast(pushedRowCount + ' AVT items synced to all devices', 'success');
-    } else {
-      logActivity('AVT uploaded (local only): ' + avtItems.length + ' items from ' + file.name);
-      showToast(avtItems.length + ' AVT items loaded locally', 'success');
-    }
-    renderVariancePage();
-
-  } catch (error) {
-    console.error('AVT parse error:', error);
-    showToast('Failed to parse AVT file: ' + error.message, 'error');
-  }
-
-  event.target.value = '';
-}
-
-/* ================================================================
    WEEKS-FLAGGED HISTORY (v1.27)
    Phone used to call scoreSeverity with weeksActive=0 everywhere, so
    the chronic CRITICAL ($≥200 for ≥5 weeks, or ≥10 weeks alone) and
@@ -11187,7 +10859,7 @@ async function handleAvtUpload(event) {
    kount_avt_reports and count, per item, how many distinct reports
    that item appeared in with non-trivial absolute variance ($≥50).
    Cached in _avtWeeksMap keyed by `${venueId}|${normName}`. Recomputed
-   on every loadAvtFromSupabase call (boot, realtime, post-upload).
+   on every loadAvtFromSupabase call (boot, realtime).
    ================================================================ */
 const WEEKS_HISTORY_LIMIT = 12;
 const WEEKS_HISTORY_VARIANCE_FLOOR = 50;
@@ -11355,30 +11027,9 @@ function renderVariancePage() {
   updateCountPhaseIndicator();
 
   const avtData = appState.avtData || [];
-  const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
-
-  // Show/hide admin section
-  document.getElementById('avtSection').style.display = isAdmin ? 'block' : 'none';
-
-  // Update AVT status if data exists
-  if (avtData.length > 0 && document.getElementById('avtStatus').textContent.includes('No AVT')) {
-    const uploadedAt = appState.avtUploadedAt ? new Date(appState.avtUploadedAt) : null;
-    const uploadedLabel = (uploadedAt && !isNaN(uploadedAt.getTime()))
-      ? '<br><span style="font-size:11px;color:var(--text-dim)">Uploaded ' + uploadedAt.toLocaleString() + '</span>'
-      : '';
-    document.getElementById('avtStatus').innerHTML =
-      '<span style="color:var(--success)">' + avtData.length + ' items loaded.</span>' +
-      uploadedLabel;
-  }
-
-  // Filter by store if selected
-  const storeFilter = document.getElementById('avtStoreSelect')?.value || '';
   let filteredAvt = avtData;
-  if (storeFilter) {
-    filteredAvt = avtData.filter(a => a.store === storeFilter);
-  }
 
-  // Also filter by current venue if an audit is active
+  // Filter by current venue if an audit is active
   if (appState.audit && appState.currentVenue) {
     const vid = appState.currentVenue.id;
     filteredAvt = filteredAvt.filter(a => a.venueId === vid);
@@ -11464,7 +11115,7 @@ function renderVariancePage() {
       '+ ' + (filtered.length - VARIANCE_ROW_CAP) + ' more rows hidden — refine the filter to narrow the list</div>'
     : '';
   document.getElementById('varianceList').innerHTML = filtered.length === 0
-    ? '<div class="empty-state"><p>No items match this filter.' + (avtData.length === 0 ? ' Upload an AVT report first.' : '') + '</p></div>'
+    ? '<div class="empty-state"><p>No items match this filter.' + (avtData.length === 0 ? ' No AVT report yet — one is computed automatically when Count 2 closes.' : '') + '</p></div>'
     : rowsHtml + truncatedNote;
 
   // Update action buttons based on audit phase
@@ -11745,7 +11396,7 @@ function closeCount1() {
 
   const msg = hasAvt
     ? 'Close Count 1? This will compare against the AVT report and generate the recount list.'
-    : 'Close Count 1? No AVT data uploaded — the recount list will include all counted items for verification. Upload an AVT report on the Variance tab for full variance analysis.';
+    : 'Close Count 1? No AVT data available — the recount list will include all counted items for verification. An AVT report is computed automatically when Count 2 closes.';
 
   showConfirm(msg, () => {
     if (_closingCount1) return;
@@ -11918,7 +11569,7 @@ function generateRecountFromAvt() {
 
 /* ================================================================
    COUNT 2 CLOSE
-   Compares recount data against fresh AVT (if uploaded).
+   Compares recount data against fresh AVT (if available).
    Generates final report with resolved/unresolved items.
    ================================================================ */
 function closeCount2() {
@@ -13919,7 +13570,7 @@ async function sendAIMessage() {
   var auditMode = appState.audit ? 'active' : 'idle';
   var itemsCount = itemMaster ? itemMaster.length : 0;
   var system =
-    'You are the in-app assistant for kΩunt, a bar/restaurant inventory counting PWA (H.Wood Group). ' +
+    'You are the in-app assistant for kΩunt, a bar/restaurant inventory counting PWA (Keva). ' +
     'Be concise, practical, and mobile-friendly. Answer the user directly — no preamble. ' +
     'Current venue: ' + venueName + '. Zone: ' + zoneName + '. Audit: ' + auditMode + '. Catalog size: ' + itemsCount + ' items. ' +
     'When the user sends a bottle/label photo, identify it and suggest inventory-relevant fields (name, brand, vintage, size, category). ' +
