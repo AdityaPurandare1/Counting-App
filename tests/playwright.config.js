@@ -2,12 +2,17 @@ const { defineConfig, devices } = require('@playwright/test');
 
 const PORT = 5599;
 
+// Human-watchable runs: PW_SLOWMO=<ms> npx playwright test --headed
+// Slows every action (click/type) by <ms> so a person can follow along.
+// Timeout scales up because slowMo inflates wall-clock per test.
+const SLOWMO = Number(process.env.PW_SLOWMO || 0) || 0;
+
 module.exports = defineConfig({
   testDir: './e2e',
   // The personas share one in-memory mock DB, so run serially.
   fullyParallel: false,
   workers: 1,
-  timeout: 30000,
+  timeout: SLOWMO ? 180000 : 30000,
   expect: { timeout: 7000 },
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
@@ -25,5 +30,11 @@ module.exports = defineConfig({
     stdout: 'ignore',
     stderr: 'pipe',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Pixel 5'] } }],
+  projects: [{
+    name: 'chromium',
+    use: {
+      ...devices['Pixel 5'],
+      launchOptions: SLOWMO ? { slowMo: SLOWMO } : {},
+    },
+  }],
 });
