@@ -107,6 +107,7 @@
   --mono: 'JetBrains Mono', ui-monospace, monospace;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
 }
 
 /* ---------- RESET ---------- */
@@ -1977,6 +1978,101 @@ html, body {
   }
 }
 
+/* ---------- FLOATING CALCULATOR (peek tab + panel) ----------
+   Z-INDEX AUDIT (grep "z-index", 2026-06): stylesheet layers —
+   current-item-card 50 · header / bottom-nav 100 · header dropdowns 150 ·
+   camera modals 200 · modal-overlay 300 · confirm-overlay 400 ·
+   modal close-x 10 (local) · toast 1000. Inline/JS layers —
+   offline banner 999 · master-data error banner 9999 (max found).
+   FAB = 10000, panel = 10001 so the calculator floats above every
+   modal/overlay/toast. The camera modals hide it via JS hooks (camera
+   feed must never be obscured), not by out-stacking it. */
+.calc-fab {
+  position: fixed;
+  width: 44px;
+  height: 44px;
+  z-index: 10000;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-size: 17px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  padding: 0;
+  font-family: var(--font);
+  box-shadow: var(--shadow-lg);
+  touch-action: none;        /* pointermove drag must not become a scroll */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: left 0.18s ease, top 0.18s ease;
+}
+/* Docked: only a 12px strip peeks on-screen (rest is tucked off-edge).
+   12px clears every right/left inset used by tappable controls in the app
+   (bottom-nav items 12px, modal close-x 14px, page gutter 16px, sheet
+   gutter 18px) so the docked tab never sits on another tap target. */
+.calc-fab.dock-right { border-radius: 12px 0 0 12px; justify-content: flex-start; padding-left: 3px; }
+.calc-fab.dock-left  { border-radius: 0 12px 12px 0; justify-content: flex-end;  padding-right: 3px; }
+.calc-fab.dragging   { transition: none; opacity: 0.92; justify-content: center; padding: 0; border-radius: 12px; }
+
+.calc-fab-panel {
+  position: fixed;
+  z-index: 10001;
+  width: min(272px, calc(100vw - 24px));
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 10px;
+}
+.calc-fab-handle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 8px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.calc-fab-grip {
+  width: 26px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+}
+.calc-fab-title { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.calc-fab-min {
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: var(--font);
+}
+.calc-fab-display {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 8px);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  text-align: right;
+  font-family: var(--mono, 'JetBrains Mono', monospace);
+}
+#calcFabExpr { font-size: 12px; color: var(--text-muted); min-height: 15px; word-break: break-all; }
+#calcFabResult { font-size: 24px; font-weight: 700; color: var(--text); word-break: break-all; }
+.calc-fab-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+/* Reuse the calculator page's .calc-key skin, just denser */
+#calcFabPanel .calc-key { padding: 11px 0; font-size: 17px; }
+#calcFabPanel .calc-fn  { font-size: 14px; }
+
 </style>
 
 </head>
@@ -2370,6 +2466,48 @@ html, body {
       </svg>
       Summary
     </button>
+  </div>
+</div>
+
+<!-- ========== FLOATING CALCULATOR (peek tab + compact panel) ==========
+     Additive to the Calculator nav tab: same state + calcInput() drive
+     both. Visibility, drag/snap/persist and camera hooks live in the
+     FLOATING CALCULATOR script section. -->
+<button class="calc-fab dock-right hide" id="calcFab" type="button" aria-label="Open calculator">🧮</button>
+<div class="calc-fab-panel hide" id="calcFabPanel">
+  <div class="calc-fab-handle" id="calcFabHandle">
+    <span class="calc-fab-grip"></span>
+    <span class="calc-fab-title">Calculator</span>
+    <button class="calc-fab-min" type="button" onclick="toggleCalcFabPanel()" aria-label="Minimize calculator">−</button>
+  </div>
+  <div class="calc-fab-display">
+    <div id="calcFabExpr">&nbsp;</div>
+    <div id="calcFabResult">0</div>
+  </div>
+  <div class="calc-fab-keys">
+    <button class="calc-key calc-fn" onclick="calcInput('C')">C</button>
+    <button class="calc-key calc-fn" onclick="calcInput('back')">⌫</button>
+    <button class="calc-key calc-fn" onclick="calcInput('%')">%</button>
+    <button class="calc-key calc-op" onclick="calcInput('/')">÷</button>
+
+    <button class="calc-key" onclick="calcInput('7')">7</button>
+    <button class="calc-key" onclick="calcInput('8')">8</button>
+    <button class="calc-key" onclick="calcInput('9')">9</button>
+    <button class="calc-key calc-op" onclick="calcInput('*')">×</button>
+
+    <button class="calc-key" onclick="calcInput('4')">4</button>
+    <button class="calc-key" onclick="calcInput('5')">5</button>
+    <button class="calc-key" onclick="calcInput('6')">6</button>
+    <button class="calc-key calc-op" onclick="calcInput('-')">−</button>
+
+    <button class="calc-key" onclick="calcInput('1')">1</button>
+    <button class="calc-key" onclick="calcInput('2')">2</button>
+    <button class="calc-key" onclick="calcInput('3')">3</button>
+    <button class="calc-key calc-op" onclick="calcInput('+')">+</button>
+
+    <button class="calc-key" style="grid-column:span 2" onclick="calcInput('0')">0</button>
+    <button class="calc-key" onclick="calcInput('.')">.</button>
+    <button class="calc-key calc-eq" onclick="calcInput('=')">=</button>
   </div>
 </div>
 
@@ -2803,7 +2941,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.62';
+const APP_VERSION = '1.63';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6716,6 +6854,11 @@ function showPage(page) {
   };
 
   if (renderMap[page]) renderMap[page]();
+
+  // Floating calculator follows the page: hidden on the calculator page
+  // itself (redundant there) and pre-login. See FLOATING CALCULATOR section.
+  _calcFabPage = page;
+  updateCalcFabVisibility();
 }
 
 /* ================================================================
@@ -9131,6 +9274,7 @@ function openBarcodeScanner() {
   barcodeActive = true;
   lastScannedCode = '';
   resetScanConfirmation();
+  _calcFabSetCamera(true); // hide floating calculator while camera is live
 
   if (hasNativeBarcode) {
     openNativeBarcodeScanner();
@@ -9377,6 +9521,9 @@ function closeBarcodeScanner() {
 
   document.getElementById('barcodeModal').classList.add('hide');
   document.getElementById('barcodeViewfinder').innerHTML = '';
+  // Every scanner teardown funnels through here (lock, error, visibility-
+  // change, success), so this is the single restore point for the FAB.
+  _calcFabSetCamera(false);
 }
 
 // FIX: Clean up cameras when user switches tabs
@@ -9660,6 +9807,7 @@ function openPhotoCapture() {
 
   document.getElementById('photoModal').classList.remove('hide');
   photoActive = true;
+  _calcFabSetCamera(true); // hide floating calculator while camera is live
 
   navigator.mediaDevices.getUserMedia({
     video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -9686,6 +9834,9 @@ function closePhotoCapture() {
     photoStream = null;
   }
   document.getElementById('photoModal').classList.add('hide');
+  // All photo-flow exits (cancel, getUserMedia failure, visibilitychange)
+  // come through here — restore the floating calculator.
+  _calcFabSetCamera(false);
 }
 
 /* ================================================================
@@ -10387,10 +10538,18 @@ let _calcResult = '0';
 let _calcJustEvaluated = false;
 
 function renderCalculatorPage() {
-  const exprEl = document.getElementById('calcExpr');
-  const resEl = document.getElementById('calcResult');
-  if (exprEl) exprEl.textContent = _calcExpr || ' ';
-  if (resEl) resEl.textContent = _calcResult;
+  // Two render surfaces share this one state: the Calculator page
+  // (#calcExpr/#calcResult) and the floating panel (#calcFabExpr/
+  // #calcFabResult). Update whichever exist — both stay in sync.
+  const expr = _calcExpr || ' ';
+  ['calcExpr', 'calcFabExpr'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = expr;
+  });
+  ['calcResult', 'calcFabResult'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = _calcResult;
+  });
 }
 
 function calcInput(key) {
@@ -10452,6 +10611,293 @@ function calcInput(key) {
   }
   renderCalculatorPage();
 }
+
+/* ================================================================
+   FLOATING CALCULATOR (FAB "peek tab" + compact panel)
+   Additive to the Calculator nav tab. Shares _calcExpr/_calcResult/
+   calcInput() with the page — renderCalculatorPage() paints both
+   surfaces. The tab is draggable (pointer events + capture), snaps to
+   the nearest screen edge on release, persists its dock position, and
+   is force-hidden whenever a camera modal is live (hooks in
+   open/closeBarcodeScanner + open/closePhotoCapture).
+   ================================================================ */
+const CALC_FAB_POS_KEY = 'hwood_calc_fab_pos_v1';
+const CALC_FAB_W = 44;     // full tab width
+const CALC_FAB_H = 44;
+const CALC_FAB_PEEK = 12;  // on-screen strip when docked (see CSS note)
+
+let _calcFabSide = 'right';
+/* Default dock: right edge, just below mid-screen. Below the zone-tabs row
+   (a full-bleed horizontal scroller whose last "+ Zone" pill can ride the
+   right edge) but above the bottom-nav clamp — verified overlap-free on
+   every page by the e2e walk in 11-floating-calc.spec.js. */
+let _calcFabTop = Math.round(window.innerHeight * 0.55);
+let _calcFabPage = 'login';
+let _calcFabPanelOpen = false;
+let _calcFabCameraActive = false;
+let _calcFabPanelPos = null;     // set after the user drags the panel
+let _calcFabSwallowClick = false;
+
+/* Visibility decision: hidden pre-login (it would float over the password
+   field for no benefit) and on the calculator page itself (redundant).
+   Camera always wins — see _calcFabSetCamera. */
+function updateCalcFabVisibility() {
+  const fab = document.getElementById('calcFab');
+  const panel = document.getElementById('calcFabPanel');
+  if (!fab || !panel) return;
+  const allowed = !!appState.user &&
+    _calcFabPage !== 'login' &&
+    _calcFabPage !== 'calculator' &&
+    !_calcFabCameraActive;
+  // Forced hide also force-minimizes (mirrors the camera path's reset in
+  // _calcFabSetCamera). Otherwise a programmatic hide with the panel open
+  // (e.g. SIGNED_OUT → showPage('login')) leaves the flag true: the next
+  // pointerdown anywhere gets swallowed by the outside-tap handler, and
+  // returning to an allowed page silently auto-reopens the panel.
+  if (!allowed) _calcFabPanelOpen = false;
+  fab.classList.toggle('hide', !allowed);
+  panel.classList.toggle('hide', !(allowed && _calcFabPanelOpen));
+  // keepInVisualViewport skips hidden elements, so a keyboard-avoidance
+  // translateY applied pre-hide would survive into the next show if the
+  // keyboard closed meanwhile. Clear it on hide; reposition handles show.
+  if (!allowed) fab.style.transform = '';
+  if (!(allowed && _calcFabPanelOpen)) panel.style.transform = '';
+  if (allowed) {
+    positionCalcFab();
+    if (_calcFabPanelOpen) positionCalcFabPanel();
+  }
+}
+
+/* Camera hook. While a camera modal is live the FAB AND panel disappear
+   completely; afterwards the FAB comes back docked (panel is force-
+   minimized, never auto-reopened — counters found that jarring). */
+function _calcFabSetCamera(active) {
+  _calcFabCameraActive = !!active;
+  if (active) _calcFabPanelOpen = false;
+  updateCalcFabVisibility();
+}
+
+/* Probed value of --safe-right (env(safe-area-inset-right), same pattern
+   as --safe-top). Needed in the JS clamp math: a landscape notch eats the
+   right edge, and innerWidth alone would dock the tab under it. */
+function _calcFabSafeRight() {
+  const v = parseFloat(
+    getComputedStyle(document.documentElement).getPropertyValue('--safe-right'));
+  return isFinite(v) ? v : 0;
+}
+
+/* Clamp the dock between the sticky header and the bottom nav. */
+function _calcFabClampTop(top) {
+  const header = document.querySelector('.header');
+  const nav = document.querySelector('.bottom-nav');
+  const minTop = (header ? header.getBoundingClientRect().bottom : 60) + 8;
+  const navTop = nav ? nav.getBoundingClientRect().top : window.innerHeight - 70;
+  const maxTop = navTop - CALC_FAB_H - 8;
+  return Math.round(Math.max(minTop, Math.min(maxTop, top)));
+}
+
+function positionCalcFab() {
+  const fab = document.getElementById('calcFab');
+  if (!fab) return;
+  fab.classList.toggle('dock-left', _calcFabSide === 'left');
+  fab.classList.toggle('dock-right', _calcFabSide === 'right');
+  fab.style.top = _calcFabClampTop(_calcFabTop) + 'px';
+  fab.style.left = (_calcFabSide === 'right'
+    ? window.innerWidth - _calcFabSafeRight() - CALC_FAB_PEEK
+    : CALC_FAB_PEEK - CALC_FAB_W) + 'px';
+}
+
+function positionCalcFabPanel() {
+  const panel = document.getElementById('calcFabPanel');
+  if (!panel || panel.classList.contains('hide')) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const pw = panel.offsetWidth, ph = panel.offsetHeight;
+  const safeRight = _calcFabSafeRight();
+  let left, top;
+  if (_calcFabPanelPos) {
+    left = _calcFabPanelPos.left;
+    top = _calcFabPanelPos.top;
+  } else {
+    // Open beside the docked tab (panel position itself is session-only;
+    // only the tab's dock persists).
+    left = _calcFabSide === 'right' ? vw - safeRight - pw - 12 : 12;
+    top = _calcFabTop;
+  }
+  panel.style.left = Math.round(Math.max(8, Math.min(vw - safeRight - pw - 8, left))) + 'px';
+  panel.style.top = Math.round(Math.max(8, Math.min(vh - ph - 8, top))) + 'px';
+}
+
+function toggleCalcFabPanel() {
+  _calcFabPanelOpen = !_calcFabPanelOpen;
+  updateCalcFabVisibility();
+  if (_calcFabPanelOpen) renderCalculatorPage();
+}
+
+function saveCalcFabPos() {
+  try {
+    localStorage.setItem(CALC_FAB_POS_KEY,
+      JSON.stringify({ side: _calcFabSide, top: _calcFabTop }));
+  } catch (e) {}
+}
+
+function restoreCalcFabPos() {
+  try {
+    const raw = localStorage.getItem(CALC_FAB_POS_KEY);
+    if (!raw) return;
+    const pos = JSON.parse(raw);
+    if (pos && (pos.side === 'left' || pos.side === 'right')) _calcFabSide = pos.side;
+    if (pos && typeof pos.top === 'number' && isFinite(pos.top)) {
+      _calcFabTop = _calcFabClampTop(pos.top);
+    }
+  } catch (e) {}
+}
+
+/* Drag plumbing — pointer events + setPointerCapture so it works for
+   touch, mouse and pen. A <8px move is a tap (opens the panel); anything
+   bigger is a drag and never opens it. */
+(function initCalcFab() {
+  const fab = document.getElementById('calcFab');
+  const panel = document.getElementById('calcFabPanel');
+  const handle = document.getElementById('calcFabHandle');
+  if (!fab || !panel || !handle) return;
+
+  restoreCalcFabPos();
+  positionCalcFab();
+
+  // -- FAB: drag-to-dock or tap-to-open --
+  let pid = null, startX = 0, startY = 0, startTop = 0, dragging = false;
+  fab.addEventListener('pointerdown', e => {
+    pid = e.pointerId;
+    startX = e.clientX;
+    startY = e.clientY;
+    startTop = _calcFabTop;
+    dragging = false;
+    try { fab.setPointerCapture(pid); } catch (err) {}
+    e.preventDefault();
+  });
+  fab.addEventListener('pointermove', e => {
+    if (pid === null || e.pointerId !== pid) return;
+    const dx = e.clientX - startX, dy = e.clientY - startY;
+    if (!dragging && Math.hypot(dx, dy) < 8) return; // tap-vs-drag threshold
+    dragging = true;
+    fab.classList.add('dragging');
+    // Free-floating while dragging: full tab follows the pointer.
+    fab.style.left = Math.round(Math.max(0,
+      Math.min(window.innerWidth - CALC_FAB_W, e.clientX - CALC_FAB_W / 2))) + 'px';
+    fab.style.top = _calcFabClampTop(startTop + dy) + 'px';
+  });
+  fab.addEventListener('pointerup', e => {
+    if (pid === null || e.pointerId !== pid) return;
+    pid = null;
+    fab.classList.remove('dragging');
+    if (dragging) {
+      // Snap to the nearest edge and persist the dock.
+      _calcFabSide = e.clientX < window.innerWidth / 2 ? 'left' : 'right';
+      _calcFabTop = _calcFabClampTop(startTop + (e.clientY - startY));
+      saveCalcFabPos();
+      positionCalcFab();
+    } else {
+      toggleCalcFabPanel();
+    }
+  });
+  fab.addEventListener('pointercancel', () => {
+    if (pid === null) return;
+    pid = null;
+    fab.classList.remove('dragging');
+    positionCalcFab();
+  });
+
+  // -- Panel: drag by the handle (minimize button excluded) --
+  let ppid = null, pStartX = 0, pStartY = 0, pStartLeft = 0, pStartTop = 0;
+  handle.addEventListener('pointerdown', e => {
+    if (e.target.closest('button')) return; // let the minimize button click
+    ppid = e.pointerId;
+    pStartX = e.clientX;
+    pStartY = e.clientY;
+    const r = panel.getBoundingClientRect();
+    pStartLeft = r.left;
+    pStartTop = r.top;
+    try { handle.setPointerCapture(ppid); } catch (err) {}
+    e.preventDefault();
+  });
+  handle.addEventListener('pointermove', e => {
+    if (ppid === null || e.pointerId !== ppid) return;
+    _calcFabPanelPos = {
+      left: pStartLeft + (e.clientX - pStartX),
+      top: pStartTop + (e.clientY - pStartY),
+    };
+    positionCalcFabPanel();
+  });
+  const endPanelDrag = e => {
+    if (ppid === null || e.pointerId !== ppid) return;
+    ppid = null;
+  };
+  handle.addEventListener('pointerup', endPanelDrag);
+  handle.addEventListener('pointercancel', endPanelDrag);
+
+  // -- Tap anywhere outside the open panel minimizes it. We deliberately
+  //    SWALLOW that first outside tap (preventDefault + stopPropagation in
+  //    the capture phase, plus the click that follows it): letting it
+  //    through could fire a destructive control (+/- on a count card, a
+  //    submit button) when the user only meant "dismiss the calculator".
+  //    Focus is never trapped — the page underneath stays fully alive for
+  //    the next tap. --
+  document.addEventListener('pointerdown', e => {
+    if (!_calcFabPanelOpen) return;
+    if (panel.contains(e.target) || fab.contains(e.target)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    _calcFabSwallowClick = true;
+    _calcFabPanelOpen = false;
+    updateCalcFabVisibility();
+  }, true);
+  document.addEventListener('click', e => {
+    if (!_calcFabSwallowClick) return;
+    _calcFabSwallowClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+  // Staleness guard: a touch-scroll or interrupted gesture ends in
+  // pointerup/pointercancel WITHOUT a click, which would leave the flag
+  // armed to eat an unrelated later click. We can't clear synchronously
+  // on pointerup — the synthetic click of a real tap fires AFTER pointerup
+  // and must still be swallowed — but that click is dispatched before
+  // timers run, so a 0-ms timeout lets THIS gesture's click through to the
+  // swallower while guaranteeing the flag never outlives the gesture.
+  const _calcFabDisarmSwallow = () => {
+    if (!_calcFabSwallowClick) return;
+    setTimeout(() => { _calcFabSwallowClick = false; }, 0);
+  };
+  document.addEventListener('pointerup', _calcFabDisarmSwallow, true);
+  document.addEventListener('pointercancel', _calcFabDisarmSwallow, true);
+
+  // -- Keyboard avoidance: when the OS keyboard shrinks the visual
+  //    viewport, translate the FAB/panel up so they stay visible. --
+  if (window.visualViewport) {
+    const vv = window.visualViewport;
+    const keepInVisualViewport = () => {
+      [fab, panel].forEach(el => {
+        if (el.classList.contains('hide')) return;
+        el.style.transform = '';
+        const r = el.getBoundingClientRect();
+        const bottomLimit = vv.offsetTop + vv.height - 8;
+        let shift = 0;
+        if (r.bottom > bottomLimit) shift = bottomLimit - r.bottom;
+        if (r.top + shift < vv.offsetTop + 8) shift = vv.offsetTop + 8 - r.top;
+        if (shift) el.style.transform = 'translateY(' + shift + 'px)';
+      });
+    };
+    vv.addEventListener('resize', keepInVisualViewport);
+    vv.addEventListener('scroll', keepInVisualViewport);
+  }
+
+  // Re-clamp on rotation / window resize.
+  window.addEventListener('resize', () => {
+    _calcFabTop = _calcFabClampTop(_calcFabTop);
+    positionCalcFab();
+    positionCalcFabPanel();
+  });
+})();
 
 /* ================================================================
    STORE NAME MAPPING
