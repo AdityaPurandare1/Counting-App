@@ -25,3 +25,8 @@ supabase/.temp/
 # stay tracked, but their generated outputs don't).
 scripts/_*.sql
 scripts/_*.log
+
+# Business-sensitive ops packages - repo is PUBLIC (GitHub Pages); these contain
+# recipe specs + ingredient costs from the Bevager export. Keep local-only.
+supabase/recipes/
+supabase/tests/poppy_*

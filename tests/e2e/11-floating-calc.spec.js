@@ -1,13 +1,14 @@
 const { test, expect, startAuditAs } = require('../fixtures');
 
-/* Floating calculator: edge-docked "peek tab" FAB + compact panel that
-   shares state with the Calculator page. Covers: overlap-proofing on every
-   page (the docked tab must never sit on another tap target), tap-to-open /
-   outside-tap-minimize, drag + snap + localStorage persistence, and the
-   hide-while-camera-is-live requirement. */
+/* Floating calculator: edge-docked FAB (fully visible, a small gap inside
+   the snapped edge) + compact panel that shares state with the Calculator
+   page. Covers: overlap-proofing on every page (the docked button must
+   never sit on another tap target), tap-to-open / outside-tap-minimize,
+   drag + snap + localStorage persistence, and the hide-while-camera-is-live
+   requirement. */
 
-/* Runs in the page. Compares the docked FAB's VISIBLE (viewport-clamped)
-   box against every visible leaf interactive element. [onclick] containers
+/* Runs in the page. Compares the docked FAB's box (viewport-clamped)
+   against every visible leaf interactive element. [onclick] containers
    (modal backdrops, sheet wrappers) are skipped — their leaf controls are
    what we measure; a backdrop "under" the FAB is fine because the FAB
    out-stacks it (the elementFromPoint assertion proves that). */
@@ -60,15 +61,9 @@ async function panelVisible(page) {
   });
 }
 
-/* Click the docked tab on its on-screen strip (the element is mostly tucked
-   off-edge, so the default center-click point would be offscreen). */
+/* The docked button is fully on-screen, so a plain center click works. */
 async function tapFab(page) {
-  const side = await page.evaluate(() => {
-    const r = document.getElementById('calcFab').getBoundingClientRect();
-    return r.left < 0 ? 'left' : 'right';
-  });
-  const pos = side === 'left' ? { x: 38, y: 22 } : { x: 5, y: 22 };
-  await page.locator('#calcFab').click({ position: pos });
+  await page.locator('#calcFab').click();
 }
 
 test.describe('floating calculator', () => {
@@ -128,10 +123,7 @@ test.describe('floating calculator', () => {
 
   test('drag snaps to the left edge and persists; drag never opens the panel', async ({ page }) => {
     const box = await page.locator('#calcFab').boundingBox();
-    // Start on the visible strip (the tab is mostly tucked off the right
-    // edge, so box.x + 6 is on-screen; further right would be outside the
-    // viewport and the events would never reach the FAB).
-    await page.mouse.move(box.x + 6, box.y + 22);
+    await page.mouse.move(box.x + 22, box.y + 22);
     await page.mouse.down();
     await page.mouse.move(200, box.y + 80, { steps: 6 });
     await page.mouse.move(40, box.y + 120, { steps: 6 });
@@ -139,10 +131,13 @@ test.describe('floating calculator', () => {
 
     expect(await panelVisible(page), 'drag must not open the panel').toBe(false);
 
-    // Snapped to the left edge: tab tucked off the left side.
+    // Snapped to the left edge: fully visible, a small gap inside it.
     await expect.poll(() =>
       page.evaluate(() => document.getElementById('calcFab').getBoundingClientRect().left)
-    ).toBeLessThan(0);
+    ).toBeLessThan(20);
+    expect(await page.evaluate(() =>
+      document.getElementById('calcFab').getBoundingClientRect().left
+    ), 'docked button must be fully on-screen').toBeGreaterThanOrEqual(0);
 
     // Persisted dock (localStorage is wiped on navigation by the test
     // harness, so we assert the stored value instead of reloading).
