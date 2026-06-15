@@ -1124,6 +1124,73 @@ html, body {
   backdrop-filter: blur(8px);
 }
 
+/* INSTANT SCAN confirmation Ã¢â‚¬â€ compact overlay that appears after a known
+   barcode is counted, without closing the camera. Sits above the scan-status
+   pill so both can show; auto-hides after a short window. */
+.instant-scan-feedback {
+  position: absolute;
+  bottom: 178px;
+  left: 50%;
+  transform: translateX(-50%) translateY(8px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 90%;
+  background: rgba(20, 110, 70, 0.92);
+  color: #fff;
+  padding: 10px 12px 10px 16px;
+  border-radius: 24px;
+  font-size: 14px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  z-index: 20;
+}
+.instant-scan-feedback.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+  pointer-events: auto;
+}
+.instant-scan-feedback .isf-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.instant-scan-feedback .isf-check {
+  font-size: 16px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.instant-scan-feedback .isf-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.instant-scan-feedback .isf-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.instant-scan-feedback .isf-qty {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.instant-scan-feedback .isf-edit {
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border: none;
+  border-radius: 16px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 /* ---------- MODAL ---------- */
 .modal-overlay {
   position: fixed;
@@ -2932,7 +2999,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.68';
+const APP_VERSION = '1.69';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -9198,6 +9265,10 @@ let nativeScanInterval = null;
 // checksums catch incomplete digits and hallucinated reads in a single
 // frame. Reserve the slow path for formats without a built-in integrity
 // check (Code 128/39 numeric, etc.).
+// Per-barcode cooldown for INSTANT SCAN: the same code can't re-fire until
+// this window elapses (a lingering bottle won't double-count). A different
+// barcode is unaffected and counts immediately.
+const SCAN_COOLDOWN_MS = 2500;
 const FRAMES_HIGH_CONF = 2;  // length + GTIN checksum verified
 const FRAMES_MED_CONF  = 3;  // length + digit-shape OK, no checksum
 const FRAMES_LOW_CONF  = 4;  // free-text formats, fall back to brute force
@@ -9312,7 +9383,10 @@ function processDetection(code, format) {
   const now = Date.now();
 
   // Debounce: same code just fired within 3s Ã¢â‚¬â€ ignore
-  if (code === lastScannedCode && now - lastScanTime < 3000) return false;
+  // INSTANT SCAN keeps the scanner open after a count, so this same-code
+  // guard is the single per-barcode cooldown (a DIFFERENT code resets the
+  // candidate below and locks immediately).
+  if (code === lastScannedCode && now - lastScanTime < SCAN_COOLDOWN_MS) return false;
 
   // If we lost the target for >600ms, reset the candidate
   if (scanCandidateCode && now - scanLastSeenAt > 600) {
@@ -9347,6 +9421,17 @@ function onBarcodeDetected(result) {
   const code = result.codeResult.code;
   const format = result.codeResult.format;  // Quagga supplies 'ean_13', 'upc_a', etc.
   if (!processDetection(code, format)) return;
+
+  // INSTANT SCAN: a known barcode counts +1 in the current zone WITHOUT
+  // opening the modal and KEEPS the scanner running for the next bottle.
+  // Only an unknown barcode falls through to today's modal flow.
+  if (instantScanCount(code)) {
+    // Re-arm for the next bottle. The per-barcode cooldown in processDetection
+    // stops this same code re-firing; reset the candidate so a different code
+    // locks cleanly.
+    resetScanConfirmation();
+    return;
+  }
 
   barcodeActive = false;
   if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
@@ -9447,13 +9532,19 @@ async function openNativeBarcodeScanner() {
           const code = result.rawValue;
           const format = result.format;  // 'ean_13', 'upc_a', 'qr_code', etc.
           if (processDetection(code, format)) {
-            barcodeActive = false;
-            if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
-            // Brief delay so user sees the green "locked" state before modal closes
-            setTimeout(() => {
-              closeBarcodeScanner();
-              handleBarcodeResult(code);
-            }, 80);
+            // INSTANT SCAN: a known barcode counts +1 in the current zone
+            // WITHOUT opening the modal and KEEPS the scanner running.
+            if (instantScanCount(code)) {
+              resetScanConfirmation();
+            } else {
+              barcodeActive = false;
+              if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
+              // Brief delay so user sees the green "locked" state before modal closes
+              setTimeout(() => {
+                closeBarcodeScanner();
+                handleBarcodeResult(code);
+              }, 80);
+            }
           }
         } else {
           // No barcode in frame Ã¢â‚¬â€ decay the candidate count if we've lost sight
@@ -9610,6 +9701,7 @@ function closeBarcodeScanner() {
     barcodeListenerAttached = false;
   }
 
+  hideInstantScanFeedback();
   document.getElementById('barcodeModal').classList.add('hide');
   document.getElementById('barcodeViewfinder').innerHTML = '';
   // Every scanner teardown funnels through here (lock, error, visibility-
@@ -9631,6 +9723,146 @@ function detectCategory(title, description) {
   if (/vodka|whiskey|bourbon|gin|rum|tequila|cognac|scotch|hennessy|patron/.test(text)) return 'spirits';
   if (/beer|ale|lager|stout|ipa|heineken|corona|modelo|seltzer/.test(text)) return 'beer';
   return 'other';
+}
+
+/* Strategy-2 matcher Ã¢â‚¬â€ scanned barcode Ã¢â€ â€™ itemMaster row by inline UPC.
+   Extracted so both handleBarcodeResult (modal flow) and the instant-scan
+   resolution use the identical matching rules (digits-only, leading-zero
+   and check-digit tolerance). */
+function matchBarcodeToMaster(code) {
+  const digitsOnly = code.replace(/\D/g, '');
+  const noLeadZeros = digitsOnly.replace(/^0+/, '');
+  return itemMaster.find(item => {
+    if (!item.upc) return false;
+    const itemDigits = item.upc.replace(/\D/g, '');
+    const itemNoZeros = itemDigits.replace(/^0+/, '');
+
+    // Exact match (digits only)
+    if (itemDigits === digitsOnly) return true;
+    // Match without leading zeros
+    if (itemNoZeros === noLeadZeros && noLeadZeros.length >= 6) return true;
+    // Scanned code contains item UPC or vice versa (handles check digit differences)
+    if (digitsOnly.length >= 8 && itemDigits.length >= 8) {
+      if (digitsOnly.includes(itemDigits) || itemDigits.includes(digitsOnly)) return true;
+      // Match last N digits (some scanners add/remove leading zero)
+      if (digitsOnly.slice(-10) === itemDigits.slice(-10) && itemDigits.length >= 10) return true;
+    }
+    return false;
+  });
+}
+
+/* INSTANT SCAN resolution Ã¢â‚¬â€ does this barcode resolve to a KNOWN catalog
+   item that we can count without opening the modal? Reuses the SAME lookups
+   handleBarcodeResult uses (learned upcMappingsCache, then the itemMaster
+   inline-UPC match) and only returns a hit when it carries a master_item_id,
+   since the instant +1 path needs the master to merge/sync correctly. An
+   unmapped or master-less barcode returns null so the caller falls back to
+   today's modal flow (link/search/suggest).
+   Returns { masterId, name, category } or null. */
+function resolveInstantScan(code) {
+  // Learned UPCs (admin-approved master_item_upcs) win Ã¢â‚¬â€ same precedence as
+  // handleBarcodeResult Strategy 0.
+  const learned = lookupLearnedUPC(code);
+  if (learned && learned.masterId) {
+    const master = itemMaster.find(i => String(i.id) === String(learned.masterId));
+    return {
+      masterId: String(learned.masterId),
+      name: (master && master.name) || learned.title || '',
+      category: (master && master.category) || learned.category || 'other',
+    };
+  }
+  // itemMaster inline-UPC match (Strategy 2). Always carries the master id.
+  const masterMatch = matchBarcodeToMaster(code);
+  if (masterMatch) {
+    return { masterId: String(masterMatch.id), name: masterMatch.name, category: masterMatch.category };
+  }
+  return null;
+}
+
+/* INSTANT SCAN entry point from the detect loop (native + Quagga). If the
+   barcode is KNOWN, count +1 into the current zone via the SAME add path the
+   modal Save uses (addCountEntry) Ã¢â‚¬â€ keeping item_id null / master_item_id
+   set, the merge-on-repeat semantics, retry queue, and the audit-locked /
+   networked-offline guards all unchanged Ã¢â‚¬â€ then leaves the scanner OPEN
+   with non-blocking feedback. Returns true if it consumed the scan (known),
+   false if the caller should fall through to the modal flow (unknown). */
+function instantScanCount(code) {
+  const resolved = resolveInstantScan(code);
+  if (!resolved) return false;
+
+  // Guards live in addCountEntry (locked / no-zone / networked-offline). If
+  // any blocks, it shows its own toast and the zone row is unchanged, so the
+  // running-total read below detects that nothing was counted and we skip the
+  // success overlay. We never bypass these guards.
+  const zone = appState.currentZone;
+  const before = (appState.audit && zone && appState.audit.counts[zone])
+    ? (appState.audit.counts[zone].find(i => String(i.masterId) === resolved.masterId) || null)
+    : null;
+  const beforeQty = before ? before.qty : 0;
+
+  addCountEntry(resolved.name, resolved.category, 1, 'barcode', code, null, 'none', null, null, resolved.masterId);
+
+  // Re-read the merged row so the overlay shows the true running total and the
+  // Edit affordance can target the just-counted master item.
+  const zoneAfter = appState.currentZone;
+  const after = (appState.audit && zoneAfter && appState.audit.counts[zoneAfter])
+    ? (appState.audit.counts[zoneAfter].find(i => String(i.masterId) === resolved.masterId) || null)
+    : null;
+
+  // If a guard blocked the add (or the fuzzy-picker deferred it), the running
+  // total won't have advanced Ã¢â‚¬â€ don't claim a count happened.
+  if (!after || after.qty <= beforeQty) {
+    return true; // still consumed: it was a known barcode, modal must NOT open
+  }
+
+  if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+  showInstantScanFeedback(resolved.name, after.qty, resolved.masterId);
+  renderCountPage();
+  return true;
+}
+
+/* Compact in-scanner overlay confirming the instant count without closing the
+   camera. Shows item name + new running qty in this zone, plus an Edit button
+   that opens the existing guided entry editor for the just-counted item. */
+let _instantScanFeedbackTimer = null;
+function showInstantScanFeedback(name, runningQty, masterId) {
+  const viewfinder = document.getElementById('barcodeViewfinder');
+  if (!viewfinder) return;
+  let el = document.getElementById('instantScanFeedback');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'instantScanFeedback';
+    el.className = 'instant-scan-feedback';
+    viewfinder.parentNode.appendChild(el);
+  }
+  el.innerHTML =
+    '<div class="isf-body">' +
+      '<span class="isf-check">✓</span>' +
+      '<span class="isf-text"><span class="isf-name">' + esc(name) + '</span>' +
+      '<span class="isf-qty">' + formatQty(runningQty) + ' in ' + esc(appState.currentZone || '') + '</span></span>' +
+    '</div>' +
+    '<button type="button" class="isf-edit" id="instantScanEditBtn">Edit</button>';
+  el.classList.add('show');
+  // Tapping Edit closes the scanner and opens the existing entry editor for
+  // this item so a miscount is fixable.
+  const editBtn = document.getElementById('instantScanEditBtn');
+  if (editBtn) {
+    editBtn.onclick = function () {
+      closeBarcodeScanner();
+      openGuidedEntry(masterId);
+    };
+  }
+  if (_instantScanFeedbackTimer) clearTimeout(_instantScanFeedbackTimer);
+  _instantScanFeedbackTimer = setTimeout(function () {
+    _instantScanFeedbackTimer = null;
+    if (el) el.classList.remove('show');
+  }, 2600);
+}
+
+function hideInstantScanFeedback() {
+  if (_instantScanFeedbackTimer) { clearTimeout(_instantScanFeedbackTimer); _instantScanFeedbackTimer = null; }
+  const el = document.getElementById('instantScanFeedback');
+  if (el) el.classList.remove('show');
 }
 
 async function handleBarcodeResult(code) {
@@ -9666,27 +9898,7 @@ async function handleBarcodeResult(code) {
   }
 
   // Strategy 2: Check if barcode matches any UPC in the item master
-  // Strip ALL non-digit characters from scanned code for matching
-  const digitsOnly = code.replace(/\D/g, '');
-  const noLeadZeros = digitsOnly.replace(/^0+/, '');
-
-  const masterMatch = itemMaster.find(item => {
-    if (!item.upc) return false;
-    const itemDigits = item.upc.replace(/\D/g, '');
-    const itemNoZeros = itemDigits.replace(/^0+/, '');
-
-    // Exact match (digits only)
-    if (itemDigits === digitsOnly) return true;
-    // Match without leading zeros
-    if (itemNoZeros === noLeadZeros && noLeadZeros.length >= 6) return true;
-    // Scanned code contains item UPC or vice versa (handles check digit differences)
-    if (digitsOnly.length >= 8 && itemDigits.length >= 8) {
-      if (digitsOnly.includes(itemDigits) || itemDigits.includes(digitsOnly)) return true;
-      // Match last N digits (some scanners add/remove leading zero)
-      if (digitsOnly.slice(-10) === itemDigits.slice(-10) && itemDigits.length >= 10) return true;
-    }
-    return false;
-  });
+  const masterMatch = matchBarcodeToMaster(code);
 
   if (masterMatch) {
     const result = {
