@@ -1,7 +1,7 @@
-// 'hwood-count-' prefix is a legacy internal identifier kept deliberately â€”
+// 'hwood-count-' prefix is a legacy internal identifier kept deliberately Ã¢â‚¬â€
 // renaming it would orphan existing caches on devices. Bump the version
 // digits only, in lockstep with APP_VERSION in counting-app.html.
-const CACHE_NAME = 'hwood-count-v1.66';
+const CACHE_NAME = 'hwood-count-v1.68';
 
 // Allowlist: only same-origin static assets are cached. Anything dynamic
 // (Supabase REST, Edge Functions, auth, third-party CDNs) passes through
@@ -10,7 +10,7 @@ const CACHE_NAME = 'hwood-count-v1.66';
 //
 // Match by BASENAME (not absolute path) so a deploy under a subpath like
 // /Counting-App/counting-app.html still hits the allowlist. The scope root
-// itself (whatever pathname this SW is registered at â€” '/' or
+// itself (whatever pathname this SW is registered at Ã¢â‚¬â€ '/' or
 // '/Counting-App/') is matched separately.
 const STATIC_BASENAMES = [
   'counting-app.html',
@@ -49,7 +49,7 @@ self.addEventListener('install', event => {
 
 self.addEventListener('fetch', event => {
   if (!shouldCache(event.request)) {
-    // No respondWith â†’ browser handles the request normally, bypassing
+    // No respondWith Ã¢â€ â€™ browser handles the request normally, bypassing
     // the SW entirely. Critical for Supabase/Edge Function calls.
     return;
   }

@@ -139,6 +139,18 @@ test.describe('catalog create + matching', () => {
     expect(await page.evaluate(() => document.getElementById('photoName').dataset.masterId)).toBe(M.dj1942);
     // Picker should NOT appear.
     await expect(page.locator('#sizePickerModal')).toHaveCount(0);
+
+    // v1.67: the photo review modal's quantity field has -/+ stepper
+    // buttons; + steps the default 1 up to 2. (Modal is hidden in this
+    // harness, so click via evaluate rather than a Playwright click.)
+    await expect(page.locator('#photoReviewModal .modal-qty-stepper .gh-minus')).toHaveCount(1);
+    await expect(page.locator('#photoReviewModal .modal-qty-stepper .gh-plus')).toHaveCount(1);
+    expect(await page.evaluate(() => {
+      const q = document.getElementById('photoQty');
+      q.value = '1';
+      document.querySelector('#photoReviewModal .modal-qty-stepper .gh-plus').click();
+      return q.value;
+    })).toBe('2');
   });
 
   test('Fuzzy gate: "Add as new" still creates the custom item when there is no plausible existing match', async ({ page, db }) => {
