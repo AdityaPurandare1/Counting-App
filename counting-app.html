@@ -15,15 +15,15 @@
 
 <style>
 /* ============================================================
-   KÃŽÂ©UNT Ã¢â‚¬â€ REDESIGNED UI (v2)
+   KΩUNT — REDESIGNED UI (v2)
    Warm cream + deep navy + coral accent
    Big, confident touch targets for bar/back-of-house use
    ============================================================ */
 
 /* ---------- CSS VARIABLES ---------- */
 :root {
-  /* Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â WOODY PALETTE Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â */
-  /* Surfaces Ã¢â‚¬â€ warm cream / off-white foundation */
+  /* ====== WOODY PALETTE ====== */
+  /* Surfaces — warm cream / off-white foundation */
   --bg: #ECE6DF;
   --canvas: #ECE6DF;
   --surface: #FFFFFF;
@@ -35,7 +35,7 @@
   --border: #D9D2C5;
   --border-strong: #B5AB97;
 
-  /* Text Ã¢â‚¬â€ ink-forward, generous contrast */
+  /* Text — ink-forward, generous contrast */
   --text: #0D0A08;
   --ink: #0D0A08;
   --fg-primary: #0D0A08;
@@ -44,7 +44,7 @@
   --text-muted: #4F4B4B;
   --text-dim: #8A8380;
 
-  /* Brand Ã¢â‚¬â€ Woody uses ink as primary CTA, gold as highlight */
+  /* Brand — Woody uses ink as primary CTA, gold as highlight */
   --accent: #0D0A08;
   --accent-hover: #26201C;
   --accent-dim: rgba(13, 10, 8, 0.08);
@@ -57,27 +57,27 @@
   --dark-800: #1E1612;
   --dark-900: #0D0A08;
 
-  /* Gold Ã¢â‚¬â€ highlight/status */
+  /* Gold — highlight/status */
   --gold-100: #F5EBD0;
   --gold-300: #C9A24C;
   --gold-400: #8B6F1E;
 
-  /* Raspberry Ã¢â‚¬â€ critical / danger */
+  /* Raspberry — critical / danger */
   --raspberry-100: #F7DEE4;
   --raspberry-200: #E8A8B6;
   --raspberry-300: #C13A57;
   --raspberry-400: #7C1E31;
 
-  /* Teal Ã¢â‚¬â€ positive / in-progress */
+  /* Teal — positive / in-progress */
   --teal-100: #DCEAE6;
   --teal-300: #3F7D73;
 
-  /* Copper Ã¢â‚¬â€ caution */
+  /* Copper — caution */
   --copper-100: #F5E0CE;
   --copper-300: #B2703F;
   --copper-400: #7A4818;
 
-  /* Amethyst Ã¢â‚¬â€ inform / scheduled */
+  /* Amethyst — inform / scheduled */
   --amethyst-100: #EBE2F2;
   --amethyst-200: #C9B6DC;
   --amethyst-300: #8B6FA8;
@@ -93,7 +93,7 @@
   --blue: #8B6FA8;
   --blue-dim: rgba(139, 111, 168, 0.10);
 
-  /* Shape Ã¢â‚¬â€ tighter radii to match Woody's squared feel */
+  /* Shape — tighter radii to match Woody's squared feel */
   --radius: 12px;
   --radius-sm: 8px;
   --radius-xs: 6px;
@@ -182,7 +182,7 @@ html, body {
   align-items: center;
   justify-content: space-between;
   background: var(--canvas);
-  /* design removed the hard divider Ã¢â‚¬â€ rely on content/nav gutters to
+  /* design removed the hard divider — rely on content/nav gutters to
      separate sections instead */
   position: sticky;
   top: 0;
@@ -198,7 +198,7 @@ html, body {
   flex: 1;
 }
 
-/* Prototype phone header is title-only Ã¢â‚¬â€ no logo, just the venue name
+/* Prototype phone header is title-only — no logo, just the venue name
    reading as a bold headline. We hide the logo slot without touching
    markup and repaint the venue badge as a headline. */
 .logo {
@@ -605,7 +605,7 @@ html, body {
 }
 
 /* ---------- COUNT ITEM ROW ---------- */
-/* Count-list row Ã¢â‚¬â€ prototype's lighter card: 1px border, no drop shadow,
+/* Count-list row — prototype's lighter card: 1px border, no drop shadow,
    14px radius, softer status indication (no gradient wash). */
 .c-item {
   background: var(--surface);
@@ -766,7 +766,7 @@ html, body {
   font-weight: 500;
 }
 
-/* Venue picker card Ã¢â‚¬â€ rounder, no drop shadow, gentler padding. */
+/* Venue picker card — rounder, no drop shadow, gentler padding. */
 .venue-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -831,7 +831,7 @@ html, body {
 }
 
 /* ---------- BOTTOM NAV ---------- */
-/* Bottom nav Ã¢â‚¬â€ ported from phone_screens.jsx prototype:
+/* Bottom nav — ported from phone_screens.jsx prototype:
    frosted cream bar, pill-behind-icon for active tab. Class names + markup
    are unchanged so showPage()'s existing toggling continues to work. */
 .bottom-nav {
@@ -868,7 +868,7 @@ html, body {
   font-family: var(--font);
 }
 
-/* The SVG gets wrapped in its own pill via an inline span Ã¢â‚¬â€ since we can't
+/* The SVG gets wrapped in its own pill via an inline span — since we can't
    touch the markup, render the pill via the .nav-item's SVG itself by
    setting an inset box around it through a flex shell. */
 .nav-item svg {
@@ -1021,7 +1021,7 @@ html, body {
 }
 
 /* ---------- PHASE A: SCAN TARGETING STATES ---------- */
-/* Targeting Ã¢â‚¬â€ barcode detected, accumulating frames (copper) */
+/* Targeting — barcode detected, accumulating frames (copper) */
 .scan-frame.targeting {
   box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45),
               inset 0 0 28px rgba(178, 112, 63, 0.18);
@@ -1041,7 +1041,7 @@ html, body {
   opacity: 0.95;
 }
 
-/* Locked Ã¢â‚¬â€ 4 frames confirmed (teal) */
+/* Locked — 4 frames confirmed (teal) */
 .scan-frame.locked {
   box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.45),
               inset 0 0 36px rgba(63, 125, 115, 0.22);
@@ -1124,7 +1124,7 @@ html, body {
   backdrop-filter: blur(8px);
 }
 
-/* INSTANT SCAN confirmation Ã¢â‚¬â€ compact overlay that appears after a known
+/* INSTANT SCAN confirmation — compact overlay that appears after a known
    barcode is counted, without closing the camera. Sits above the scan-status
    pill so both can show; auto-hides after a short window. */
 .instant-scan-feedback {
@@ -1363,7 +1363,7 @@ html, body {
 }
 
 /* ---------- SUMMARY CARD ---------- */
-/* Summary / stats card Ã¢â‚¬â€ 1px border, no drop shadow, 16px radius. */
+/* Summary / stats card — 1px border, no drop shadow, 16px radius. */
 .summary-card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1402,7 +1402,7 @@ html, body {
 .stat-value.success { color: var(--success); }
 .stat-value.warning { color: var(--warning); }
 
-/* Section label ('eyebrow' in the prototype) Ã¢â‚¬â€ smaller, wider tracking,
+/* Section label ('eyebrow' in the prototype) — smaller, wider tracking,
    muted tone so the card contents below carry the visual weight. */
 .section-title {
   font-size: 10.5px;
@@ -2036,11 +2036,11 @@ html, body {
 }
 
 /* ---------- FLOATING CALCULATOR (edge-docked FAB + panel) ----------
-   Z-INDEX AUDIT (grep "z-index", 2026-06): stylesheet layers Ã¢â‚¬â€
-   current-item-card 50 Ã‚Â· header / bottom-nav 100 Ã‚Â· header dropdowns 150 Ã‚Â·
-   camera modals 200 Ã‚Â· modal-overlay 300 Ã‚Â· confirm-overlay 400 Ã‚Â·
-   modal close-x 10 (local) Ã‚Â· toast 1000. Inline/JS layers Ã¢â‚¬â€
-   offline banner 999 Ã‚Â· master-data error banner 9999 (max found).
+   Z-INDEX AUDIT (grep "z-index", 2026-06): stylesheet layers —
+   current-item-card 50 · header / bottom-nav 100 · header dropdowns 150 ·
+   camera modals 200 · modal-overlay 300 · confirm-overlay 400 ·
+   modal close-x 10 (local) · toast 1000. Inline/JS layers —
+   offline banner 999 · master-data error banner 9999 (max found).
    FAB = 10000, panel = 10001 so the calculator floats above every
    modal/overlay/toast. The camera modals hide it via JS hooks (camera
    feed must never be obscured), not by out-stacking it. */
@@ -2137,7 +2137,7 @@ html, body {
   <!-- ========== HEADER ========== -->
   <div class="header">
     <div class="header-left">
-      <span class="logo">kÎ©unt</span>
+      <span class="logo">kΩunt</span>
       <span class="venue-badge" id="headerVenue">Select venue</span>
     </div>
     <div class="header-right">
@@ -2255,7 +2255,7 @@ html, body {
         <button id="cancelAuditBtn" onclick="endAuditEarly()" style="background:none;border:1px solid var(--danger);color:var(--danger);font-size:10px;padding:2px 8px;border-radius:var(--radius-xs);cursor:pointer;font-family:var(--font);margin-left:6px">Cancel</button>
       </div>
       <div id="closeCount1Bar" class="hide" style="margin-bottom:10px">
-        <button class="submit-btn" onclick="closeCount1()" style="font-size:13px;padding:10px">Close Count 1 â†’ Generate recount list</button>
+        <button class="submit-btn" onclick="closeCount1()" style="font-size:13px;padding:10px">Close Count 1 → Generate recount list</button>
       </div>
       <div id="recountBanner" class="recount-banner hide" onclick="showPage('recount')"></div>
       <div id="lastUpcErrorBanner"></div>
@@ -2297,19 +2297,19 @@ html, body {
     </div>
     <div id="calcKeypad" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
       <button class="calc-key calc-fn" onclick="calcInput('C')">C</button>
-      <button class="calc-key calc-fn" onclick="calcInput('back')">âŒ«</button>
+      <button class="calc-key calc-fn" onclick="calcInput('back')">⌫</button>
       <button class="calc-key calc-fn" onclick="calcInput('%')">%</button>
-      <button class="calc-key calc-op" onclick="calcInput('/')">Ã·</button>
+      <button class="calc-key calc-op" onclick="calcInput('/')">÷</button>
 
       <button class="calc-key" onclick="calcInput('7')">7</button>
       <button class="calc-key" onclick="calcInput('8')">8</button>
       <button class="calc-key" onclick="calcInput('9')">9</button>
-      <button class="calc-key calc-op" onclick="calcInput('*')">Ã—</button>
+      <button class="calc-key calc-op" onclick="calcInput('*')">×</button>
 
       <button class="calc-key" onclick="calcInput('4')">4</button>
       <button class="calc-key" onclick="calcInput('5')">5</button>
       <button class="calc-key" onclick="calcInput('6')">6</button>
-      <button class="calc-key calc-op" onclick="calcInput('-')">âˆ’</button>
+      <button class="calc-key calc-op" onclick="calcInput('-')">−</button>
 
       <button class="calc-key" onclick="calcInput('1')">1</button>
       <button class="calc-key" onclick="calcInput('2')">2</button>
@@ -2445,7 +2445,7 @@ html, body {
       <button class="mode-btn" data-rf="high" onclick="setRecountFilter('high', this)">High</button>
       <button class="mode-btn" data-rf="pending" onclick="setRecountFilter('pending', this)">Pending</button>
     </div>
-    <!-- Zone filter (v1.41) Ã¢â‚¬â€ dropdown of zones present in the recount list.
+    <!-- Zone filter (v1.41) — dropdown of zones present in the recount list.
          Counter picks their zone to focus; "All zones" is the default so
          a counter who's helping across the venue isn't forced to filter.
          Populated by renderRecountPage based on the actual zones in the
@@ -2528,7 +2528,7 @@ html, body {
   <div class="calc-fab-handle" id="calcFabHandle">
     <span class="calc-fab-grip"></span>
     <span class="calc-fab-title">Calculator</span>
-    <button class="calc-fab-min" type="button" onclick="toggleCalcFabPanel()" aria-label="Minimize calculator">âˆ’</button>
+    <button class="calc-fab-min" type="button" onclick="toggleCalcFabPanel()" aria-label="Minimize calculator">−</button>
   </div>
   <div class="calc-fab-display">
     <div id="calcFabExpr">&nbsp;</div>
@@ -2536,19 +2536,19 @@ html, body {
   </div>
   <div class="calc-fab-keys">
     <button class="calc-key calc-fn" onclick="calcInput('C')">C</button>
-    <button class="calc-key calc-fn" onclick="calcInput('back')">âŒ«</button>
+    <button class="calc-key calc-fn" onclick="calcInput('back')">⌫</button>
     <button class="calc-key calc-fn" onclick="calcInput('%')">%</button>
-    <button class="calc-key calc-op" onclick="calcInput('/')">Ã·</button>
+    <button class="calc-key calc-op" onclick="calcInput('/')">÷</button>
 
     <button class="calc-key" onclick="calcInput('7')">7</button>
     <button class="calc-key" onclick="calcInput('8')">8</button>
     <button class="calc-key" onclick="calcInput('9')">9</button>
-    <button class="calc-key calc-op" onclick="calcInput('*')">Ã—</button>
+    <button class="calc-key calc-op" onclick="calcInput('*')">×</button>
 
     <button class="calc-key" onclick="calcInput('4')">4</button>
     <button class="calc-key" onclick="calcInput('5')">5</button>
     <button class="calc-key" onclick="calcInput('6')">6</button>
-    <button class="calc-key calc-op" onclick="calcInput('-')">âˆ’</button>
+    <button class="calc-key calc-op" onclick="calcInput('-')">−</button>
 
     <button class="calc-key" onclick="calcInput('1')">1</button>
     <button class="calc-key" onclick="calcInput('2')">2</button>
@@ -2609,9 +2609,9 @@ html, body {
     <div id="barcodeDupeWarning"></div>
     <img id="barcodeProductImg" style="display:none;width:70px;height:70px;object-fit:contain;border-radius:var(--radius-sm);background:var(--surface2);margin-bottom:12px;padding:4px">
     <div id="barcodeUpcLinkBanner" style="display:none;padding:8px 10px;background:var(--accent-dim);border:1px solid rgba(13, 10, 8, 0.15);border-radius:var(--radius-sm);margin-bottom:12px;font-size:12px;gap:6px;align-items:center">
-      <span style="color:var(--accent);flex-shrink:0">â˜‘</span>
+      <span style="color:var(--accent);flex-shrink:0">☑</span>
       <span id="barcodeUpcLinkText" style="flex:1;color:var(--accent);line-height:1.3"></span>
-      <button onclick="unlinkBarcodeItem()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:2px 4px">âœ•</button>
+      <button onclick="unlinkBarcodeItem()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:2px 4px">✕</button>
     </div>
     <div class="form-group">
       <label>Product name</label>
@@ -2738,7 +2738,7 @@ html, body {
     <button id="manualCreateBtn"
       onclick="createManualForCatalog()"
       style="display:none;width:100%;margin-top:8px;background:var(--accent);color:#000;border:none;padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:700;font-size:13px;cursor:pointer">
-      âž• Add "<span id="manualCreateName"></span>" to catalog
+      ➕ Add "<span id="manualCreateName"></span>" to catalog
     </button>
     <button id="manualSuggestBtn"
       onclick="suggestManualForCatalog()"
@@ -2746,7 +2746,7 @@ html, body {
       Suggest "<span id="manualSuggestName"></span>" for catalog
     </button>
     <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.4">
-      Item not in catalog? Counts locally now; tap "Suggest" to send the item to admin for approval â€” once approved, every device will see it.
+      Item not in catalog? Counts locally now; tap "Suggest" to send the item to admin for approval — once approved, every device will see it.
     </div>
   </div>
 </div>
@@ -2756,7 +2756,7 @@ html, body {
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>AI Settings <button class="close-x" onclick="closeAPIKeySettings()">X</button></h3>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
-      Two separate keys â€” OpenAI (GPT-4o mini) for label parsing, Anthropic (Claude) for the Ask AI assistant. Stored only on this device (localStorage).
+      Two separate keys — OpenAI (GPT-4o mini) for label parsing, Anthropic (Claude) for the Ask AI assistant. Stored only on this device (localStorage).
     </div>
     <div class="form-group">
       <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(for label parsing)</span></label>
@@ -2785,10 +2785,10 @@ html, body {
     <div id="aiChatMessages" style="flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:10px;font-size:13px;line-height:1.5">
       <div style="background:var(--surface2);padding:10px 12px;border-radius:var(--radius-sm);color:var(--text-muted);font-size:12px">
         Hi! I can help with:<br>
-        â€¢ Parsing wine labels & bottle photos<br>
-        â€¢ Finding items in your inventory<br>
-        â€¢ Answering questions about the count<br>
-        â€¢ Any other help you need
+        • Parsing wine labels & bottle photos<br>
+        • Finding items in your inventory<br>
+        • Answering questions about the count<br>
+        • Any other help you need
       </div>
     </div>
     <div id="aiImagePreview" style="display:none;padding:8px 16px;border-top:1px solid var(--border)">
@@ -2803,7 +2803,7 @@ html, body {
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="12" height="9" rx="1.5"/><circle cx="8" cy="9" r="2"/><path d="M5 4l1-1.5h4L11 4"/></svg>
         <input type="file" accept="image/*" capture="environment" style="display:none" onchange="handleAIImagePick(event)">
       </label>
-      <textarea id="aiChatInput" placeholder="Ask anythingâ€¦" rows="1"
+      <textarea id="aiChatInput" placeholder="Ask anything…" rows="1"
         style="flex:1;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-family:var(--font);font-size:13px;padding:9px 11px;border-radius:var(--radius-sm);resize:none;max-height:100px"
         onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendAIMessage();}"></textarea>
       <button onclick="sendAIMessage()" style="background:var(--accent);color:#000;border:none;width:38px;height:38px;border-radius:var(--radius-sm);cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center" title="Send">
@@ -2878,7 +2878,7 @@ html, body {
       </label>
       <div id="photoExtraLocations" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
-    <button id="photoCreateBtn" onclick="createPhotoForCatalog()" style="display:none;width:100%;margin-bottom:8px;background:var(--accent);color:#000;border:none;padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:700;font-size:13px;cursor:pointer">âž• Add "<span id="photoCreateName"></span>" to catalog</button>
+    <button id="photoCreateBtn" onclick="createPhotoForCatalog()" style="display:none;width:100%;margin-bottom:8px;background:var(--accent);color:#000;border:none;padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:700;font-size:13px;cursor:pointer">➕ Add "<span id="photoCreateName"></span>" to catalog</button>
     <button id="photoSuggestBtn" onclick="suggestPhotoForCatalog()" style="display:none;width:100%;margin-bottom:8px;background:var(--surface2);color:var(--accent);border:1px solid var(--accent);padding:10px;border-radius:var(--radius-sm);font-family:var(--font);font-weight:600;font-size:13px;cursor:pointer">Suggest "<span id="photoSuggestName"></span>" for catalog</button>
     <button class="submit-btn" onclick="submitPhotoEntry()">Add to count</button>
   </div>
@@ -2894,13 +2894,13 @@ html, body {
     <div class="guided-hero">
       <div class="gh-head">
         <span class="gh-eyebrow" id="guidedHeroEyebrow">Now counting</span>
-        <span class="gh-mode-pill">â— Guided</span>
+        <span class="gh-mode-pill">● Guided</span>
       </div>
       <div class="gh-title" id="guidedHeroTitle"></div>
       <div class="gh-meta" id="guidedHeroMeta"></div>
 
       <div class="gh-stepper">
-        <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">âˆ’</button>
+        <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">−</button>
         <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0" onblur="qtyBlur(this)">
         <button class="gh-step gh-plus" onclick="adjustGuidedQty(1)" type="button">+</button>
       </div>
@@ -2933,12 +2933,12 @@ html, body {
       <input class="form-input" id="guidedIssueNotes" placeholder="e.g. sticker fell off, wrong shelf...">
     </div>
     <!-- Recount-only block: visible when openRecountEntry sets data-mode="recount".
-         Both fields are required to mark the row as "recorded" Ã¢â‚¬â€ finalizeCount2
+         Both fields are required to mark the row as "recorded" — finalizeCount2
          and the recount close button block until every recount row has both. -->
     <div class="form-group hide" id="recountResultGroup">
       <label>Audit result <span style="color:var(--danger)">*</span></label>
       <select class="form-input" id="recountResultSelect">
-        <option value="">â€” Pick a result â€”</option>
+        <option value="">— Pick a result —</option>
         <option value="corrected">Count Corrected (count was changed)</option>
         <option value="verified">Count Verified (count stayed the same)</option>
       </select>
@@ -2999,16 +2999,16 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.70';
+const APP_VERSION = '1.71';
 
 /* ================================================================
    SUPABASE INTEGRATION
    ================================================================ */
 const SUPABASE_URL = 'https://mnraeesscqsaappkaldb.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1ucmFlZXNzY3FzYWFwcGthbGRiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjI2MzkxNzQsImV4cCI6MjA3ODIxNTE3NH0.QaPiMs48H9nsH7wGNhi_1jYRQ_YAPGLduxSpYOrz1ug';
-// Ã¢Å¡Â Ã¯Â¸Â  Replace above with your anon/public key from Supabase Dashboard Ã¢â€ â€™ Settings Ã¢â€ â€™ API
+// ⚠️  Replace above with your anon/public key from Supabase Dashboard → Settings → API
 
-/* Supabase JS client Ã¢â‚¬â€ used for Realtime subscriptions AND auth (Phase 1
+/* Supabase JS client — used for Realtime subscriptions AND auth (Phase 1
    migration to Supabase Auth). All reads/writes still go through the
    supabaseRest wrapper below; that wrapper now picks the user JWT when
    we have one (post-sign-in) and falls back to the anon key for
@@ -3042,12 +3042,12 @@ if (supabaseClient) {
     if (event === 'PASSWORD_RECOVERY') {
       handlePasswordRecoveryFlow();
     }
-    // SIGNED_IN fires on every login Ã¢â‚¬â€ including the FIRST time after
+    // SIGNED_IN fires on every login — including the FIRST time after
     // clicking an invite email. Supabase doesn't expose a dedicated
     // "INVITED" event; we detect it by checking whether last_sign_in_at
     // matches created_at (within a small slop), which only happens on
     // the user's very first session. In that case the account exists in
-    // auth.users but has no password set Ã¢â‚¬â€ route through the same
+    // auth.users but has no password set — route through the same
     // password-prompt flow as PASSWORD_RECOVERY so the user can set
     // one before their session expires and locks them out.
     if (event === 'SIGNED_IN' && session && session.user && _isFirstLoginSession(session)) {
@@ -3071,7 +3071,7 @@ if (supabaseClient) {
 }
 
 // Build the Authorization header. When a user is signed in via Supabase
-// Auth, we send their JWT Ã¢â‚¬â€ Postgres RLS policies will see them as a
+// Auth, we send their JWT — Postgres RLS policies will see them as a
 // real authenticated user. When nobody is signed in (boot, login screen)
 // we fall back to the anon key so the dev-mode `to anon using (true)`
 // policies still allow reads/writes. Phase 4 (RLS flip) will lock the
@@ -3153,7 +3153,7 @@ let supabaseItems = [];
 let supabaseLoaded = false;
 
 // In-scope master_items categories for the Counting-App (bar / bev / liquor
-// / wine / mixers + beer). Food, produce, supplies, services are excluded Ã¢â‚¬â€
+// / wine / mixers + beer). Food, produce, supplies, services are excluded —
 // the phone should never show them. Includes the lowercase + capitalized
 // variants because the upstream catalog has casing inconsistencies.
 const IN_SCOPE_CATEGORIES = [
@@ -3171,13 +3171,13 @@ async function loadSupabaseItems() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
 
   // Post-Path-B: catalog source is master_items, not purchase_items.
-  // master_items is ~12k active rows vs purchase_items' 26k, and 1.7Ãƒâ€” of
+  // master_items is ~12k active rows vs purchase_items' 26k, and 1.7× of
   // those are SKU variants of the same canonical product. Switching to
   // masters narrows the search space and removes vendor-variant noise
   // that was making name search pick the wrong row. We also apply
   // IN_SCOPE_FILTER so food/produce/dairy/supplies never reach the phone.
   //
-  // UPCs are no longer on this table Ã¢â‚¬â€ they live in master_item_upcs and
+  // UPCs are no longer on this table — they live in master_item_upcs and
   // are loaded by loadMasterItemUpcs() below. mapSupabaseToItemMaster
   // therefore returns items with upc='' here; the scan resolver fills the
   // UPC from the master_item_upcs cache when it's available.
@@ -3203,7 +3203,7 @@ async function loadSupabaseItems() {
 }
 
 /* ================================================================
-   Carried-items set (v1.14) Ã¢â‚¬â€ the subset of purchase_items.id that
+   Carried-items set (v1.14) — the subset of purchase_items.id that
    the admin has flagged as actively stocked, via the desktop /catalog
    screen. Search / scan suggestions narrow to this set when it's
    populated; an empty set means 'no curation yet' and the phone
@@ -3216,7 +3216,7 @@ async function loadCarriedItemsFromSupabase() {
   try {
     // Post-Path-B: carried set is keyed by master_item_id, not
     // purchase_item_id. The 0023 migration backfilled the new column and
-    // 0024 deduped + scope-filtered to bar/bev/liquor/wine Ã¢â‚¬â€ so what we
+    // 0024 deduped + scope-filtered to bar/bev/liquor/wine — so what we
     // load here is already the curated in-scope catalog.
     const PAGE_SIZE = 1000;
     const MAX_PAGES = 20;
@@ -3235,7 +3235,7 @@ async function loadCarriedItemsFromSupabase() {
 
     // After refreshing carriedSet, validate that itemMaster actually contains
     // the IDs we just got. If resolution is poor (<80%), itemMaster is stale
-    // Ã¢â‚¬â€ trigger a master reload so admin-curated items become findable.
+    // — trigger a master reload so admin-curated items become findable.
     reconcileCarriedAgainstMaster();
     return true;
   } catch (e) {
@@ -3312,7 +3312,7 @@ function startPeriodicCatalogSync() {
     if (document.visibilityState !== 'visible') return;
     loadCarriedItemsFromSupabase().catch(function() {});
     // Retry items only if we are still on the items.json fallback (i.e.
-    // Supabase failed at boot) Ã¢â‚¬â€ otherwise the realtime + carried-reconcile
+    // Supabase failed at boot) — otherwise the realtime + carried-reconcile
     // path covers fresh items.
     if (!supabaseLoaded) loadItemMaster().catch(function() {});
     loadApprovedUpcMappings(false).catch(function() {});
@@ -3331,7 +3331,7 @@ function stopPeriodicCatalogSync() {
    ================================================================
    Counter feedback (Anna @ Poppy, 2026-06): typing a name that almost-
    matches an existing inventory item creates a NEW master_items row
-   instead of linking Ã¢â‚¬â€ exactly the Craftable duplicate-variant problem
+   instead of linking — exactly the Craftable duplicate-variant problem
    we're trying to escape. addCountEntry now runs these helpers before
    falling through to addCustomItem, and surfaces a modal when there
    are plausible existing candidates the counter might have meant.
@@ -3387,7 +3387,7 @@ function findSizeSiblings(matchedItem) {
     if (!it || !it.name) continue;
     if (String(it.id) === String(matchedItem.id)) continue;
     if (isDoNotCountName(it.name)) continue;
-    // Only suggest peers that themselves carry a size Ã¢â‚¬â€ un-sized placeholder
+    // Only suggest peers that themselves carry a size — un-sized placeholder
     // rows would be misleading as "alternative sizes" (Fix D demoted them).
     const hasSize = (it.size && String(it.size).trim()) || SIZE_IN_NAME.test(it.name);
     if (!hasSize) continue;
@@ -3399,7 +3399,7 @@ function findSizeSiblings(matchedItem) {
 /* Returns up to `limit` itemMaster rows that look similar to `query`,
    each scored by bigram Jaccard similarity. Filters out exact-name hits
    (the caller already handled those) and DO-NOT-USE rows (defense in
-   depth Ã¢â‚¬â€ they shouldn't be in itemMaster post-Fix G but skip anyway).
+   depth — they shouldn't be in itemMaster post-Fix G but skip anyway).
    Sorted by score desc. minSim caps the floor at ~"plausible match". */
 function findFuzzyMasterMatches(query, limit, minSim) {
   const q = String(query || '').toLowerCase().trim();
@@ -3412,7 +3412,7 @@ function findFuzzyMasterMatches(query, limit, minSim) {
     if (!it || !it.name) continue;
     if (isDoNotCountName(it.name)) continue;
     const nameKey = String(it.name).toLowerCase().trim();
-    if (nameKey === exactKey) continue; // exact match Ã¢â‚¬â€ caller handles it
+    if (nameKey === exactKey) continue; // exact match — caller handles it
     const score = bigramSimilarity(q, it.name);
     if (score >= threshold) out.push({ item: it, score: score });
   }
@@ -3477,7 +3477,7 @@ function searchItemMaster(query, limit) {
   }
 
   if (useCarried) {
-    // Carried items first Ã¢â‚¬â€ the venue's actual stocked inventory.
+    // Carried items first — the venue's actual stocked inventory.
     // Within carried: sized variants before un-sized (so "Komos Reserva
     // Anejo 750ml" wins over "Komos Reserva Anejo"). Then non-carried with
     // the same sized-first ordering. Callers draw a "Not in your inventory
@@ -3490,7 +3490,7 @@ function searchItemMaster(query, limit) {
     return results;
   }
 
-  // Fallback Ã¢â‚¬â€ only reached when this venue has no carried set at all
+  // Fallback — only reached when this venue has no carried set at all
   // (carriedSet.size === 0). Searches the full master so a brand-new
   // venue with nothing uploaded yet can still count. Same sized-first rule.
   pushFiltered(null, true);
@@ -3501,7 +3501,7 @@ function searchItemMaster(query, limit) {
 
 /* ================================================================
    AVT from Supabase (v1.5)
-   AVT reports live in kount_avt_reports + kount_avt_rows Ã¢â‚¬â€ today they
+   AVT reports live in kount_avt_reports + kount_avt_rows — today they
    are computed server-side (compute_avt_for_audit RPC) when a count
    closes; historic source='uploaded' reports remain in the DB and load
    the same way. On phone-app boot we pull the most recent report and
@@ -3515,7 +3515,7 @@ function searchItemMaster(query, limit) {
    Until now appState.venues was hardcoded right next to the appState
    declaration. This function pulls the live list from public.venues
    (migration 0013) and rewrites appState.venues + appState.venues[i]
-   ._defaultZones in place. Other code reads via appState Ã¢â‚¬â€ no callsite
+   ._defaultZones in place. Other code reads via appState — no callsite
    changes. The hardcoded list inside appState stays as the boot-time
    fallback for offline/Supabase-unreachable starts.
    ================================================================ */
@@ -3532,7 +3532,7 @@ async function loadVenuesFromSupabase() {
       return false;
     }
     if (resp.data.length === 0) {
-      // Schema present but empty (e.g. seed didn't run) Ã¢â‚¬â€ keep the local
+      // Schema present but empty (e.g. seed didn't run) — keep the local
       // hardcoded fallback so the picker isn't blank.
       console.warn('[venues] table is empty, keeping hardcoded list');
       return false;
@@ -3557,7 +3557,7 @@ async function loadVenuesFromSupabase() {
     // If currentVenue still exists in the new list, refresh its in-place
     // reference so anything holding `appState.currentVenue` sees the new
     // name/address/zones. If it was removed (soft delete), drop the
-    // selection Ã¢â‚¬â€ counters will be sent back to the venue picker.
+    // selection — counters will be sent back to the venue picker.
     if (appState.currentVenue) {
       var fresh = appState.venues.find(function(v) { return v.id === appState.currentVenue.id; });
       if (fresh) appState.currentVenue = fresh;
@@ -3608,7 +3608,7 @@ async function stopVenuesRealtime() {
 
 /* ================================================================
    REALTIME: AVT report refresh.
-   Without this, loadAvtFromSupabase only runs at app boot Ã¢â‚¬â€ so when
+   Without this, loadAvtFromSupabase only runs at app boot — so when
    a fresh AVT report lands mid-session (computed when another device
    closes a count), every connected counter keeps using yesterday's
    variance and yesterday's auto-generated recount list. Subscribe to
@@ -3619,7 +3619,7 @@ async function stopVenuesRealtime() {
    pending-items channel) to avoid collisions across tabs/devices. */
 let avtReportsChannel = null;
 // Echo suppression for the RPC-triggered (source='computed') insert that
-// fires right after this phone finalizes a count Ã¢â‚¬â€ without it the user
+// fires right after this phone finalizes a count — without it the user
 // gets a confusing "Fresh AVT loaded" toast for their own action. The
 // RPC returns a fresh uuid each idempotent call, so we key the
 // suppression on audit_id instead of report id, and only honor it when
@@ -3653,7 +3653,7 @@ async function stopAvtReportsRealtime() {
 async function onAvtReportInserted(evt) {
   // Skip our own echo: suppress the RPC-triggered computed insert this
   // phone just kicked off. We only suppress when the incoming row is a
-  // 'computed' report for the same audit Ã¢â‚¬â€ anyone else's report that
+  // 'computed' report for the same audit — anyone else's report that
   // happens to share the audit_id still gets the toast + refetch.
   const incomingSource = evt && evt.new && evt.new.source;
   const incomingAuditId = evt && evt.new && evt.new.audit_id;
@@ -3664,7 +3664,7 @@ async function onAvtReportInserted(evt) {
   ) {
     return;
   }
-  // Pull the fresh AVT Ã¢â‚¬â€ same code path the boot loader uses, so cache
+  // Pull the fresh AVT — same code path the boot loader uses, so cache
   // semantics + page re-render stay consistent. The "local-newer" guard
   // inside loadAvtFromSupabase still applies, so a phone that uploaded
   // its own AVT (legacy path) and hasn't yet synced to Supabase won't
@@ -3672,7 +3672,7 @@ async function onAvtReportInserted(evt) {
   const before = appState.avtUploadedAt;
   const ok = await loadAvtFromSupabase();
   if (!ok) return;
-  // Only toast if the timestamp actually advanced Ã¢â‚¬â€ guards against an
+  // Only toast if the timestamp actually advanced — guards against an
   // event that arrives before the Supabase REST is consistent (rare,
   // but cheap to defend against).
   if (appState.avtUploadedAt && appState.avtUploadedAt !== before) {
@@ -3686,13 +3686,13 @@ async function loadAvtFromSupabase() {
   try {
     // v1.62: venue-scoped, computed-first report pick. The old global
     // `order=uploaded_at.desc&limit=1` broke once per-venue computed
-    // reports existed Ã¢â‚¬â€ a corporate user could land on another venue's
+    // reports existed — a corporate user could land on another venue's
     // report and see zero matching rows. Filter to reports covering the
     // current venue (venue_ids is text[]; PostgREST contains = `cs.{...}`)
     // and prefer source='computed' over 'uploaded': source.asc sorts
     // 'computed' first alphabetically, then most recent wins (computed
     // reports get uploaded_at = computed_at = now() at insert). No venue
-    // selected yet Ã¢â€ â€™ keep the legacy global pick.
+    // selected yet → keep the legacy global pick.
     var avtVenueId = appState.currentVenue && appState.currentVenue.id;
     var repQs = 'select=*'
       + (avtVenueId ? '&venue_ids=cs.{' + encodeURIComponent(avtVenueId) + '}' : '')
@@ -3726,7 +3726,7 @@ async function loadAvtFromSupabase() {
     }
     if (rows.length === 0) return false;
 
-    // If the local copy is newer, keep it Ã¢â‚¬â€ avoids clobbering a legacy upload
+    // If the local copy is newer, keep it — avoids clobbering a legacy upload
     // that hasn't reached Supabase yet.
     var localAt = appState.avtUploadedAt ? new Date(appState.avtUploadedAt).getTime() : 0;
     var remoteAt = new Date(report.uploaded_at).getTime();
@@ -3834,7 +3834,7 @@ async function loadAvtForAudit(auditId) {
 
 /* Inventory convention: master_items names prefixed with "DO NOT USE",
    "***Do NOT USE!", "DNC", or carrying a "(Do not Use-...)" parenthetical
-   are poisoned rows kept for legacy/reference Ã¢â‚¬â€ counters must never tap,
+   are poisoned rows kept for legacy/reference — counters must never tap,
    scan, photo-match, or otherwise route counts to them. There is no flag
    column on master_items for this today; the name prefix is the convention.
    Counter feedback 2026-06 (Jonathan @ Poppy, IMG_1518): a scan was
@@ -3852,7 +3852,7 @@ function mapSupabaseToItemMaster(items) {
   // scan, and the photo-parse Edge Function. Key differences from the
   // old purchase_items path:
   //   - upc / sku come from master_item_upcs (separate cache), not this row
-  //   - brand is no longer a column on the catalog table Ã¢â‚¬â€ names like
+  //   - brand is no longer a column on the catalog table — names like
   //     "Don Julio 1942 1.75L" already embed brand + product + size
   //   - size is composed from base_size + base_unit when the name
   //     doesn't already include it
@@ -3948,7 +3948,7 @@ async function linkUPCToItem(barcode, item) {
     return;
   }
 
-  // Admin overwrite needs an explicit confirm Ã¢â‚¬â€ the only data-destructive path.
+  // Admin overwrite needs an explicit confirm — the only data-destructive path.
   if (policy.action === 'approve' && policy.isUpdate) {
     const existingUpc = (item.upc || '').trim();
     const confirmMsg = existingUpc
@@ -3996,11 +3996,11 @@ async function linkUPCToItem(barcode, item) {
     const msg = (error && error.message) ? String(error.message) : 'unknown error';
     console.error('[upc] insert failed:', msg, '\npayload was:', payload);
     // Network-vs-server classification: the supabaseRest wrapper prefixes every
-    // server-side rejection with "HTTP nnn" Ã¢â‚¬â€ so anything WITHOUT that prefix
+    // server-side rejection with "HTTP nnn" — so anything WITHOUT that prefix
     // means the fetch itself threw and never reached the server. This is
     // browser-wording-proof: Chrome says "Failed to fetch", Safari/iOS says
     // "Load failed" / "The network connection was lost", Firefox says
-    // "NetworkError..." Ã¢â‚¬â€ the old allowlist regex missed Safari's wording and
+    // "NetworkError..." — the old allowlist regex missed Safari's wording and
     // dead-ended every flaky-wifi link attempt on the iPhone fleet (v1.66 fix).
     const isNetwork = !navigator.onLine || !/^HTTP \d{3}/.test(msg);
     if (isNetwork) {
@@ -4029,8 +4029,8 @@ async function linkUPCToItem(barcode, item) {
   }
 
   if (approveNow) {
-    // Post Path B, "approve" means write the barcode Ã¢â€ â€™ master mapping
-    // into master_item_upcs. We DON'T touch purchase_items.upc anymore Ã¢â‚¬â€
+    // Post Path B, "approve" means write the barcode → master mapping
+    // into master_item_upcs. We DON'T touch purchase_items.upc anymore —
     // that was the source of the cross-size UPC propagation issue cleaned
     // up in migration 0022.
     if (item.supabaseId) {
@@ -4048,34 +4048,34 @@ async function linkUPCToItem(barcode, item) {
       };
       const _miuInsert = function(attempt) {
         supabaseRest.insert('master_item_upcs', miuPayload).then(function(resp) {
-          // supabaseRest never throws Ã¢â‚¬â€ failures (e.g. someone else already
+          // supabaseRest never throws — failures (e.g. someone else already
           // linked this UPC to a different master, or RLS denial) come back
           // in resp.error. The upc_mappings row may read 'approved' while the
           // master link never landed, so warn the user about the mismatch.
           if (resp && resp.error) {
             const miuMsg = String(resp.error.message || resp.error);
-            // No "HTTP nnn" prefix = the fetch died (Safari: "Load failed") Ã¢â‚¬â€
+            // No "HTTP nnn" prefix = the fetch died (Safari: "Load failed") —
             // retry once after a beat before bothering the counter (v1.66).
             if (attempt < 2 && !/^HTTP \d{3}/.test(miuMsg)) {
               setTimeout(function() { _miuInsert(attempt + 1); }, 4000);
               return;
             }
             // HTTP 409 / 23505 on master_item_upcs_normalized_uniq: the
-            // barcode is already linked to a DIFFERENT master Ã¢â‚¬â€ a link that
+            // barcode is already linked to a DIFFERENT master — a link that
             // exists only in master_item_upcs, which the upcMappingsCache
             // pre-check in resolveUpcLinkPolicy can miss (stale cache).
             // Don't strand the mapping row as 'approved': demote it to
             // pending so the admin Approvals queue picks it up (its
             // force-approve path handles the reassignment delete+insert).
             if (/^HTTP 409/.test(miuMsg) || /23505/.test(miuMsg)) {
-              console.warn('[upc] master_item_upcs conflict â€” barcode already on another master, demoting mapping to pending:', resp.error);
+              console.warn('[upc] master_item_upcs conflict — barcode already on another master, demoting mapping to pending:', resp.error);
               if (mappingRowId) {
                 supabaseRest.update('upc_mappings', 'id=eq.' + encodeURIComponent(mappingRowId), {
                   status: 'pending',
                   reviewed_by_email: null,
                   reviewed_by_name: null,
                   reviewed_at: null,
-                  // (upc_mappings has no notes/text column to annotate â€”
+                  // (upc_mappings has no notes/text column to annotate —
                   // the conflict context lives in this console line + the
                   // activity log instead.)
                 }).then(function(updResp) {
@@ -4087,7 +4087,7 @@ async function linkUPCToItem(barcode, item) {
                 });
               }
               // The optimistic cache entry written below (after _miuInsert
-              // was kicked off) points at the WRONG master Ã¢â‚¬â€ drop it and
+              // was kicked off) points at the WRONG master — drop it and
               // force-refresh from master_item_upcs so this device learns
               // the real owner instead of replaying the 409 blind.
               if (upcMappingsCache[normBarcode]) {
@@ -4099,8 +4099,8 @@ async function linkUPCToItem(barcode, item) {
                 } catch (e) {}
               }
               loadApprovedUpcMappings(true).catch(function() {});
-              showToast('This barcode is already linked to another item â€” sent to admin for approval', 'warn');
-              logActivity('UPC ' + barcode + ' conflict for ' + item.name + ' â€” demoted to pending approval');
+              showToast('This barcode is already linked to another item — sent to admin for approval', 'warn');
+              logActivity('UPC ' + barcode + ' conflict for ' + item.name + ' — demoted to pending approval');
               return;
             }
             console.warn('[upc] master_item_upcs insert failed:', resp.error);
@@ -4110,7 +4110,7 @@ async function linkUPCToItem(barcode, item) {
       };
       _miuInsert(1);
       // Local itemMaster doesn't carry UPC fields anymore (post Path B)
-      // Ã¢â‚¬â€ the upcMappingsCache update below is what serves the next scan.
+      // — the upcMappingsCache update below is what serves the next scan.
     }
 
     const successMsg = policy.isUpdate
@@ -4133,7 +4133,7 @@ async function linkUPCToItem(barcode, item) {
       }));
     } catch (e) {}
   } else {
-    // Pending Ã¢â‚¬â€ manager update submission waiting for admin approval
+    // Pending — manager update submission waiting for admin approval
     showToast('UPC update submitted \u2014 waiting for admin approval', 'success');
     logActivity('UPC ' + barcode + ' pending for ' + item.name + ' (' + policy.reason + ')');
     loadPendingApprovalsCount();
@@ -4168,7 +4168,7 @@ async function renderPendingApprovals() {
     return;
   }
 
-  // Bind buttons by row id (UUID), not by array index Ã¢â‚¬â€ realtime can
+  // Bind buttons by row id (UUID), not by array index — realtime can
   // re-fetch the list between render and click, shifting indices so the
   // admin accidentally approves a different row than the one they
   // clicked.
@@ -4185,7 +4185,7 @@ async function renderPendingApprovals() {
 }
 
 async function approveUPCPending(id) {
-  // Look up by UUID Ã¢â‚¬â€ pendingMappingsList may have been re-fetched by
+  // Look up by UUID — pendingMappingsList may have been re-fetched by
   // a realtime event between render and this click, so an index would
   // point at the wrong row.
   const p = pendingMappingsList.find(function(x) { return String(x.id) === String(id); });
@@ -4236,7 +4236,7 @@ async function approveUPCPending(id) {
 }
 
 async function rejectUPCPending(id) {
-  // Same UUID lookup as approveUPCPending Ã¢â‚¬â€ index-based binding would
+  // Same UUID lookup as approveUPCPending — index-based binding would
   // race with realtime re-fetches.
   const p = pendingMappingsList.find(function(x) { return String(x.id) === String(id); });
   if (!p) { showToast('That approval is no longer pending \u2014 refreshed list.', 'warn'); renderPendingApprovals(); return; }
@@ -4270,7 +4270,7 @@ function closeUPCApproval() {
 }
 
 /* ================================================================
-   BARCODE ENTRY Ã¢â€ â€™ ITEM SEARCH & LIVE UPC LINKING
+   BARCODE ENTRY → ITEM SEARCH & LIVE UPC LINKING
    When barcode is unrecognized and user types a name, we fuzzy-
    search itemMaster and show tappable suggestions. Tapping one
    selects it, and on submit the UPC is written to Supabase live.
@@ -4369,14 +4369,14 @@ function esc(str) {
     .replace(/'/g, '&#39;');
 }
 
-/* clampQty(v) Ã¢â‚¬â€ every quantity input across the app routes through this so
+/* clampQty(v) — every quantity input across the app routes through this so
    we never write more than 2 decimal places (matches kount_entries.qty's
    numeric(12,2)) and never accept negative quantities. Returns NaN for
    non-numeric, blank, or null input so callers can early-return or fall
    back to the legacy default of 1. Strips scientific notation via Number().
 
    Why the explicit empty/null guards: Number('') and Number(null) both
-   coerce to 0, which is a finite non-negative number Ã¢â‚¬â€ so the pre-guard
+   coerce to 0, which is a finite non-negative number — so the pre-guard
    version of this function silently turned a blank submit into qty=0.
    That regressed the original behavior of "blank means 1" and produced
    ghost zero-count entries when a counter cleared the field. */
@@ -4388,9 +4388,9 @@ function clampQty(v) {
   return Math.round(n * 100) / 100;
 }
 
-/* qtyBlur(el) Ã¢â‚¬â€ onblur handler wired into every quantity input. <input
+/* qtyBlur(el) — onblur handler wired into every quantity input. <input
    type="number" step="0.01"> only constrains the spinner, not what the
-   user types Ã¢â‚¬â€ so a counter typing "1.234" sees that value sit in the
+   user types — so a counter typing "1.234" sees that value sit in the
    field until submit, when clampQty silently rounds it. Snapping the
    field on blur makes the rounding visible and prevents the "I typed
    1.234, why does the report show 1.23?" surprise. Empties stay empty so
@@ -4525,7 +4525,7 @@ function validateItemMaster(source) {
   }
   // Post Path B: items don't carry inline UPCs (they live in master_item_upcs
   // and are loaded by loadApprovedUpcMappings). The "with UPC" count we
-  // used to log here is no longer meaningful on itemMaster Ã¢â‚¬â€ surface the
+  // used to log here is no longer meaningful on itemMaster — surface the
   // upcMappingsCache size instead so the bar staff can see at a glance how
   // many barcodes are scannable.
   console.log('[master] ' + source + ' validated: ' + n + ' items, ' + Object.keys(upcMappingsCache).length + ' barcodes cached, ' + unknownCount + ' Unknown, ' + noNameCount + ' nameless');
@@ -4613,7 +4613,7 @@ const appState = {
 };
 
 /* ================================================================
-   INDEXEDDB FOR PHOTOS (FIX from v2 Ã¢â‚¬â€ no photos in localStorage)
+   INDEXEDDB FOR PHOTOS (FIX from v2 — no photos in localStorage)
    ================================================================ */
 let photoDB = null;
 
@@ -4645,9 +4645,9 @@ async function savePhoto(id, data) {
    FIX #12: DEBOUNCED STATE PERSISTENCE
    Prevents jank during rapid counting by batching localStorage writes
 
-   NOTE: all localStorage keys (hwood_v3, hwood_avt, hwood_upc*, Ã¢â‚¬Â¦) and
+   NOTE: all localStorage keys (hwood_v3, hwood_avt, hwood_upc*, …) and
    the hwood_photos IndexedDB name keep the legacy "hwood_" prefix
-   deliberately after the Keva rebrand Ã¢â‚¬â€ renaming them would wipe every
+   deliberately after the Keva rebrand — renaming them would wipe every
    device's saved state (counts, caches, learned UPCs) for zero benefit.
    ================================================================ */
 let saveTimeout = null;
@@ -4664,7 +4664,7 @@ function saveState() {
         audit: appState.audit,
         auditHistory: appState.auditHistory,
       }));
-      // AVT data (survives reset Ã¢â‚¬â€ expensive to re-upload)
+      // AVT data (survives reset — expensive to re-upload)
       if (appState.avtData && appState.avtData.length > 0) {
         localStorage.setItem('hwood_avt', JSON.stringify({
           avtData: appState.avtData,
@@ -4711,7 +4711,7 @@ function loadState() {
 if (window.location.search.includes('reset=1')) {
   localStorage.removeItem('hwood_v3');
   localStorage.removeItem('hwood_upc');
-  // AVT data and learned UPCs survive reset Ã¢â‚¬â€ they are expensive to recreate
+  // AVT data and learned UPCs survive reset — they are expensive to recreate
   // To fully clear everything: localStorage.clear()
   // To clear them too, add: localStorage.removeItem('hwood_learned_upc');
   window.location.href = window.location.pathname;
@@ -4721,7 +4721,7 @@ loadState();
 
 // Validate loaded user has required fields for new auth format
 if (appState.user && !appState.user.venueIds) {
-  // Old format user without venueIds Ã¢â‚¬â€ clear and force re-login
+  // Old format user without venueIds — clear and force re-login
   console.log('Clearing stale user session (old format)');
   appState.user = null;
   appState.audit = null;
@@ -4731,8 +4731,8 @@ if (appState.user && !appState.user.venueIds) {
 
 // Reconcile cached appState.user with the live Supabase session. Two
 // cases this catches:
-//   - Cached user but session expired/revoked Ã¢â€ â€™ force re-login.
-//   - Live session but no cached user (e.g. localStorage cleared) Ã¢â€ â€™
+//   - Cached user but session expired/revoked → force re-login.
+//   - Live session but no cached user (e.g. localStorage cleared) →
 //     re-hydrate from the JWT instead of dumping them on the login screen
 //     for nothing.
 if (supabaseClient) {
@@ -4741,7 +4741,7 @@ if (supabaseClient) {
       const resp = await supabaseClient.auth.getSession();
       const session = resp && resp.data && resp.data.session;
       if (session && session.user) {
-        // Live session Ã¢â‚¬â€ pull fresh role/venue from app_users so an
+        // Live session — pull fresh role/venue from app_users so an
         // admin's mid-session demote takes effect immediately. Don't
         // navigate: the user may have reloaded mid-audit and we don't
         // want to yank them off their current page.
@@ -4766,7 +4766,7 @@ if (supabaseClient) {
    ================================================================ */
 
 /* ================================================================
-   UPC MAPPINGS Ã¢â‚¬â€ Supabase-backed store
+   UPC MAPPINGS — Supabase-backed store
    Replaces localStorage queues (pendingUPCApprovals, learnedUPCs).
 
    Architecture:
@@ -4792,7 +4792,7 @@ try {
   }
 } catch (e) {}
 
-// Write-through queue Ã¢â‚¬â€ insertions that failed due to offline/error
+// Write-through queue — insertions that failed due to offline/error
 const WRITE_QUEUE_STORAGE_KEY = 'hwood_upc_write_queue';
 let upcWriteQueue = [];
 try { upcWriteQueue = JSON.parse(localStorage.getItem(WRITE_QUEUE_STORAGE_KEY) || '[]'); } catch (e) {}
@@ -4812,7 +4812,7 @@ function saveAvtComputeQueue() {
 }
 function enqueueComputeAvt(auditId) {
   if (!auditId) return;
-  // Dedupe by auditId Ã¢â‚¬â€ last write wins. Drop any earlier entry for the
+  // Dedupe by auditId — last write wins. Drop any earlier entry for the
   // same audit so the queue stays bounded under repeated failure.
   avtComputeQueue = avtComputeQueue.filter(function (e) { return e && e.auditId !== auditId; });
   avtComputeQueue.push({ auditId: auditId, queuedAt: new Date().toISOString() });
@@ -4863,7 +4863,7 @@ function normalizeBarcode(code) {
   return digits.replace(/^0+/, '');
 }
 
-/* Load approved barcode Ã¢â€ â€™ master mappings from Supabase into the in-memory
+/* Load approved barcode → master mappings from Supabase into the in-memory
    cache. Source is master_item_upcs (post Path B); every row in that table
    is approved by definition, so no status filter is needed.
 
@@ -4891,7 +4891,7 @@ async function loadApprovedUpcMappings(force) {
   let totalRows = 0;
   // Embed-join to master_items so we can show the master's name when the
   // counter scans a barcode that wasn't recently in the itemMaster cache.
-  // is_active is pulled too so we can filter out archived rows below Ã¢â‚¬â€
+  // is_active is pulled too so we can filter out archived rows below —
   // matches the Fix F admin workflow where bad/legacy variants are
   // soft-deleted but their UPCs stay in master_item_upcs.
   for (let page = 0; page < MAX_PAGES; page++) {
@@ -4907,13 +4907,13 @@ async function loadApprovedUpcMappings(force) {
       const key = row.upc_normalized || normalizeBarcode(row.upc_raw);
       if (!key) continue;
       const mi = row.master_items || null;
-      // Skip UPCs that resolve to a "DO NOT USE" master Ã¢â‚¬â€ scanning these
+      // Skip UPCs that resolve to a "DO NOT USE" master — scanning these
       // bottles must behave like an unmapped barcode so the counter takes
       // a photo / types the right SKU instead of counting against the
       // poisoned row. (Jonathan @ Poppy, 2026-06.)
       if (isDoNotCountName(mi && mi.name)) continue;
       // Same treatment for items the admin archived via Fix F. Without this
-      // filter, scanning an archived item's UPC still resolves it Ã¢â‚¬â€ the
+      // filter, scanning an archived item's UPC still resolves it — the
       // master_item_upcs row stays put even after the master is soft-
       // deleted. With it, the scan falls through to the unmapped flow.
       if (mi && mi.is_active === false) continue;
@@ -4993,15 +4993,15 @@ async function flushUpcWriteQueue() {
         dropped++;
         console.warn('Dropping non-retryable queued UPC write:', msg, payload);
       } else {
-        remaining.push(payload); // transient Ã¢â‚¬â€ keep for next attempt
+        remaining.push(payload); // transient — keep for next attempt
       }
     } else {
       flushed++;
-      // v1.66: an 'approved' mapping must also land the barcode Ã¢â€ â€™ master link
+      // v1.66: an 'approved' mapping must also land the barcode → master link
       // in master_item_upcs (the inline path does this at link time, but a
       // QUEUED link previously replayed only the upc_mappings row, leaving
       // the mapping approved with no catalog link). Duplicate = someone/some
-      // retry already linked it Ã¢â‚¬â€ that is success, not failure.
+      // retry already linked it — that is success, not failure.
       if (payload.status === 'approved' && payload.master_item_id && payload.barcode_normalized) {
         const miuResp = await supabaseRest.insert('master_item_upcs', {
           master_item_id: payload.master_item_id,
@@ -5032,7 +5032,7 @@ async function flushUpcWriteQueue() {
 }
 
 /* One-time migration: push any legacy localStorage queues into the new system.
-   Runs in the background after startup. Safe to interrupt Ã¢â‚¬â€ flag only set on full success.
+   Runs in the background after startup. Safe to interrupt — flag only set on full success.
    Inserts rows one-at-a-time so a single bad row doesn't block the rest. */
 async function migrateLegacyUpcStores() {
   const MIGRATED_FLAG = 'hwood_upc_migrated_v1';
@@ -5094,7 +5094,7 @@ async function migrateLegacyUpcStores() {
       if (msg.includes('duplicate key') || msg.includes('violates') || msg.includes('HTTP 4')) {
         skipped++;
       } else {
-        // Transient failure Ã¢â‚¬â€ abort migration, try again next app load
+        // Transient failure — abort migration, try again next app load
         console.warn('Legacy migration interrupted (transient failure):', error);
         return;
       }
@@ -5122,7 +5122,7 @@ function initUpcMappingsSync() {
   loadPendingApprovalsCount();
   flushUpcWriteQueue();
   flushAvtComputeQueue().catch(function () {});
-  // Migration runs lazily on first login Ã¢â‚¬â€ see runMigrationIfLoggedIn()
+  // Migration runs lazily on first login — see runMigrationIfLoggedIn()
   runMigrationIfLoggedIn();
   // If already logged in (session restored from localStorage), open realtime
   startUpcRealtime();
@@ -5130,7 +5130,7 @@ function initUpcMappingsSync() {
   startAvtReportsRealtime();
   startAppUsersRealtime();
 
-  // Periodic refresh (every 5 min) Ã¢â‚¬â€ still a belt-and-suspenders fallback
+  // Periodic refresh (every 5 min) — still a belt-and-suspenders fallback
   // in case the realtime socket drops silently.
   setInterval(() => {
     loadApprovedUpcMappings();
@@ -5213,11 +5213,11 @@ function stopUpcRealtime() {
    kount_pending_items so the *submitter* gets a toast the moment
    admin approves/rejects, and admins/managers see a heads-up banner
    on new pending submissions (mirrors the UPC pending pattern).
-   Requires migration 0009 (table) Ã¢â‚¬â€ 0010 hardens the approval RPC. */
+   Requires migration 0009 (table) — 0010 hardens the approval RPC. */
 let pendingItemsChannel = null;
 
 /* Per-tab session id used to disambiguate realtime channel names.
-   Earlier the channel was keyed on raw email Ã¢â‚¬â€ emails containing `+`, `.`,
+   Earlier the channel was keyed on raw email — emails containing `+`, `.`,
    uppercase, or non-ASCII could trip Supabase's channel-name rules, AND two
    tabs signed in as the same user collapsed onto one channel where Supabase
    only delivered events to whichever socket connected first. A random per-
@@ -5246,7 +5246,7 @@ function startPendingItemsRealtime() {
 
 async function stopPendingItemsRealtime() {
   if (pendingItemsChannel && supabaseClient) {
-    // removeChannel returns a Promise Ã¢â‚¬â€ await so the unsubscribe round-trips
+    // removeChannel returns a Promise — await so the unsubscribe round-trips
     // to the server before a subsequent start() opens a fresh channel for a
     // different identity. Otherwise the old channel can keep delivering
     // events for several seconds and a freshly-signed-in user briefly sees
@@ -5266,13 +5266,13 @@ function onPendingItemRealtimeEvent(evt) {
   const submitter = String(row.submitted_by_email || '').toLowerCase();
   const role = appState.user.role;
 
-  // Submitter-targeted feedback on UPDATE: status flipped pending Ã¢â€ â€™ approved/rejected
+  // Submitter-targeted feedback on UPDATE: status flipped pending → approved/rejected
   if (ev === 'UPDATE' && submitter === me) {
     if (row.status === 'approved') {
       showToast('Catalog suggestion approved: ' + (row.name || ''), 'success');
       logActivity('Catalog suggestion "' + (row.name || '') + '" approved');
       // Refresh local catalog so the new purchase_items row shows up in search
-      // without forcing a full reload. loadSupabaseItems re-paginates Ã¢â‚¬â€ cheap
+      // without forcing a full reload. loadSupabaseItems re-paginates — cheap
       // enough on the rare approve event. After it resolves, re-evaluate the
       // manual modal's "Suggest" button if it's still open: the typed name
       // might now match an existing master row and the button should hide.
@@ -5304,7 +5304,7 @@ function onUpcRealtimeEvent(evt) {
     if (ev === 'INSERT' || ev === 'UPDATE') {
       const key = row.upc_normalized || normalizeBarcode(row.upc_raw);
       if (key) {
-        // We don't have the master name in the row itself Ã¢â‚¬â€ let
+        // We don't have the master name in the row itself — let
         // loadApprovedUpcMappings populate the cache properly. The
         // simplest correct thing is a forced refresh.
         loadApprovedUpcMappings(true).catch(function() {});
@@ -5339,7 +5339,7 @@ function onUpcRealtimeEvent(evt) {
    entry live.
 
    Solo audits (no network at start, or Supabase unreachable) leave
-   appState.audit.supabaseId null and bypass all of this Ã¢â‚¬â€ the
+   appState.audit.supabaseId null and bypass all of this — the
    localStorage-only flow is unchanged.
    ================================================================ */
 
@@ -5395,7 +5395,7 @@ async function startNetworkedAudit(venue) {
   const audit = inserted[0];
 
   // 3) add the starter as an audit member (fire-and-forget; supabaseRest
-  // never throws, so failures land in resp.error Ã¢â‚¬â€ surface them).
+  // never throws, so failures land in resp.error — surface them).
   supabaseRest.insert('kount_members', {
     audit_id: audit.id,
     user_email: appState.user.email,
@@ -5434,7 +5434,7 @@ async function joinNetworkedAudit(rawCode) {
   if (!data || data.length === 0) { showToast('No active audit for code ' + code, 'error'); return null; }
   const audit = data[0];
 
-  // Authorization: a join code alone is not enough Ã¢â‚¬â€ the user must also be
+  // Authorization: a join code alone is not enough — the user must also be
   // assigned to this audit's venue (corporate role gets all venues). Without
   // this check, any counter holding any active code could join an audit at
   // a venue they have no access to. Corporate ('all') and assigned-list
@@ -5456,7 +5456,7 @@ async function joinNetworkedAudit(rawCode) {
   appState.currentVenue = matchingVenue;
 
   // Pull any custom zones the audit creator (or other counters) added,
-  // BEFORE building the per-zone counts map below Ã¢â‚¬â€ so a zone added by
+  // BEFORE building the per-zone counts map below — so a zone added by
   // another device is already in matchingVenue.zones when we initialize.
   // Then start the realtime subscription so future zone INSERTs from
   // OTHER devices land here too. Without these two calls, a counter who
@@ -5466,7 +5466,7 @@ async function joinNetworkedAudit(rawCode) {
 
   appState.currentZone = (matchingVenue.zones && matchingVenue.zones[0]) || null;
 
-  // Join as a member Ã¢â‚¬â€ duplicate on reconnect is fine, 23505 swallowed
+  // Join as a member — duplicate on reconnect is fine, 23505 swallowed
   try {
     const resp = await supabaseRest.insert('kount_members', {
       audit_id: audit.id,
@@ -5561,7 +5561,7 @@ async function syncRecountsToSupabase() {
         status: rec.status || 'pending',
         zone: rec.zone || null,
         category: rec.category || null,
-        // notes left null Ã¢â‚¬â€ zone-list packing is no longer needed since
+        // notes left null — zone-list packing is no longer needed since
         // each (item, zone) is its own row.
       };
     });
@@ -5572,7 +5572,7 @@ async function syncRecountsToSupabase() {
 
     // Stash the returned ids back into local state so the per-row update path
     // can target by id without re-matching on name.
-    // v1.41: match on (item_name, zone) Ã¢â‚¬â€ same item in different zones now
+    // v1.41: match on (item_name, zone) — same item in different zones now
     // produces distinct rows that need distinct supabaseIds.
     if (Array.isArray(data)) {
       data.forEach(function(row) {
@@ -5635,7 +5635,7 @@ async function syncRecountUpdateToSupabase(key) {
     } else {
       // v1.41: with per-zone rows, item_name alone matches multiple rows.
       // Narrow by zone too. rec.zone may be empty string for unzoned legacy
-      // rows Ã¢â‚¬â€ those map to zone is null in the DB.
+      // rows — those map to zone is null in the DB.
       const name = rec.itemName || (rec.avtItem && rec.avtItem.itemName) ||
                    (typeof key === 'string' ? key.split('|')[0] : key);
       const zoneClause = rec.zone
@@ -5651,7 +5651,7 @@ async function syncRecountUpdateToSupabase(key) {
       markPending('Saved locally \u2014 recount sync will retry when online');
       return;
     }
-    // Success Ã¢â‚¬â€ clear the retry flag if a previous attempt had set it.
+    // Success — clear the retry flag if a previous attempt had set it.
     if (rec._pendingSync) {
       delete rec._pendingSync;
       delete rec._pendingSyncAt;
@@ -5679,7 +5679,7 @@ async function flushPendingRecountSyncs() {
 }
 
 /* Patch kount_audits for the currently-active networked audit. No-op on solo
-   audits (when appState.audit.supabaseId is null). Fire-and-forget Ã¢â‚¬â€ errors
+   audits (when appState.audit.supabaseId is null). Fire-and-forget — errors
    are logged so the local state change still proceeds even if the network
    write fails. */
 async function syncAuditMetaToSupabase(patch) {
@@ -5733,7 +5733,7 @@ function entryFromSupabaseRow(row) {
     counterName: row.counted_by_name,
     timestamp: row.timestamp,
     isRecount: row.is_recount,
-    // v1.62: the phone-generated id this row was first inserted with Ã¢â‚¬â€
+    // v1.62: the phone-generated id this row was first inserted with —
     // carried through so re-syncs of a hydrated entry stay idempotent.
     clientEntryId: row.client_entry_id || null,
   };
@@ -5741,7 +5741,7 @@ function entryFromSupabaseRow(row) {
 
 /* Escape a literal value for a PostgREST like/ilike filter: \ % _ would
    otherwise act as pattern metacharacters. (PostgREST also translates a
-   bare `*` to `%` Ã¢â‚¬â€ there's no escape for that, but item names with `*`
+   bare `*` to `%` — there's no escape for that, but item names with `*`
    don't occur in the catalog.) */
 function escapeIlikeValue(value) {
   return String(value).replace(/([\\%_])/g, '\\$1');
@@ -5759,20 +5759,20 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // Writing the same value to both `kount_entries.sku` and .upc columns
   // pollutes both: querying by UPC misses entries (some rows have SKU
   // values stored there) and vice versa. Split based on method:
-  //   - barcode / photo Ã¢â€ â€™ value is definitely a UPC
-  //   - guided / manual Ã¢â€ â€™ value is a SKU from the catalog or user-typed
+  //   - barcode / photo → value is definitely a UPC
+  //   - guided / manual → value is a SKU from the catalog or user-typed
   // entry.upc takes precedence if the upstream caller bothered to set
   // it explicitly.
   const methodIsScan = entry.method === 'barcode' || entry.method === 'photo';
   const skuVal = entry.sku || null;
   // Post Path-B, the phone's itemMaster is sourced from master_items, so
-  // entry.masterId IS a master_items.id Ã¢â‚¬â€ write it to master_item_id only.
+  // entry.masterId IS a master_items.id — write it to master_item_id only.
   //
   // Do NOT write the master id into the legacy `item_id` column. `item_id`
   // has a foreign key to purchase_items(id) (migration 0001) that was never
   // dropped, so a master_items id there fails the FK with 23503 and the
-  // whole insert is rejected Ã¢â‚¬â€ which surfaced to counters as the persistent
-  // "Database error Ã¢â‚¬â€ changes paused" banner. Post Path-B the phone no
+  // whole insert is rejected — which surfaced to counters as the persistent
+  // "Database error — changes paused" banner. Post Path-B the phone no
   // longer carries a purchase_items id, so item_id is simply null on new
   // rows; the merge unique index falls back to lower(item_name), which the
   // collision lookup below already handles.
@@ -5795,7 +5795,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
     is_recount: isRecount,
     photo_id: entry.photoId || null,
     timestamp: entry.timestamp || new Date().toISOString(),
-    // v1.62: idempotency key. The local 'EÃ¢â‚¬Â¦' id (addCountEntry) rides along
+    // v1.62: idempotency key. The local 'E…' id (addCountEntry) rides along
     // so a replay of an insert whose response was lost can recognise its own
     // committed row in the 23505 path below instead of double-merging qty.
     // Unique per (audit_id, client_entry_id) server-side.
@@ -5815,13 +5815,13 @@ async function syncEntryToSupabase(entry, zone, opts) {
   }
   lastError = error;
 
-  // Unique-key collision Ã¢â‚¬â€ merge with the existing row. The lookup must be
+  // Unique-key collision — merge with the existing row. The lookup must be
   // case-insensitive (ilike, with like-metachars escaped) because the merge
   // unique index is on lower(item_name); an eq. filter on a case-mismatched
   // name finds 0 rows and the count silently vanishes.
   if (error && /duplicate key|23505/i.test(error.message || '')) {
     // Client-key collision (kount_entries_client_key): a replay of OUR OWN
-    // insert whose response was lost Ã¢â‚¬â€ e.g. a zone-move re-insert that
+    // insert whose response was lost — e.g. a zone-move re-insert that
     // committed server-side before another move changed the zone. The
     // committed row already carries this payload's data, so look it up by
     // (audit_id, client_entry_id) and adopt its id WITHOUT a qty merge.
@@ -5839,11 +5839,11 @@ async function syncEntryToSupabase(entry, zone, opts) {
         entry.supabaseId = ck.data[0].id;
         return ck.data[0];
       }
-      // Row vanished between the 23505 and the lookup (concurrent delete) Ã¢â‚¬â€
+      // Row vanished between the 23505 and the lookup (concurrent delete) —
       // fall through to the warn/queue logic with the original error.
     } else {
       // Merge-key collision (kount_entries_merge_key): a genuinely separate
-      // scan of the same (zone, item) Ã¢â‚¬â€ merge qty into the existing row.
+      // scan of the same (zone, item) — merge qty into the existing row.
       const idFilter = payload.item_id
         ? 'item_id=eq.' + payload.item_id
         : 'item_id=is.null&item_name=ilike.' + encodeURIComponent(escapeIlikeValue(payload.item_name));
@@ -5858,7 +5858,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
         const existing = lookup.data[0];
         // Idempotency: if the existing row carries OUR client_entry_id, the
         // original insert actually committed and only the response was lost
-        // (offline replay, flaky network). Adopt the row Ã¢â‚¬â€ merging qty here
+        // (offline replay, flaky network). Adopt the row — merging qty here
         // would double-count.
         if (payload.client_entry_id && existing.client_entry_id === payload.client_entry_id) {
           entry.supabaseId = existing.id;
@@ -5883,7 +5883,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // Hand off to the retry queue if the failure looks transient. The queue
   // replays on `online`, channel re-subscribe, and a periodic ticker, so
   // a flaky network or 5xx blip eventually heals without the user
-  // noticing. 4xx and 23505-style hard failures are dropped Ã¢â‚¬â€ those are
+  // noticing. 4xx and 23505-style hard failures are dropped — those are
   // bugs we want to surface, not paper over.
   if (appState.audit && appState.audit.supabaseId && isRetryableError(lastError)) {
     enqueuePendingMutation('entry-sync', {
@@ -5907,7 +5907,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
      - the browser firing 'online'
      - the audit realtime channel re-subscribing
      - a 30s ticker (belt-and-braces)
-   We DON'T retry on 4xx / 23505 / known-bad shapes Ã¢â‚¬â€ those are
+   We DON'T retry on 4xx / 23505 / known-bad shapes — those are
    bugs we want to surface, not paper over with infinite retries.
    ================================================================ */
 const PENDING_MUTATIONS_KEY = 'hwood_pending_mutations_v1';
@@ -5926,7 +5926,7 @@ function persistPendingMutations() {
   catch (e) { console.warn('[sync-queue] persist failed:', e); }
 }
 
-// Used when storing an entry in the queue Ã¢â‚¬â€ strip volatile/large fields and
+// Used when storing an entry in the queue — strip volatile/large fields and
 // avoid sharing references with the live entry, which the caller may mutate
 // before the queued op is replayed.
 function snapshotEntry(entry) {
@@ -5951,7 +5951,7 @@ function snapshotEntry(entry) {
 function isRetryableError(err) {
   if (!err) return false;
   const msg = String(err.message || err);
-  // 23505 is a hard collision Ã¢â‚¬â€ by the time we land here the merge path
+  // 23505 is a hard collision — by the time we land here the merge path
   // already had its shot. Replaying the same op won't change the answer.
   if (/duplicate key|23505/i.test(msg)) return false;
   // 4xx is non-retryable: validation, RLS, not-found. Replaying just keeps
@@ -5986,7 +5986,7 @@ async function replayPendingMutations() {
   try {
     // FIFO so dependent ops (insert before update on the same row) replay
     // in their original order. Stop on the first retryable failure to
-    // avoid spinning Ã¢â‚¬â€ the next trigger will pick up where we left off.
+    // avoid spinning — the next trigger will pick up where we left off.
     while (pendingMutations.length > 0) {
       const op = pendingMutations[0];
       op.attempts += 1;
@@ -6077,10 +6077,10 @@ function unsubscribeFromAuditRealtime() {
 }
 
 function leaveNetworkedAudit() {
-  // Capture identity before unsubscribing Ã¢â‚¬â€ appState may be cleared by the
+  // Capture identity before unsubscribing — appState may be cleared by the
   // caller right after this returns (handleLogout nulls appState.user).
   // The fetch is fire-and-forget; we don't block UI on it. If the row
-  // delete fails (offline, race), the stale row just stays Ã¢â‚¬â€ server-side
+  // delete fails (offline, race), the stale row just stays — server-side
   // heartbeat-based cleanup is a separate follow-up.
   const auditId = appState.audit && appState.audit.supabaseId;
   const email   = appState.user  && appState.user.email;
@@ -6167,7 +6167,7 @@ function onAuditMetaRealtime(evt) {
 }
 
 function onAuditRecountRealtime(evt) {
-  // Any insert/update/delete on kount_recounts for this audit Ã¢â€ â€™ re-sync
+  // Any insert/update/delete on kount_recounts for this audit → re-sync
   // the local set so the Recount page stays aligned live without needing
   // the counter to navigate away and back.
   if (!appState.audit || !appState.audit.supabaseId) return;
@@ -6190,7 +6190,7 @@ async function refreshRecountsFromSupabase() {
     (data || []).forEach(function(r) {
       // v1.41: composite key matches what closeCount1 generates locally.
       // Each (item, zone) is its own row. Legacy rows (pre-v1.41) had
-      // r.zone null Ã¢â‚¬â€ they collapse into a single "<name>|" key, which
+      // r.zone null — they collapse into a single "<name>|" key, which
       // matches how those audits were generated locally.
       const key = String(r.item_name) + '|' + String(r.zone || '');
       remote[key] = {
@@ -6353,7 +6353,7 @@ function copyAuditCode() {
 /* ================================================================
    Legacy external-API lookup cache (unchanged behavior).
    This is still per-device because it caches UPCitemdb results,
-   not teachings Ã¢â‚¬â€ safe to stay local.
+   not teachings — safe to stay local.
    ================================================================ */
 let upcCache = {};
 try { upcCache = JSON.parse(localStorage.getItem('hwood_upc') || '{}'); } catch (e) {}
@@ -6362,7 +6362,7 @@ function saveUpcCache() {
 }
 
 /* ================================================================
-   Legacy function shims Ã¢â‚¬â€ kept for backwards-compat with existing
+   Legacy function shims — kept for backwards-compat with existing
    call sites. learnUPC() is now a no-op (the insert happens inside
    linkUPCToItem). lookupLearnedUPC() reads from the Supabase-backed
    cache, with legacy-shape return for compatibility.
@@ -6377,7 +6377,7 @@ function lookupLearnedUPC(code) {
   const key = normalizeBarcode(code);
   if (!key) return null;
   if (upcMappingsCache[key]) return upcMappingsCache[key];
-  // Tolerant match against the in-memory cache Ã¢â‚¬â€ try same-digits variants
+  // Tolerant match against the in-memory cache — try same-digits variants
   // so a scanner that adds/strips a leading zero or a check digit still
   // resolves to a known mapping.
   var noZeros = key.replace(/^0+/, '');
@@ -6388,7 +6388,7 @@ function lookupLearnedUPC(code) {
     // Last-12 digits match handles EAN-13 vs UPC-A check digit drift
     if (key.length >= 12 && ck.length >= 12 && key.slice(-12) === ck.slice(-12)) return upcMappingsCache[ck];
   }
-  // Legacy key format (kept around briefly Ã¢â‚¬â€ empty after migration runs)
+  // Legacy key format (kept around briefly — empty after migration runs)
   try {
     var legacy = JSON.parse(localStorage.getItem('hwood_learned_upc') || '{}');
     if (legacy[key]) return legacy[key];
@@ -6399,7 +6399,7 @@ function lookupLearnedUPC(code) {
   return null;
 }
 
-function saveLearnedUPCs() { /* no-op Ã¢â‚¬â€ writes happen via Supabase */ }
+function saveLearnedUPCs() { /* no-op — writes happen via Supabase */ }
 
 
 /* ================================================================
@@ -6459,7 +6459,7 @@ function addCustomItem(name, brand, category, subcategory, upc) {
 /* ---------- Admin: create a catalog (master_items) row from the app ----------
    Corporate-only. RLS migration 0028 authorizes corporate JWTs to INSERT
    master_items directly, and 0027 lets them attach the UPC to
-   master_item_upcs Ã¢â‚¬â€ so a signed-in corporate admin creates the item straight
+   master_item_upcs — so a signed-in corporate admin creates the item straight
    from the phone, no admin-desktop round-trip. The new row is pushed into the
    local catalog so the in-progress count links to it immediately. Returns the
    new master_items id, or null on failure. */
@@ -6546,7 +6546,7 @@ async function createMasterItemFromApp(payload) {
       notes: 'Created in-app by ' + ((appState.user && appState.user.email) || 'admin'),
       added_by_email: (appState.user && appState.user.email) || null,
     }).then(function (resp) {
-      // supabaseRest never throws Ã¢â‚¬â€ surface the resp.error so a failed UPC
+      // supabaseRest never throws — surface the resp.error so a failed UPC
       // link isn't silently lost (the item lands in the catalog either way).
       if (resp && resp.error) {
         console.warn('[catalog] master_item_upcs insert failed:', resp.error);
@@ -6569,12 +6569,12 @@ async function createMasterItemFromApp(payload) {
 }
 
 /* ================================================================
-   PENDING ITEMS Ã¢â‚¬â€ counter/manager submits a "please add to catalog"
+   PENDING ITEMS — counter/manager submits a "please add to catalog"
    request that an admin then approves (mints a purchase_items row) or
    rejects. Mirrors the upc_mappings approval pattern.
 
    Local-side stays unchanged: addCustomItem() still fires so the count
-   in progress doesn't block. submitPendingItem() is *additive* Ã¢â‚¬â€ it just
+   in progress doesn't block. submitPendingItem() is *additive* — it just
    asks admin to permanently add the item to the shared catalog so other
    counters and other audits see it without re-typing.
    ================================================================ */
@@ -6665,7 +6665,7 @@ function startTimer() {
   if (timerInterval) clearInterval(timerInterval);
   document.getElementById('auditTimer').classList.remove('hide');
 
-  // Counters in a networked audit can't cancel the whole team's audit Ã¢â‚¬â€
+  // Counters in a networked audit can't cancel the whole team's audit —
   // hide the Cancel button for them (endAuditEarly is also role-gated,
   // this is just the UI mirror). Solo audits keep the button for everyone.
   const cancelBtn = document.getElementById('cancelAuditBtn');
@@ -6711,7 +6711,7 @@ function isAuditLocked() {
   }
   
   // Lock count editing after Count 1 is closed (during review & count2 phases)
-  // Only recount entries are allowed Ã¢â‚¬â€ those go through submitGuidedEntry recount mode
+  // Only recount entries are allowed — those go through submitGuidedEntry recount mode
   var phase = appState.audit.countPhase;
   if (phase === 'review' || phase === 'count2' || phase === 'final') {
     showToast('Count 1 is closed \u2014 editing locked until audit completes', 'error');
@@ -6726,7 +6726,7 @@ function isAuditLocked() {
    Source of truth is the Supabase `app_users` table, managed via the
    desktop Security screen. ACCESS_LIST is hydrated from a localStorage
    cache at boot for instant first paint, then refreshed live from
-   Supabase. Users are added/removed/edited through the admin UI Ã¢â‚¬â€ no
+   Supabase. Users are added/removed/edited through the admin UI — no
    code change needed.
    ================================================================ */
 const ACCESS_LIST = [];
@@ -6738,7 +6738,7 @@ const ACCESS_LIST = [];
    Strategy:
      1. At boot, synchronously hydrate ACCESS_LIST from localStorage
         cache (written by a prior successful Supabase fetch). Starts
-        empty on first visit / wipe Ã¢â‚¬â€ login is then unavailable until
+        empty on first visit / wipe — login is then unavailable until
         the async Supabase fetch completes.
      2. Fire an async Supabase fetch; on success, replace in-memory
         ACCESS_LIST (via splice so the `const` binding stays) and
@@ -6750,14 +6750,14 @@ const APP_USERS_CACHE_KEY = 'hwood_app_users_cache_v1';
 
 function applyAccessList(list) {
   if (!Array.isArray(list)) return;
-  // Empty array IS a valid state Ã¢â‚¬â€ admin cleared the active list and
+  // Empty array IS a valid state — admin cleared the active list and
   // we must lock everyone out. Only a non-array (defensive) is ignored.
   // Mutate in place so the `const ACCESS_LIST` binding remains valid.
   ACCESS_LIST.splice(0, ACCESS_LIST.length, ...list);
 }
 
 // 1) Hydrate synchronously from cache (if any) so login is instant.
-//    A cached empty array means "admin has explicitly cleared everyone" Ã¢â‚¬â€
+//    A cached empty array means "admin has explicitly cleared everyone" —
 //    honor it. Absence of the key (cachedRaw === null) falls through to
 //    the hardcoded baseline so first-ever boots aren't locked out.
 try {
@@ -6768,7 +6768,7 @@ try {
   }
 } catch (e) { /* ignore */ }
 
-// 2) Async refresh from Supabase. Swallows errors Ã¢â‚¬â€ baseline / cache keeps us running.
+// 2) Async refresh from Supabase. Swallows errors — baseline / cache keeps us running.
 async function loadAppUsersFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
@@ -6776,9 +6776,9 @@ async function loadAppUsersFromSupabase() {
       'app_users',
       'select=*&is_active=eq.true&order=role,email'
     );
-    // Network/RLS error Ã¢â€ â€™ keep the existing access list (transient failure
+    // Network/RLS error → keep the existing access list (transient failure
     // shouldn't accidentally lock someone out). Empty result is DIFFERENT
-    // from an error and must still flow through the self-eval below Ã¢â‚¬â€ that
+    // from an error and must still flow through the self-eval below — that
     // is exactly the path "admin set my own is_active=false" takes.
     if (error) {
       console.warn('[app_users] fetch error, keeping local list:', error);
@@ -6796,7 +6796,7 @@ async function loadAppUsersFromSupabase() {
     // Empty success (admin cleared everyone) is DIFFERENT from a fetch
     // error: it must propagate as a real "lock everyone out" state, not
     // silently keep the stale cache + hardcoded baseline. We always write
-    // the result Ã¢â‚¬â€ including [] Ã¢â‚¬â€ so a re-opened session honors the
+    // the result — including [] — so a re-opened session honors the
     // revoked list even before Supabase responds again.
     applyAccessList(mapped);
     try { localStorage.setItem(APP_USERS_CACHE_KEY, JSON.stringify(mapped)); } catch (e) {}
@@ -6812,7 +6812,7 @@ async function loadAppUsersFromSupabase() {
     if (appState.user && appState.user.email) {
       const me = mapped.find(function(u) { return u.email.toLowerCase() === String(appState.user.email).toLowerCase(); });
       if (!me) {
-        // User is no longer in the active list Ã¢â‚¬â€ force sign-out next paint.
+        // User is no longer in the active list — force sign-out next paint.
         showToast('Your access has been revoked \u2014 signing out.', 'warn');
         setTimeout(function() {
           try { handleLogout(); } catch (e) { appState.user = null; saveState(); showPage('login'); }
@@ -6833,7 +6833,7 @@ async function loadAppUsersFromSupabase() {
 
 /* v1.27: realtime channel so admin-side Security CRUD propagates to the
    phone within the next render tick. Without this, a counter who's been
-   demoted keeps using their old role until they sign out Ã¢â‚¬â€ a real
+   demoted keeps using their old role until they sign out — a real
    correctness gap because every write path on the phone gates on the
    in-memory appState.user.role. Channel name uses the per-tab uuid so
    multiple devices signed in as the same user don't collapse onto one
@@ -6905,7 +6905,7 @@ async function handleLogin() {
       authedUser = data.user;
       // Set the JWT immediately from the response so the very next REST
       // call (the app_users lookup below) carries it. Without this we
-      // race onAuthStateChange Ã¢â‚¬â€ the callback fires as a microtask and
+      // race onAuthStateChange — the callback fires as a microtask and
       // may not have set currentSupabaseJwt before our next fetch goes
       // out, which falls back to the anon key.
       if (data.session && data.session.access_token) {
@@ -6997,7 +6997,7 @@ async function handleLogin() {
   // new channel names already differ. Still await the old channel's tear-down
   // so the previous identity's events don't briefly leak to the new one.
   stopPendingItemsRealtime().then(startPendingItemsRealtime);
-  // AVT realtime is identity-agnostic but cheap to restart Ã¢â‚¬â€ keeps it tied
+  // AVT realtime is identity-agnostic but cheap to restart — keeps it tied
   // to the same _tabSessionId convention.
   stopAvtReportsRealtime().then(startAvtReportsRealtime);
 
@@ -7103,7 +7103,7 @@ function handleLogout() {
     leaveNetworkedAudit();
     stopVenueZonesRealtime();
     // v1.45: also tear down carried-items realtime + the 60s catalog
-    // poll. Both were leaking past sign-out Ã¢â‚¬â€ the channel kept reacting
+    // poll. Both were leaking past sign-out — the channel kept reacting
     // to mutations against an anon JWT, and the timer kept hitting
     // Supabase on a one-minute cadence forever.
     stopCarriedItemsRealtime();
@@ -7128,7 +7128,7 @@ function handleLogout() {
 /* Triggered from the "Forgot your password?" link on the sign-in screen.
    Sends a password-reset email via Supabase. The email contains a magic
    link that, when clicked, lands on this app with a recovery token in
-   the URL fragment Ã¢â‚¬â€ onAuthStateChange catches it and routes to
+   the URL fragment — onAuthStateChange catches it and routes to
    handlePasswordRecoveryFlow below. */
 async function handleForgotPassword() {
   const email = (document.getElementById('loginEmail').value || '').trim().toLowerCase();
@@ -7151,12 +7151,12 @@ async function handleForgotPassword() {
     });
     if (error) {
       console.warn('[auth] resetPasswordForEmail failed:', error);
-      // Still show generic success Ã¢â‚¬â€ never leak which emails exist.
+      // Still show generic success — never leak which emails exist.
     }
   } catch (e) {
     console.warn('[auth] resetPasswordForEmail threw:', e);
   }
-  // Generic confirmation (intentionally vague Ã¢â‚¬â€ don't disclose account
+  // Generic confirmation (intentionally vague — don't disclose account
   // existence to scrapers).
   errorEl.style.color = 'var(--text-muted)';
   errorEl.textContent = 'If that email is registered, a reset link is on its way.';
@@ -7164,7 +7164,7 @@ async function handleForgotPassword() {
   setTimeout(function () { errorEl.style.color = ''; }, 6000);
 }
 
-/* "Email me a sign-in link instead" Ã¢â‚¬â€ passwordless flow. Supabase sends
+/* "Email me a sign-in link instead" — passwordless flow. Supabase sends
    a one-time link; clicking it from the same browser establishes a
    session via detectSessionInUrl. We pass shouldCreateUser:false so a
    typo'd email doesn't accidentally provision an account when signups
@@ -7195,7 +7195,7 @@ async function handleMagicLink() {
     });
     if (error) {
       console.warn('[auth] signInWithOtp failed:', error);
-      // Still vague Ã¢â‚¬â€ never disclose account existence.
+      // Still vague — never disclose account existence.
     }
   } catch (e) {
     console.warn('[auth] signInWithOtp threw:', e);
@@ -7213,7 +7213,7 @@ async function handleMagicLink() {
    meaningfully. The 5-minute slop covers clock skew between Postgres
    and the user's device, plus the few seconds between user-creation and
    the user actually clicking the email link.
-   Returns false if either timestamp is missing Ã¢â‚¬â€ better to silently
+   Returns false if either timestamp is missing — better to silently
    proceed with a normal SIGNED_IN than to spuriously prompt an existing
    user for a new password. */
 function _isFirstLoginSession(session) {
@@ -7234,7 +7234,7 @@ async function handlePasswordRecoveryFlow() {
   const newPassword = window.prompt(
     'Welcome \u2014 set a password to finish signing in. Minimum 8 characters.'
   );
-  // Cancel or too-short Ã¢â€ â€™ sign the temporary session out. Otherwise the
+  // Cancel or too-short → sign the temporary session out. Otherwise the
   // user appears "signed in" but with no usable password set, and would
   // be locked out next time. Forcing sign-out here means they can re-
   // click the invite/reset email and try again with a valid password.
@@ -7247,7 +7247,7 @@ async function handlePasswordRecoveryFlow() {
     const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
     if (error) {
       showToast('Couldn\'t set password: ' + (error.message || 'unknown'), 'error');
-      // Same reasoning Ã¢â‚¬â€ leave them signed out so the link is re-usable.
+      // Same reasoning — leave them signed out so the link is re-usable.
       try { await supabaseClient.auth.signOut(); } catch (e2) {}
       return;
     }
@@ -7265,10 +7265,10 @@ async function handlePasswordRecoveryFlow() {
 
 /* Pulls role + venue assignments for the currently-authenticated session
    and sets appState.user. The `redirect` option controls navigation:
-     - true  Ã¢â€ â€™ after success, navigate to the venue picker. Used by the
+     - true  → after success, navigate to the venue picker. Used by the
                post-login flow (handlePasswordRecoveryFlow), where the
                user just authenticated and has no current page.
-     - false Ã¢â€ â€™ leave navigation alone. Used by boot-time reconciliation,
+     - false → leave navigation alone. Used by boot-time reconciliation,
                where we just want to refresh role/venue without yanking
                the user off whatever page they were on (e.g. mid-audit).
    Sign-out on revoked/missing profile always navigates to login because
@@ -7289,7 +7289,7 @@ async function _hydrateUserProfileFromSession(opts) {
   );
   const row = profile.data && profile.data[0];
   if (!row || row.is_active === false) {
-    // Session is valid but profile is missing or revoked Ã¢â‚¬â€ sign out so
+    // Session is valid but profile is missing or revoked — sign out so
     // the user lands on the login screen instead of a half-loaded app.
     // Always navigate here regardless of `redirect`: there's nothing
     // safe to keep showing.
@@ -7334,8 +7334,8 @@ function selectVenue(id) {
   loadAvtWeeksHistory(venue.id).catch(function() {});
   // v1.45: reconcile any stale cached audit. If the phone was offline / closed
   // while admin cancelled the audit via desktop, appState.audit still carries
-  // status='active' or 'submitted' with count_phase='review' Ã¢â‚¬â€ which renders
-  // the misleading "Count 1 complete Ã¢â‚¬â€ recount in progress" lock screen for
+  // status='active' or 'submitted' with count_phase='review' — which renders
+  // the misleading "Count 1 complete — recount in progress" lock screen for
   // a venue that has no live audit. Fetch the current row before showing the
   // count page so a cancelled or removed audit clears immediately.
   reconcileLocalAuditWithServer(venue.id).finally(function() { showPage('count'); });
@@ -7344,7 +7344,7 @@ function selectVenue(id) {
 /* Verify the local appState.audit against the server. Clears the local
    audit if it was cancelled (or deleted) remotely so the phone doesn't
    keep showing stale recount/lock UI. Mismatches on a different venue
-   are also cleared Ã¢â‚¬â€ the local cache should only ever describe the
+   are also cleared — the local cache should only ever describe the
    venue the user just opened.
 
    Called from selectVenue (above) and on boot. Safe to no-op when:
@@ -7363,7 +7363,7 @@ async function reconcileLocalAuditWithServer(venueId) {
     if (error) { console.warn('[audit] reconcile fetch failed, keeping local:', error); return; }
     const row = (data && data[0]) || null;
     if (!row) {
-      // Audit row was deleted from the server Ã¢â‚¬â€ clear local
+      // Audit row was deleted from the server — clear local
       console.log('[audit] remote row missing, clearing local audit cache');
       appState.audit = null;
       saveState();
@@ -7378,7 +7378,7 @@ async function reconcileLocalAuditWithServer(venueId) {
       saveState();
       return;
     }
-    // Server still says active/submitted Ã¢â‚¬â€ sync the latest status + phase
+    // Server still says active/submitted — sync the latest status + phase
     // so the lock-screen logic in renderCountPage reflects truth.
     appState.audit.status = row.status;
     appState.audit.countPhase = row.count_phase;
@@ -7409,7 +7409,7 @@ function renderCountPage() {
       ['review', 'count2', 'final'].indexOf(appState.audit.countPhase) !== -1;
 
     if (isLocked) {
-      // Ã¢â€â‚¬Ã¢â€â‚¬ LOCKED VIEW: show read-only summary instead of editing UI Ã¢â€â‚¬Ã¢â€â‚¬
+      // == LOCKED VIEW: show read-only summary instead of editing UI ==
       document.getElementById('preAuditScreen').classList.add('hide');
       document.getElementById('activeAuditContent').classList.add('hide');
       document.getElementById('auditLockedOverlay').classList.remove('hide');
@@ -7462,7 +7462,7 @@ function renderCountPage() {
       return;
     }
 
-    // Ã¢â€â‚¬Ã¢â€â‚¬ ACTIVE (unlocked) AUDIT: show full editing UI Ã¢â€â‚¬Ã¢â€â‚¬
+    // == ACTIVE (unlocked) AUDIT: show full editing UI ==
     document.getElementById('auditLockedOverlay').classList.add('hide');
     document.getElementById('preAuditScreen').classList.add('hide');
     document.getElementById('activeAuditContent').classList.remove('hide');
@@ -7479,7 +7479,7 @@ function renderCountPage() {
     // Unified count: Guided is the single count view.
     document.getElementById('guidedContent').classList.remove('hide');
 
-    // Disable scan buttons during active count (safety net Ã¢â‚¬â€ should not be locked here)
+    // Disable scan buttons during active count (safety net — should not be locked here)
     document.querySelectorAll('.scan-btn').forEach(btn => {
       btn.classList.remove('locked');
     });
@@ -7556,7 +7556,7 @@ function renderPreAuditScreen() {
     document.getElementById('startAuditBtn').textContent = 'Start audit';
   }
 
-  // Hide the Start button for counters Ã¢â‚¬â€ they may only join existing audits.
+  // Hide the Start button for counters — they may only join existing audits.
   // Managers + corporate see both buttons; counters see only Join.
   const role = appState.user && appState.user.role;
   const canStart = role === 'corporate' || role === 'manager';
@@ -7655,7 +7655,7 @@ function endAuditEarly() {
 
   const networked = !!appState.audit.supabaseId;
 
-  // Networked audits are shared Ã¢â‚¬â€ cancelling discards the whole team's
+  // Networked audits are shared — cancelling discards the whole team's
   // counts, so gate it to manager+corporate (same permission as closing
   // counts). Solo/local audits stay cancellable by whoever started them.
   if (networked) {
@@ -7700,7 +7700,7 @@ function renderProgress() {
   const isAdmin = appState.user?.role === 'corporate';
 
   // Non-admin counters see just the running count, no "/ 20001" anchor.
-  // The X-of-Y framing implies a goal of counting the entire catalog Ã¢â‚¬â€
+  // The X-of-Y framing implies a goal of counting the entire catalog —
   // operationally misleading for a per-venue audit.
   const leftLabel = isAdmin
     ? '<strong>' + countedCount + '</strong> of <strong>' + totalCount + '</strong> items counted'
@@ -7741,8 +7741,8 @@ function getCountedItemIds() {
 }
 
 /* ================================================================
-   ZONE TABS Ã¢â‚¬â€ hardcoded venue defaults + user-added zones synced
-   via Supabase (kount_venue_zones). Counters can add too Ã¢â‚¬â€ zones
+   ZONE TABS — hardcoded venue defaults + user-added zones synced
+   via Supabase (kount_venue_zones). Counters can add too — zones
    are just text strings, easy to clean up.
    ================================================================ */
 
@@ -7752,7 +7752,7 @@ function getCountedItemIds() {
 // loadVenuesFromSupabase resolves. After that load, the function rewrites
 // each venue.zones AND venue._defaultZones from r.default_zones, so the
 // values here get superseded. DO NOT call this forEach a second time
-// (e.g. after a session restore or page navigation) Ã¢â‚¬â€ it would re-snapshot
+// (e.g. after a session restore or page navigation) — it would re-snapshot
 // venue.zones (which may now include counter-added customs) as the new
 // "default" list, making custom zones non-removable.
 appState.venues.forEach(v => { v._defaultZones = (v.zones || []).slice(); });
@@ -7777,7 +7777,7 @@ function renderZoneTabs() {
       esc(zone) + '<span class="zcnt">' + count + '</span>' + removeBtn + '</button>';
   }).join('');
 
-  // + Zone button Ã¢â‚¬â€ visible to all roles (counters can add too).
+  // + Zone button — visible to all roles (counters can add too).
   html += '<button class="zone-tab" onclick="addCustomZone()" style="color:var(--accent);border-color:var(--accent);border-style:dashed">+ Zone</button>';
 
   document.getElementById('zoneTabs').innerHTML = html;
@@ -7794,7 +7794,7 @@ async function addCustomZone() {
   const dupe = venue.zones.find(z => z.toLowerCase() === zoneName.toLowerCase());
   if (dupe) { showToast('Zone "' + dupe + '" already exists', 'warn'); return; }
 
-  // Optimistic local add Ã¢â‚¬â€ UI updates immediately
+  // Optimistic local add — UI updates immediately
   venue.zones.push(zoneName);
   if (appState.audit && !appState.audit.counts[zoneName]) appState.audit.counts[zoneName] = [];
   appState.currentZone = zoneName;
@@ -7868,7 +7868,7 @@ function cacheZoneToLocalStorage(venueId, zoneName) {
   } catch (e) {}
 }
 
-// Legacy fallback for offline / pre-Supabase data Ã¢â‚¬â€ pulls custom zones
+// Legacy fallback for offline / pre-Supabase data — pulls custom zones
 // from localStorage and merges into venue.zones. Always called at boot
 // so the UI works even before Supabase responds. The Supabase loader
 // runs after and supersedes this when online.
@@ -7914,7 +7914,7 @@ async function loadVenueZonesFromSupabase(venueId) {
   if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
 }
 
-// Realtime Ã¢â‚¬â€ propagate zone INSERT/DELETE across devices for the
+// Realtime — propagate zone INSERT/DELETE across devices for the
 // currently-selected venue.
 let venueZonesChannel = null;
 function startVenueZonesRealtime(venueId) {
@@ -7972,7 +7972,7 @@ function updateHeaderCount() {
   const counted = getCountedItemIds().size;
   const el = document.getElementById('headerCount');
   if (!el) return;
-  // Hide the "X / catalogTotal" pill from counters/managers Ã¢â‚¬â€ they don't
+  // Hide the "X / catalogTotal" pill from counters/managers — they don't
   // benefit from seeing the full catalog size, only the corporate admin
   // working on catalog hygiene does.
   if (appState.user?.role === 'corporate') {
@@ -8053,7 +8053,7 @@ function renderAllCountList() {
         // existing +/- button code path.
         // qty cell is the tap-to-set target. We make it look like a button
         // (background tint + subtle border) because a dashed underline by
-        // itself reads as text, not an interactive control Ã¢â‚¬â€ counters at
+        // itself reads as text, not an interactive control — counters at
         // Poppy (2026-06) didn't notice it was tappable.
         const qtyCell = isLocked
           ? '<span class="qty-val" style="min-width:50px;text-align:center">' + formatQty(r.qty) + '</span>'
@@ -8062,7 +8062,7 @@ function renderAllCountList() {
               'title="Tap to set qty" ' +
               'style="min-width:50px;text-align:center;cursor:pointer;padding:6px 8px;border-radius:6px;background:var(--surface2);border:1px solid var(--border)">' +
               formatQty(r.qty) + '</span>';
-        // Explicit "+N" button Ã¢â‚¬â€ Anna @ Poppy 2026-06 expected a dedicated
+        // Explicit "+N" button — Anna @ Poppy 2026-06 expected a dedicated
         // bulk-add control matching Craftable's "+6". This delegates into
         // startEditQty with prefill="+" so the input opens with the plus
         // sign pre-typed; the counter only enters the number and Enter.
@@ -8099,13 +8099,13 @@ function adjustEntryById(entryId, delta) {
 
 /* Tap-to-edit qty on the All Count breakdown. Anna @ Poppy 2026-06:
    "In Craftable we can +6 to an existing total without having to add each
-   bottle individually" Ã¢â‚¬â€ clicking + sixteen times to record a fresh stack
+   bottle individually" — clicking + sixteen times to record a fresh stack
    of beer cases is exactly the workflow Craftable beat us on. The span
    becomes an inline input; on blur or Enter we parse:
-     "6"   Ã¢â€ â€™ SET qty to 6
-     "+6"  Ã¢â€ â€™ ADD 6 to current
-     "-3"  Ã¢â€ â€™ SUBTRACT 3 (clamped at 0)
-   Anything else Ã¢â€ â€™ cancel, no-op. Empty/Escape Ã¢â€ â€™ cancel.
+     "6"   → SET qty to 6
+     "+6"  → ADD 6 to current
+     "-3"  → SUBTRACT 3 (clamped at 0)
+   Anything else → cancel, no-op. Empty/Escape → cancel.
    Underneath it all just computes a delta and calls adjustQuantity, so
    Supabase sync, dup-detect, remove-confirm, and offline queue paths
    stay identical to the +/- buttons. */
@@ -8124,7 +8124,7 @@ function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
   input.inputMode = 'numeric';
   // `prefill` is set by the +N button so the user sees "+" already typed
   // and just needs the number. Without it (direct tap on the qty value),
-  // we pre-fill the existing qty and select it Ã¢â‚¬â€ SET mode.
+  // we pre-fill the existing qty and select it — SET mode.
   input.value = prefill ? String(prefill) : String(currentQty);
   input.className = spanEl.className;
   // Match the span's width so the layout doesn't reflow.
@@ -8134,8 +8134,8 @@ function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
     if (done) return;
     done = true;
     if (!cancel) applyQtyEdit(entryId, zone, input.value, currentQty);
-    // Re-render either way Ã¢â‚¬â€ the input gets replaced when refreshCountList
-    // runs (or, on cancel/no-change, we render once to swap input Ã¢â€ â€™ span).
+    // Re-render either way — the input gets replaced when refreshCountList
+    // runs (or, on cancel/no-change, we render once to swap input → span).
     refreshCountList();
   };
   input.addEventListener('blur', function () { finalize(false); });
@@ -8156,7 +8156,7 @@ function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
 
 function applyQtyEdit(entryId, zone, raw, currentQty) {
   const trimmed = String(raw == null ? '' : raw).trim();
-  if (!trimmed) return; // empty Ã¢â€ â€™ cancel
+  if (!trimmed) return; // empty → cancel
   let newQty;
   if (/^[+\-]\s*\d/.test(trimmed)) {
     // Delta syntax: "+6", "-3", "+ 12".
@@ -8214,7 +8214,7 @@ function renderGuidedMode() {
       'Manual</button>' +
   '</div>';
 
-  // "All Count" Ã¢â€ â€™ every zone's totals; "This Zone" Ã¢â€ â€™ current zone inline list.
+  // "All Count" → every zone's totals; "This Zone" → current zone inline list.
   if (countView === 'all') {
     html += renderAllCountList();
     document.getElementById('guidedContent').innerHTML = html;
@@ -8222,15 +8222,15 @@ function renderGuidedMode() {
   }
 
   // Unified count: the current zone's counted items, inline-editable. Use
-  // Ã¢Ë†â€™/+ to adjust, Ã¢â€¡â€ž to move zones, and tap the name to open the full editor
+  // −/+ to adjust, ⇄ to move zones, and tap the name to open the full editor
   // (issue / notes / multi-zone). This replaces the old read-only list and
-  // the separate Free-count tab Ã¢â‚¬â€ finding and adjusting now live on one screen.
+  // the separate Free-count tab — finding and adjusting now live on one screen.
   const zoneItems = appState.audit.counts[appState.currentZone] || [];
   if (zoneItems.length > 0) {
     html += '<div class="list-header"><h3>' + esc(appState.currentZone) + ' \u2014 counted</h3><span class="total">' + zoneItems.length + '</span></div>';
     html += zoneItems.map(item => {
       // Vertical card: name + meta across the TOP (full width, no truncation),
-      // big Ã¢Ë†â€™ / qty / + centered on the BOTTOM so it's easy to read and tap.
+      // big − / qty / + centered on the BOTTOM so it's easy to read and tap.
       const nameTap = (!isLocked && item.masterId)
         ? ' onclick="openGuidedEntry(\'' + item.masterId + '\')" style="cursor:pointer;flex:1;min-width:0"'
         : ' style="flex:1;min-width:0"';
@@ -8247,12 +8247,30 @@ function renderGuidedMode() {
           '</div>' +
           (isLocked ? '' : '<button class="qty-btn" onclick="showMoveMenu(\'' + item.id + '\')" aria-label="Move to another zone" title="Move to another zone" style="background:transparent;font-size:16px;flex-shrink:0">\u21c4</button>') +
         '</div>';
+      // Tap-to-edit qty + explicit "+N" button, mirroring the All Count
+      // breakdown (Anna @ Poppy 2026-06: "+6 to a total" should work in the
+      // current-zone list too, not just All Count). The qty value carries the
+      // same .qty-editable hooks so startEditQty's null-spanEl fallback can
+      // locate it by entry+zone; we pass appState.currentZone as the zone
+      // because every row here lives in the active zone.
+      const zone = appState.currentZone;
+      const zoneAttr = esc(zone);
+      const qtyCell = '<span class="qty-val qty-editable" data-entry="' + item.id + '" data-zone="' + zoneAttr + '" data-qty="' + item.qty + '" ' +
+          'onclick="startEditQty(this.dataset.entry, this.dataset.zone, Number(this.dataset.qty), this)" ' +
+          'title="Tap to set qty" ' +
+          'style="font-size:24px;min-width:48px;text-align:center;cursor:pointer;padding:4px 8px;border-radius:6px;background:var(--surface2);border:1px solid var(--border)">' +
+          formatQty(item.qty) + '</span>';
+      const plusNBtn = '<button class="qty-btn" data-entry="' + item.id + '" data-zone="' + zoneAttr + '" data-qty="' + item.qty + '" ' +
+          'onclick="startEditQty(this.dataset.entry, this.dataset.zone, Number(this.dataset.qty), null, \'+\')" ' +
+          'title="Add multiple at once" aria-label="Add multiple at once" ' +
+          'style="min-width:46px;height:40px;padding:0 8px;font-weight:600;font-size:13px">+N</button>';
       const bottom = isLocked
         ? '<div style="text-align:center"><span class="qty-val" style="font-size:24px">' + formatQty(item.qty) + '</span></div>'
-        : '<div class="c-qty" style="justify-content:center;gap:22px">' +
+        : '<div class="c-qty" style="justify-content:center;gap:16px;flex-wrap:wrap">' +
             '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', -1)">-</button>' +
-            '<span class="qty-val" style="font-size:24px;min-width:48px;text-align:center">' + formatQty(item.qty) + '</span>' +
+            qtyCell +
             '<button class="qty-btn" onclick="adjustQuantity(\'' + item.id + '\', 1)">+</button>' +
+            plusNBtn +
           '</div>';
       return '<div class="c-item fade-in" style="flex-direction:column;align-items:stretch;gap:12px">' +
         top + bottom +
@@ -8268,7 +8286,7 @@ function renderGuidedMode() {
   document.getElementById('guidedContent').innerHTML = html;
 }
 
-/* Guided mode search Ã¢â‚¬â€ searches item master on each keystroke (debounced) */
+/* Guided mode search — searches item master on each keystroke (debounced) */
 let guidedSearchTimeout = null;
 
 function onGuidedSearch(value) {
@@ -8360,7 +8378,7 @@ function openGuidedEntry(masterId) {
   if (legacyInfo) legacyInfo.innerHTML = '';
   document.getElementById('guidedQty').value = existing ? existing.qty : '';
 
-  // Cross-zone dupe warning only Ã¢â‚¬â€ current zone is already pre-filled above
+  // Cross-zone dupe warning only — current zone is already pre-filled above
   document.getElementById('guidedDupeWarning').innerHTML =
     renderDupeWarning(item.id, item.sku, { suppressCurrentZone: true });
 
@@ -8409,7 +8427,7 @@ function adjustModalQty(inputId, delta) {
 
 function setPartial(value) {
   const input = document.getElementById('guidedQty');
-  // Same normalization as adjustGuidedQty Ã¢â‚¬â€ the partial buttons should
+  // Same normalization as adjustGuidedQty — the partial buttons should
   // never produce a >2-decimal value or inherit one the user typed.
   const current = clampQty(input.value);
   const base = Math.floor(Number.isFinite(current) ? current : 0);
@@ -8437,7 +8455,7 @@ function submitGuidedEntry() {
       return;
     }
 
-    // Mandatory: audit result + reason. Both block save Ã¢â‚¬â€ the user must
+    // Mandatory: audit result + reason. Both block save — the user must
     // explicitly mark the row as Corrected (count changed) or Verified
     // (count stayed the same) AND give a reason so the admin Reports
     // table has Context. This is the "cannot move forward without these"
@@ -8498,7 +8516,7 @@ function submitGuidedEntry() {
 
     closeGuidedEntry();
 
-    // Don't auto-finalize Ã¢â‚¬â€ that's now an explicit manager-only action via
+    // Don't auto-finalize — that's now an explicit manager-only action via
     // the Close Recount button (with all-rows-recorded validation).
     // Surface a per-role toast so a counter understands their entry is
     // saved but a manager still has to close the recount, and a manager
@@ -8513,7 +8531,7 @@ function submitGuidedEntry() {
         showToast('Recorded \u00b7 ' + _remaining + ' item' + (_remaining === 1 ? '' : 's') + ' left to review', 'success');
       }
     } else {
-      // Counters can't close Ã¢â‚¬â€ make sure they don't think they're done.
+      // Counters can't close — make sure they don't think they're done.
       showToast('Recorded \u00b7 manager will close the recount', 'success');
     }
     renderRecountPage();
@@ -8536,12 +8554,12 @@ function submitGuidedEntry() {
   const issue = appState.guidedIssue;
 
   // Two cases to handle:
-  //   (a) Same-zone edit Ã¢â‚¬â€ user is fixing the qty on an item already
+  //   (a) Same-zone edit — user is fixing the qty on an item already
   //       counted in this zone. The OLD code did splice + addCountEntry,
   //       which fired a server-side INSERT that 23505-collided with the
   //       existing remote row and SUM-merged old + new qty (double-count).
   //       Fix: edit in place locally + remote, no delete/insert dance.
-  //   (b) Move Ã¢â‚¬â€ user picked the item from a zone where it was previously
+  //   (b) Move — user picked the item from a zone where it was previously
   //       counted, then chose a different zone. Old rows in other zones
   //       become orphans on the desktop unless we delete them server-side.
   const currentZoneItems = appState.audit.counts[appState.currentZone] || [];
@@ -8600,7 +8618,7 @@ function submitGuidedEntry() {
       });
     }
   } else {
-    // No existing entry in current zone Ã¢â‚¬â€ fresh insert via addCountEntry,
+    // No existing entry in current zone — fresh insert via addCountEntry,
     // which fires its own sync. The merge_key insert won't collide because
     // any same-item rows in OTHER zones use a different key (zone differs).
     addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, issue, null, null, item.id);
@@ -8657,7 +8675,7 @@ function showMoveMenu(entryId, fromZoneOverride) {
   const venue = appState.currentVenue;
   if (!venue || !venue.zones) return;
   // fromZoneOverride is set when called from the All Count tab, where the
-  // entry can live in any zone Ã¢â‚¬â€ not necessarily appState.currentZone.
+  // entry can live in any zone — not necessarily appState.currentZone.
   const fromZone = fromZoneOverride || appState.currentZone;
   const others = venue.zones.filter(z => z !== fromZone);
   if (others.length === 0) { showToast('No other zones to move to', 'warn'); return; }
@@ -8688,7 +8706,7 @@ function closeMoveMenu() {
   if (m) m.classList.add('hide');
 }
 
-/* "Did you mean?" picker Ã¢â‚¬â€ shown when a counter submits a new-looking
+/* "Did you mean?" picker — shown when a counter submits a new-looking
    item name and the catalog has plausible existing matches (Anna @
    Poppy, 2026-06: typing a near-name was creating duplicate variants,
    the same Craftable-era pain point). callback receives
@@ -8792,7 +8810,7 @@ function showSizePicker(matchedItem, siblings, callback) {
   });
   modal.querySelector('#sizePickerCancelBtn').addEventListener('click', function () {
     closeSizePicker();
-    callback(matchedItem); // explicit "Keep" Ã¢â€ â€™ reuse original match
+    callback(matchedItem); // explicit "Keep" → reuse original match
   });
 }
 
@@ -8868,7 +8886,7 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
    DUPLICATE DETECTION (Phase A, Feature #3)
    Checks if an item has already been counted in the current zone or
    elsewhere in the audit. Returns structured info for UI banners.
-   Does NOT block Ã¢â‚¬â€ the banner is informational so counters can
+   Does NOT block — the banner is informational so counters can
    notice accidental rescans before committing.
    ================================================================ */
 function checkExistingCount(masterId, sku) {
@@ -8913,7 +8931,7 @@ function checkExistingCount(masterId, sku) {
 
 /* Build the HTML for the duplicate warning banner. Returns '' if no dupe.
    opts.suppressCurrentZone: true = only warn about OTHER zones (used by Guided
-   mode, which already pre-fills the current zone's qty Ã¢â‚¬â€ showing it again is noise). */
+   mode, which already pre-fills the current zone's qty — showing it again is noise). */
 function renderDupeWarning(masterId, sku, opts) {
   opts = opts || {};
   const dupe = checkExistingCount(masterId, sku);
@@ -8958,7 +8976,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
     return;
   }
   // Networked audits must be online. Refuse rather than let the local count
-  // drift from Supabase (option 3B Ã¢â‚¬â€ block offline writes).
+  // drift from Supabase (option 3B — block offline writes).
   if (isNetworkedAuditBlocked()) {
     showToast('Disconnected \u2014 reconnect to continue counting', 'error');
     return;
@@ -8973,7 +8991,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   const parsedQty = Number.isFinite(clamped) ? clamped : 1;
 
   // If no masterId, try to find one by exact-name match first. If that
-  // fails, run a fuzzy similarity check against itemMaster Ã¢â‚¬â€ if any
+  // fails, run a fuzzy similarity check against itemMaster — if any
   // plausible candidates exist, open the "Did you mean?" picker and
   // defer the rest of this function until the user resolves the
   // choice. This is the Fix A gate (Anna @ Poppy, 2026-06): typing
@@ -8992,11 +9010,11 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
           if (choice.action === 'pick') {
             // Re-enter with the user's chosen masterId. All downstream
             // state (counts, syncs, dup-detect) runs on the recursive
-            // call, NOT here Ã¢â‚¬â€ keep this branch a clean tail-call.
+            // call, NOT here — keep this branch a clean tail-call.
             addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, choice.masterId);
             return;
           }
-          // 'add' Ã¢â‚¬â€ user confirmed it really is a new item. Mint the
+          // 'add' — user confirmed it really is a new item. Mint the
           // custom-item row and re-enter so the count gets recorded.
           const brand = name.includes(' \u2014 ') ? name.split(' \u2014 ')[0] : '';
           const newId = addCustomItem(name, brand, category, '', sku);
@@ -9004,7 +9022,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
         });
         return; // wait for modal callback
       }
-      // No plausible existing match Ã¢â€ â€™ genuinely new item.
+      // No plausible existing match → genuinely new item.
       const brand = name.includes(' \u2014 ') ? name.split(' \u2014 ')[0] : '';
       masterId = addCustomItem(name, brand, category, '', sku);
     }
@@ -9025,13 +9043,13 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
       saveState();
 
       // Sync the increment to Supabase. We send parsedQty (the DELTA), not
-      // the running total Ã¢â‚¬â€ the 23505/merge path inside syncEntryToSupabase
+      // the running total — the 23505/merge path inside syncEntryToSupabase
       // computes existing.qty + payload.qty, which is the correct answer
       // for both:
       //   (a) the local race where the original insert is still in-flight
       //       when the user taps again (an absolute total would have it
       //       added on top of the in-flight qty=1, double-counting), and
-      //   (b) cross-device concurrent increments Ã¢â‚¬â€ another phone counting
+      //   (b) cross-device concurrent increments — another phone counting
       //       the same item via realtime would lose its +1 if we wrote an
       //       absolute total here.
       // We pass a transient "delta entry" object so duplicateInZone keeps
@@ -9040,8 +9058,8 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
       if (appState.audit && appState.audit.supabaseId) {
         // v1.62: each increment is a DISTINCT mutation, so it gets a fresh
         // idempotency key. Copying duplicateInZone verbatim would carry its
-        // local id into payload.client_entry_id Ã¢â‚¬â€ matching the committed
-        // row's client_entry_id from the original insert Ã¢â‚¬â€ and the 23505
+        // local id into payload.client_entry_id — matching the committed
+        // row's client_entry_id from the original insert — and the 23505
         // merge path would mistake this delta for a replay of that insert
         // and adopt the row WITHOUT adding qty (increment silently lost).
         // A fresh key keeps replay-detection working for THIS delta (if its
@@ -9113,7 +9131,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
    ================================================================ */
 
 /* Temporarily swaps currentZone, calls addCountEntry, restores zone.
-   Keeps addCountEntry untouched Ã¢â‚¬â€ the data model already supports
+   Keeps addCountEntry untouched — the data model already supports
    same-item-in-multiple-zones natively. */
 function addCountEntryToZone(zone, name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
   if (!zone || zone === appState.currentZone) return;
@@ -9145,7 +9163,7 @@ function addLocationRow(containerId) {
     return;
   }
 
-  // Zones already chosen in existing rows Ã¢â‚¬â€ disable them so user can't double-pick
+  // Zones already chosen in existing rows — disable them so user can't double-pick
   const alreadyPicked = Array.from(container.querySelectorAll('select.extra-loc-zone'))
     .map(function(s) { return s.value; });
 
@@ -9266,7 +9284,7 @@ function adjustQuantity(itemId, delta, zoneOverride) {
   // Mirror the absolute qty to Supabase by direct update on supabaseId.
   // Trade-off: a concurrent +1 from another phone via realtime would be
   // overwritten by this absolute write; realtime echo will reconcile
-  // within seconds. We use absolute (not delta) here because adjust Ã‚Â±
+  // within seconds. We use absolute (not delta) here because adjust ±
   // can produce a negative delta, and delta-sync would either INSERT a
   // negative-qty row when no remote exists or risk a merge_key insert
   // that fails CHECK semantics in future schema changes. Direct UPDATE
@@ -9290,7 +9308,7 @@ function adjustQuantity(itemId, delta, zoneOverride) {
     // Heal an orphan: this item was counted while the item_id FK bug was
     // rejecting inserts, so it has no supabaseId and never reached the
     // server. Re-run the full insert with the current absolute qty; on
-    // success syncEntryToSupabase stamps item.supabaseId so later Ã‚Â± edits
+    // success syncEntryToSupabase stamps item.supabaseId so later ± edits
     // take the direct-UPDATE path above. Outage orphans have no remote row,
     // so the 23505 merge branch inside the sync won't double-count.
     syncEntryToSupabase(item, zone).catch(function (err) {
@@ -9373,7 +9391,7 @@ function validateBarcode(code, format) {
       // frames since false positives are most common here.
       return code.length >= 4 ? 'medium' : 'invalid';
     default:
-      // Format unknown or detector didn't supply one Ã¢â‚¬â€ fall back to the
+      // Format unknown or detector didn't supply one — fall back to the
       // pre-fix brute-force 4-frame behavior.
       return 'low';
   }
@@ -9427,7 +9445,7 @@ function updateScanUI(progress, code, requiredFrames) {
 /* Handle a single detection from either native or Quagga.
    Returns true if this detection completed the confidence-gated lock
    (caller should fire). The `format` argument lets us pick a shorter
-   frame requirement when the code's checksum validates Ã¢â‚¬â€ see
+   frame requirement when the code's checksum validates — see
    validateBarcode above. */
 function processDetection(code, format) {
   const confidence = validateBarcode(code, format);
@@ -9435,7 +9453,7 @@ function processDetection(code, format) {
   const required = requiredFramesFor(confidence);
   const now = Date.now();
 
-  // Debounce: same code just fired within 3s Ã¢â‚¬â€ ignore
+  // Debounce: same code just fired within 3s — ignore
   // INSTANT SCAN keeps the scanner open after a count, so this same-code
   // guard is the single per-barcode cooldown (a DIFFERENT code resets the
   // candidate below and locks immediately).
@@ -9512,7 +9530,7 @@ function openBarcodeScanner() {
   }
 }
 
-/* Native BarcodeDetector Ã¢â‚¬â€ uses phone's built-in barcode engine */
+/* Native BarcodeDetector — uses phone's built-in barcode engine */
 async function openNativeBarcodeScanner() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -9521,7 +9539,7 @@ async function openNativeBarcodeScanner() {
     // Race guard: getUserMedia is async. If the scanner was closed
     // between modal-open and the stream resolving (e.g. iOS Safari
     // permission prompt triggers visibilitychange which runs the close
-    // handler), stop the tracks immediately Ã¢â‚¬â€ assigning to
+    // handler), stop the tracks immediately — assigning to
     // nativeBarcodeStream now would leak a live camera (LED stays on,
     // privacy + battery hit).
     if (!barcodeActive) {
@@ -9559,7 +9577,7 @@ async function openNativeBarcodeScanner() {
     }
 
     // Build the detector from the intersection of what we want and what the
-    // device actually supports Ã¢â‚¬â€ passing an unsupported format to the
+    // device actually supports — passing an unsupported format to the
     // constructor throws on some engines. Includes ITF (ITF-14 case barcodes)
     // since counters scan a lot of full cases, plus code_93/codabar.
     var wantedFormats = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'code_93', 'codabar', 'itf', 'qr_code'];
@@ -9600,7 +9618,7 @@ async function openNativeBarcodeScanner() {
             }
           }
         } else {
-          // No barcode in frame Ã¢â‚¬â€ decay the candidate count if we've lost sight
+          // No barcode in frame — decay the candidate count if we've lost sight
           const now = Date.now();
           if (scanCandidateCode && now - scanLastSeenAt > 600) {
             scanCandidateCode = '';
@@ -9617,7 +9635,7 @@ async function openNativeBarcodeScanner() {
   }
 }
 
-/* Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬ Camera flashlight toggle Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+/* =========== Camera flashlight toggle ===========
    Browsers expose torch via MediaStreamTrack.applyConstraints({torch}). Not
    every device/browser supports it (iOS Safari notably doesn't). Only show
    the button if the active track's getCapabilities() reports torch=true.
@@ -9627,7 +9645,7 @@ let _activeFlashTrack = null;
 let _flashOn = false;
 
 // Pending setTimeout id from the Quagga path so closeBarcodeScanner can clear
-// it. Otherwise a fast openÃ¢â€ â€™closeÃ¢â€ â€™open within 200ms would let a stale timeout
+// it. Otherwise a fast open→close→open within 200ms would let a stale timeout
 // bind a now-detached <video>'s track to the new scanner session.
 let _quaggaFlashBindTimer = null;
 
@@ -9698,7 +9716,7 @@ function openQuaggaBarcodeScanner() {
     },
     decoder: {
       // i2of5 covers ITF-14 case barcodes; code_93/codabar broaden coverage
-      // for the iOS path (no native BarcodeDetector Ã¢â€ â€™ Quagga does the work).
+      // for the iOS path (no native BarcodeDetector → Quagga does the work).
       readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader', 'code_93_reader', 'codabar_reader'],
     },
     locate: true,
@@ -9714,7 +9732,7 @@ function openQuaggaBarcodeScanner() {
     // there synchronously, so we poll once after a short delay. Keep the
     // timer id so closeBarcodeScanner can cancel it if the user closes the
     // scanner before this fires (otherwise it would bind whatever <video>
-    // it finds Ã¢â‚¬â€ possibly the next scanner's, possibly nothing).
+    // it finds — possibly the next scanner's, possibly nothing).
     if (_quaggaFlashBindTimer) { clearTimeout(_quaggaFlashBindTimer); _quaggaFlashBindTimer = null; }
     _quaggaFlashBindTimer = setTimeout(function() {
       _quaggaFlashBindTimer = null;
@@ -9778,7 +9796,7 @@ function detectCategory(title, description) {
   return 'other';
 }
 
-/* Strategy-2 matcher Ã¢â‚¬â€ scanned barcode Ã¢â€ â€™ itemMaster row by inline UPC.
+/* Strategy-2 matcher — scanned barcode → ’ itemMaster row by inline UPC.
    Extracted so both handleBarcodeResult (modal flow) and the instant-scan
    resolution use the identical matching rules (digits-only, leading-zero
    and check-digit tolerance). */
@@ -9804,7 +9822,7 @@ function matchBarcodeToMaster(code) {
   });
 }
 
-/* INSTANT SCAN resolution Ã¢â‚¬â€ does this barcode resolve to a KNOWN catalog
+/* INSTANT SCAN resolution — does this barcode resolve to a KNOWN catalog
    item that we can count without opening the modal? Reuses the SAME lookups
    handleBarcodeResult uses (learned upcMappingsCache, then the itemMaster
    inline-UPC match) and only returns a hit when it carries a master_item_id,
@@ -9813,7 +9831,7 @@ function matchBarcodeToMaster(code) {
    today's modal flow (link/search/suggest).
    Returns { masterId, name, category } or null. */
 function resolveInstantScan(code) {
-  // Learned UPCs (admin-approved master_item_upcs) win Ã¢â‚¬â€ same precedence as
+  // Learned UPCs (admin-approved master_item_upcs) win — same precedence as
   // handleBarcodeResult Strategy 0.
   const learned = lookupLearnedUPC(code);
   if (learned && learned.masterId) {
@@ -9834,9 +9852,9 @@ function resolveInstantScan(code) {
 
 /* INSTANT SCAN entry point from the detect loop (native + Quagga). If the
    barcode is KNOWN, count +1 into the current zone via the SAME add path the
-   modal Save uses (addCountEntry) Ã¢â‚¬â€ keeping item_id null / master_item_id
+   modal Save uses (addCountEntry) — keeping item_id null / master_item_id
    set, the merge-on-repeat semantics, retry queue, and the audit-locked /
-   networked-offline guards all unchanged Ã¢â‚¬â€ then leaves the scanner OPEN
+   networked-offline guards all unchanged — then leaves the scanner OPEN
    with non-blocking feedback. Returns true if it consumed the scan (known),
    false if the caller should fall through to the modal flow (unknown). */
 function instantScanCount(code) {
@@ -9863,7 +9881,7 @@ function instantScanCount(code) {
     : null;
 
   // If a guard blocked the add (or the fuzzy-picker deferred it), the running
-  // total won't have advanced Ã¢â‚¬â€ don't claim a count happened.
+  // total won't have advanced — don't claim a count happened.
   if (!after || after.qty <= beforeQty) {
     return true; // still consumed: it was a known barcode, modal must NOT open
   }
@@ -9921,7 +9939,7 @@ function hideInstantScanFeedback() {
 async function handleBarcodeResult(code) {
   // Best-effort: refresh the approved-mappings cache before lookup so a
   // recently-approved UPC mapping doesn't get missed because of the 5-min
-  // TTL. Don't block on it Ã¢â‚¬â€ if the network is slow, fall through to the
+  // TTL. Don't block on it — if the network is slow, fall through to the
   // already-cached copy.
   try {
     if (typeof loadApprovedUpcMappings === 'function') {
@@ -9931,7 +9949,7 @@ async function handleBarcodeResult(code) {
   } catch (e) {}
 
   // Strategy 0: Check learned UPCs first (admin-approved upc_mappings).
-  // These are authoritative Ã¢â‚¬â€ they MUST win over the localStorage UPCitemdb
+  // These are authoritative — they MUST win over the localStorage UPCitemdb
   // cache, otherwise a UPC that was scanned before being mapped will keep
   // showing the stale generic UPCitemdb title forever.
   const learned = lookupLearnedUPC(code);
@@ -10000,7 +10018,7 @@ async function handleBarcodeResult(code) {
       return;
     }
   } catch (error) {
-    // CORS failed or network error Ã¢â‚¬â€ this is expected on non-localhost
+    // CORS failed or network error — this is expected on non-localhost
     console.log('Direct UPC lookup failed (CORS expected on tunnel):', error.message);
   }
 
@@ -10112,7 +10130,7 @@ function submitBarcodeEntry() {
     learnUPC(sku, fullName, brand, category, masterId);
   }
 
-  // LIVE UPC LINKING: delegate all policy to linkUPCToItem Ã¢â‚¬â€ it decides
+  // LIVE UPC LINKING: delegate all policy to linkUPCToItem — it decides
   // whether this is a blank-add (auto-approve for all roles), a manager
   // update submission (pending), or a counter update (blocked with toast).
   if (linkedItem && sku && sku.length >= 6) {
@@ -10151,7 +10169,7 @@ function submitBarcodeEntry() {
    ================================================================ */
 let photoStream = null;
 // Tracks whether the photo-capture modal is currently expecting a stream.
-// Used to guard the async getUserMedia callback Ã¢â‚¬â€ if closePhotoCapture()
+// Used to guard the async getUserMedia callback — if closePhotoCapture()
 // ran while permission was being requested, the resolved stream must be
 // stopped instead of assigned to photoStream, otherwise the camera LED
 // stays on after the modal closes.
@@ -10169,7 +10187,7 @@ function openPhotoCapture() {
     video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
   })
     .then(stream => {
-      // Race guard Ã¢â‚¬â€ see photoActive declaration above.
+      // Race guard — see photoActive declaration above.
       if (!photoActive) {
         stream.getTracks().forEach(t => t.stop());
         return;
@@ -10191,7 +10209,7 @@ function closePhotoCapture() {
   }
   document.getElementById('photoModal').classList.add('hide');
   // All photo-flow exits (cancel, getUserMedia failure, visibilitychange)
-  // come through here Ã¢â‚¬â€ restore the floating calculator.
+  // come through here — restore the floating calculator.
   _calcFabSetCamera(false);
 }
 
@@ -10283,7 +10301,7 @@ function detectCategoryFromText(text) {
   return 'other';
 }
 
-/* Photo search fallback Ã¢â‚¬â€ lets user search item master from photo review modal */
+/* Photo search fallback — lets user search item master from photo review modal */
 function onPhotoSearch(value) {
   const resultsEl = document.getElementById('photoSearchResults');
   const query = String(value || '').trim();
@@ -10379,7 +10397,7 @@ async function suggestPhotoForCatalog() {
   if (ok) { const b = document.getElementById('photoSuggestBtn'); if (b) b.style.display = 'none'; }
 }
 
-/* Preprocess image for better OCR Ã¢â‚¬â€ increase contrast, convert to grayscale */
+/* Preprocess image for better OCR — increase contrast, convert to grayscale */
 function preprocessImageForOCR(imageDataUrl) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -10556,7 +10574,7 @@ async function submitPhotoEntry() {
   try { await savePhoto(photoId, capturedPhotoData); } catch (e) {}
 
   // Get masterId if OCR matched an item, plus UPC if Claude / the matched
-  // catalog row supplied one (parseLabelWithClaude Ã¢â€ â€™ populatePhotoFormFromParsed
+  // catalog row supplied one (parseLabelWithClaude → populatePhotoFormFromParsed
   // stores it on the input's dataset). Falls through to null on the legacy
   // Tesseract path, which doesn't populate UPC.
   const masterId = document.getElementById('photoName').dataset.masterId || null;
@@ -10726,7 +10744,7 @@ async function suggestManualForCatalog() {
     notes: document.getElementById('manualNotes').value,
   });
   if (ok) {
-    // Hide the button Ã¢â‚¬â€ it's now in the queue
+    // Hide the button — it's now in the queue
     var btn = document.getElementById('manualSuggestBtn');
     if (btn) btn.style.display = 'none';
   }
@@ -10896,7 +10914,7 @@ let _calcJustEvaluated = false;
 function renderCalculatorPage() {
   // Two render surfaces share this one state: the Calculator page
   // (#calcExpr/#calcResult) and the floating panel (#calcFabExpr/
-  // #calcFabResult). Update whichever exist Ã¢â‚¬â€ both stay in sync.
+  // #calcFabResult). Update whichever exist — both stay in sync.
   const expr = _calcExpr || '\u00a0';
   ['calcExpr', 'calcFabExpr'].forEach(id => {
     const el = document.getElementById(id);
@@ -10930,7 +10948,7 @@ function calcInput(key) {
         _calcJustEvaluated = true;
         return renderCalculatorPage();
       }
-      // Treat N% as (N/100) Ã¢â‚¬â€ basic-calculator semantics.
+      // Treat N% as (N/100) — basic-calculator semantics.
       const exprWithPct = sanitized.replace(/(\d+(?:\.\d+)?)%/g, '($1/100)');
       const val = Function('"use strict";return (' + exprWithPct + ')')();
       _calcResult = Number.isFinite(val) ? parseFloat(val.toFixed(6)).toString() : 'Error';
@@ -10971,7 +10989,7 @@ function calcInput(key) {
 /* ================================================================
    FLOATING CALCULATOR (edge-docked FAB + compact panel)
    Additive to the Calculator nav tab. Shares _calcExpr/_calcResult/
-   calcInput() with the page Ã¢â‚¬â€ renderCalculatorPage() paints both
+   calcInput() with the page — renderCalculatorPage() paints both
    surfaces. The button is draggable (pointer events + capture), snaps
    to the nearest screen edge on release, persists its dock position,
    and is force-hidden whenever a camera modal is live (hooks in
@@ -10987,7 +11005,7 @@ let _calcFabSide = 'right';
    The fully-visible button needs a taller clearance than the old peek
    tab: below the count page's Barcode/Photo/Manual card row and the
    variance severity filters, above the bottom-nav clamp and the summary
-   page's bottom inputs Ã¢â‚¬â€ verified overlap-free on every page by the e2e
+   page's bottom inputs — verified overlap-free on every page by the e2e
    walk in 11-floating-calc.spec.js. */
 let _calcFabTop = Math.round(window.innerHeight * 0.79);
 let _calcFabPage = 'login';
@@ -10998,7 +11016,7 @@ let _calcFabSwallowClick = false;
 
 /* Visibility decision: hidden pre-login (it would float over the password
    field for no benefit) and on the calculator page itself (redundant).
-   Camera always wins Ã¢â‚¬â€ see _calcFabSetCamera. */
+   Camera always wins — see _calcFabSetCamera. */
 function updateCalcFabVisibility() {
   const fab = document.getElementById('calcFab');
   const panel = document.getElementById('calcFabPanel');
@@ -11009,7 +11027,7 @@ function updateCalcFabVisibility() {
     !_calcFabCameraActive;
   // Forced hide also force-minimizes (mirrors the camera path's reset in
   // _calcFabSetCamera). Otherwise a programmatic hide with the panel open
-  // (e.g. SIGNED_OUT Ã¢â€ â€™ showPage('login')) leaves the flag true: the next
+  // (e.g. SIGNED_OUT → showPage('login')) leaves the flag true: the next
   // pointerdown anywhere gets swallowed by the outside-tap handler, and
   // returning to an allowed page silently auto-reopens the panel.
   if (!allowed) _calcFabPanelOpen = false;
@@ -11028,7 +11046,7 @@ function updateCalcFabVisibility() {
 
 /* Camera hook. While a camera modal is live the FAB AND panel disappear
    completely; afterwards the FAB comes back docked (panel is force-
-   minimized, never auto-reopened Ã¢â‚¬â€ counters found that jarring). */
+   minimized, never auto-reopened — counters found that jarring). */
 function _calcFabSetCamera(active) {
   _calcFabCameraActive = !!active;
   if (active) _calcFabPanelOpen = false;
@@ -11110,7 +11128,7 @@ function restoreCalcFabPos() {
   } catch (e) {}
 }
 
-/* Drag plumbing Ã¢â‚¬â€ pointer events + setPointerCapture so it works for
+/* Drag plumbing — pointer events + setPointerCapture so it works for
    touch, mouse and pen. A <8px move is a tap (opens the panel); anything
    bigger is a drag and never opens it. */
 (function initCalcFab() {
@@ -11198,7 +11216,7 @@ function restoreCalcFabPos() {
   //    the capture phase, plus the click that follows it): letting it
   //    through could fire a destructive control (+/- on a count card, a
   //    submit button) when the user only meant "dismiss the calculator".
-  //    Focus is never trapped Ã¢â‚¬â€ the page underneath stays fully alive for
+  //    Focus is never trapped — the page underneath stays fully alive for
   //    the next tap. --
   document.addEventListener('pointerdown', e => {
     if (!_calcFabPanelOpen) return;
@@ -11218,8 +11236,8 @@ function restoreCalcFabPos() {
   // Staleness guard: a touch-scroll or interrupted gesture ends in
   // pointerup/pointercancel WITHOUT a click, which would leave the flag
   // armed to eat an unrelated later click. We can't clear synchronously
-  // on pointerup Ã¢â‚¬â€ the synthetic click of a real tap fires AFTER pointerup
-  // and must still be swallowed Ã¢â‚¬â€ but that click is dispatched before
+  // on pointerup — the synthetic click of a real tap fires AFTER pointerup
+  // and must still be swallowed — but that click is dispatched before
   // timers run, so a 0-ms timeout lets THIS gesture's click through to the
   // swallower while guaranteeing the flag never outlives the gesture.
   const _calcFabDisarmSwallow = () => {
@@ -11260,13 +11278,13 @@ function restoreCalcFabPos() {
 /* ================================================================
    WEEKS-FLAGGED HISTORY (v1.27)
    Phone used to call scoreSeverity with weeksActive=0 everywhere, so
-   the chronic CRITICAL ($Ã¢â€°Â¥200 for Ã¢â€°Â¥5 weeks, or Ã¢â€°Â¥10 weeks alone) and
-   HIGH (Ã¢â€°Â¥5 weeks alone) bands never fired. Mirrors how the standalone
+   the chronic CRITICAL ($≥200 for ≥5 weeks, or ≥10 weeks alone) and
+   HIGH (≥5 weeks alone) bands never fired. Mirrors how the standalone
    inventory-workflow tool feeds weeks_flagged into the same scorer.
 
    Implementation: for the current venue, pull the 12 most-recent
    kount_avt_reports and count, per item, how many distinct reports
-   that item appeared in with non-trivial absolute variance ($Ã¢â€°Â¥50).
+   that item appeared in with non-trivial absolute variance ($≥50).
    Cached in _avtWeeksMap keyed by `${venueId}|${normName}`. Recomputed
    on every loadAvtFromSupabase call (boot, realtime).
    ================================================================ */
@@ -11285,7 +11303,7 @@ function getWeeksFlaggedFor(itemName, venueId) {
 }
 
 /* Convert a Date (or ISO string) to an ISO-week key like "2026-W17". Used
-   to dedupe same-week double-uploads Ã¢â‚¬â€ two reports uploaded the same week
+   to dedupe same-week double-uploads — two reports uploaded the same week
    for a corrective re-run should count as one week of variance, not two,
    for chronic-band scoring. */
 function _isoWeekKey(d) {
@@ -11323,7 +11341,7 @@ async function loadAvtWeeksHistory(venueId) {
     }
 
     const reps = repsResp.data;
-    // Map each report id Ã¢â€ â€™ its ISO week so we can dedupe in the count
+    // Map each report id → its ISO week so we can dedupe in the count
     // pass below. Multiple uploads in the same calendar week count as one.
     const repToWeek = new Map();
     for (const r of reps) repToWeek.set(r.id, _isoWeekKey(r.uploaded_at) || r.id);
@@ -11400,8 +11418,8 @@ function scoreSeverity(item) {
     return 'HIGH';
   }
 
-  // MEDIUM: above $ threshold OR Ã¢â€°Â¥3 weeks active OR Ã¢â€°Â¥3 bottles OR Ã¢â€°Â¥25% off.
-  // The pctÃ¢â€°Â¥25 band catches cheap-but-very-off items (e.g. an $30 bottle
+  // MEDIUM: above $ threshold OR ≥3 weeks active OR ≥3 bottles OR ≥25% off.
+  // The pct≥25 band catches cheap-but-very-off items (e.g. an $30 bottle
   // 80% missing) that the dollar bands ignore. Mirrors inventory-workflow.
   if (weeksActive >= 3 || absVar >= threshold || absQty >= SEVERITY_THRESHOLDS.bottleVariance * 3 || absPct >= 25) {
     return 'MEDIUM';
@@ -11418,8 +11436,8 @@ function scoreSeverity(item) {
 function needsRecount(severity /*, absVar */) {
   // v1.27: recount everything CRITICAL / HIGH / MEDIUM. The previous
   // version added an `absVar >= $100` gate on MEDIUM that excluded the
-  // $50Ã¢â‚¬â€œ$100 medium-severity items Ã¢â‚¬â€ too aggressive a filter. Matches
-  // inventory-workflow's needsRC rule: severity Ã¢Ë†Ë† {CRITICAL,HIGH,MEDIUM}.
+  // $50–$100 medium-severity items — too aggressive a filter. Matches
+  // inventory-workflow's needsRC rule: severity ∈ {CRITICAL,HIGH,MEDIUM}.
   return severity === 'CRITICAL' || severity === 'HIGH' || severity === 'MEDIUM';
 }
 
@@ -11500,7 +11518,7 @@ function renderVariancePage() {
   if (appState.varianceFilter === 'critical') filtered = rows.filter(r => r.severity === 'CRITICAL' || r.severity === 'HIGH');
   filtered.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity) || b.absVarianceValue - a.absVarianceValue);
 
-  // Render list Ã¢â‚¬â€ cap at 200 rows for perf, but tell the user how many are hidden
+  // Render list — cap at 200 rows for perf, but tell the user how many are hidden
   const VARIANCE_ROW_CAP = 200;
   const rowsHtml = filtered.slice(0, VARIANCE_ROW_CAP).map(r =>
     '<div class="var-row ' + (r.diff > 0 ? 'over' : r.diff < 0 ? 'under' : 'ok') + '">' +
@@ -11535,22 +11553,22 @@ function renderVariancePage() {
    substring-match raw lowercased names, so "Hennessy" in AVT would absorb
    counts from "Hennessy VS", "Hennessy XO", and "Hennessy Paradis" all at
    once and attribute them to the wrong row. The gated matcher rejects
-   pairs where size, vintage, or varietal explicitly conflict Ã¢â‚¬â€ pairs
+   pairs where size, vintage, or varietal explicitly conflict — pairs
    where one side has no token are still allowed through. Mirrors the
    gateParsedPair logic in the standalone inventory-workflow tool. */
 const AVT_SIZE_RE = /\b(750ml|1l|1\.5l|1\.75l|3l|6l|9l|15l|375ml|500ml|200ml|250ml|300ml|330ml|187ml|700ml|720ml|1\.8l)\b/i;
 /* v1.28: anchor on whitespace boundaries (or start/end) instead of \b so
-   `2000ml` doesn't get parsed as vintage `2000` Ã¢â‚¬â€ \b sits between digit
+   `2000ml` doesn't get parsed as vintage `2000` — \b sits between digit
    and non-digit, which fires inside `2000ml` (between `0` and `m`). The
    stricter anchor demands the year be its own token. */
 const AVT_VINTAGE_RE = /(?:^|\s)(19|20)\d{2}(?=\s|,|$)/;
 /* v1.28: longest-first ordering matters because the lookup walks in array
    order and returns first hit. "cabernet sauvignon" must be tried before
    "cabernet" so a Cab Sauv name doesn't get tagged as just "cabernet".
-   Dropped 'champagne' / 'prosecco' Ã¢â‚¬â€ those are categories, not varietals,
+   Dropped 'champagne' / 'prosecco' — those are categories, not varietals,
    and listing them caused "Veuve Clicquot Champagne" to get tagged
    varietal=champagne and reject merging with "Veuve Clicquot Brut" rows.
-   'rose' and 'rosÃƒÂ©' both map to canonical 'rose' via the extractor so the
+   'rose' and 'rosé' both map to canonical 'rose' via the extractor so the
    diacritic doesn't accidentally split rows. */
 const AVT_VARIETALS = [
   'cabernet sauvignon','sauvignon blanc','pinot noir','pinot grigio','pinot gris',
@@ -11573,8 +11591,8 @@ function _extractAvtVintage(name) {
   const yStr = (m[0].match(/(19|20)\d{2}/) || [])[0];
   if (!yStr) return null;
   const y = parseInt(yStr, 10);
-  // Only accept plausible wine vintages Ã¢â‚¬â€ strip 4-digit numbers that are
-  // likely UPCs/SKUs leaking into the name. 1900Ã¢â‚¬â€œcurrent+1 is the band.
+  // Only accept plausible wine vintages — strip 4-digit numbers that are
+  // likely UPCs/SKUs leaking into the name. 1900–current+1 is the band.
   if (y < 1900 || y > new Date().getFullYear() + 1) return null;
   return y;
 }
@@ -11582,7 +11600,7 @@ function _extractAvtVarietal(name) {
   const lower = (name || '').toLowerCase();
   for (const v of AVT_VARIETALS) {
     if (lower.includes(v)) {
-      // Canonicalize rosÃƒÂ© Ã¢â€ â€™ rose so the accented and unaccented spellings
+      // Canonicalize rosé → rose so the accented and unaccented spellings
       // don't split a wine into two distinct varietals.
       return v === 'ros\u00e9' ? 'rose' : v;
     }
@@ -11591,13 +11609,13 @@ function _extractAvtVarietal(name) {
 }
 
 /* True iff `a` and `b` could plausibly be the same product. Each gate
-   skipped if either side lacks the token Ã¢â‚¬â€ only firing rejection on an
+   skipped if either side lacks the token — only firing rejection on an
    explicit conflict.
 
    v1.28: previous version always fell back to substring match when no
    tokens fired, which defeated the point of the gates for bare brand
    names. "Hennessy" (raw) vs "Hennessy VS" both lack size/varietal/
-   vintage Ã¢â€ â€™ both gates skip Ã¢â€ â€™ substring `includes` matches Ã¢â€ â€™ counts
+   vintage → both gates skip → substring `includes` matches → counts
    wrongly absorbed. Now: substring fallback ONLY when at least one gate
    fired and confirmed a positive match. With zero gating signal we
    require exact normalized equality. */
@@ -11617,7 +11635,7 @@ function _avtNamesMatch(a, b) {
 
   // Count how many discriminating tokens we have evidence on. If none of
   // the gates fired (zero tokens on EITHER side), fall back to exact
-  // normalized equality only Ã¢â‚¬â€ substring match is too permissive.
+  // normalized equality only — substring match is too permissive.
   const hasAnyDiscriminator = !!(sa || sb || va || vb || xa || xb);
   if (!hasAnyDiscriminator) {
     return lo === lo2;
@@ -11718,7 +11736,7 @@ function updateVarianceActions() {
   const networked = !!(appState.audit && appState.audit.supabaseId);
 
   if (phase === 'count1' || phase === 'avt' || phase === 'pre') {
-    // Closing a shared Count 1 is manager+corporate only Ã¢â‚¬â€ same permission
+    // Closing a shared Count 1 is manager+corporate only — same permission
     // as the recount close. Counters keep counting; a manager flips the
     // phase. Solo audits are exempt.
     c1Btn.classList.toggle('hide', networked && !canCloseRecount);
@@ -11728,7 +11746,7 @@ function updateVarianceActions() {
   } else if (phase === 'review' || phase === 'count2') {
     c1Btn.classList.add('hide');
     // Recount close is manager+corporate only. Counters see their recount
-    // entries persist but the close button stays hidden Ã¢â‚¬â€ they just keep
+    // entries persist but the close button stays hidden — they just keep
     // recording until a manager closes the audit.
     c2Btn.classList.toggle('hide', !canCloseRecount);
     e1Btn.classList.remove('hide');
@@ -11775,7 +11793,7 @@ function closeCount1() {
 
   // Manager-only gate (same permission as closing the recount). The button
   // is role-gated in updateVarianceActions / renderCountPage, but a counter
-  // with a stale tab still reaches this branch Ã¢â‚¬â€ defense-in-depth.
+  // with a stale tab still reaches this branch — defense-in-depth.
   // Networked audits only (same pattern as endAuditEarly): a solo/local
   // audit is personal, so its counter may close their own Count 1.
   const networked = !!appState.audit.supabaseId;
@@ -11894,10 +11912,10 @@ function closeCount1() {
         let totalRows = 0;
         recountItems.forEach(item => {
           const zoneTotals = findCountedZonesForAvtItem(item.avt);
-          // No counted zones Ã¢â€ â€™ still create one row with zone='' so the item
+          // No counted zones → still create one row with zone='' so the item
           // doesn't disappear from the recount list. User answer #3: items
           // should always be in a zone, but we surface the unzoned ones
-          // explicitly rather than hiding them Ã¢â‚¬â€ counter notices and fixes.
+          // explicitly rather than hiding them — counter notices and fixes.
           const zonesList = zoneTotals.length > 0
             ? zoneTotals
             : [{ zone: '', qty: 0 }];
@@ -11951,7 +11969,7 @@ function closeCount1() {
               category: item.category || '',
               // Counted entries carry a master_items id; preserve it so the
               // recount row can write master_item_id (Path B). First non-empty
-              // masterId wins Ã¢â‚¬â€ same name across zones maps to one master.
+              // masterId wins — same name across zones maps to one master.
               masterId: item.masterId || null,
               zoneQtys: {},
             };
@@ -12000,7 +12018,7 @@ function closeCount1() {
       syncRecountsToSupabase().catch(function() {});
       showPage('recount');
     } finally {
-      // Always release the double-fire guard Ã¢â‚¬â€ an exception above would
+      // Always release the double-fire guard — an exception above would
       // otherwise leave closeCount1 permanently locked out.
       _closingCount1 = false;
     }
@@ -12060,7 +12078,7 @@ function closeCount2() {
   // 2026-05-27 after the item_id FK outage left counts incomplete). The
   // item_id fix + orphan heal paths have shipped, so every recount row must
   // again carry a manager decision, a reason, and a numeric recountQty
-  // before close Ã¢â‚¬â€ mirrors submitRecount's three hard checks.
+  // before close — mirrors submitRecount's three hard checks.
   const entries = Object.entries(appState.audit.recounts || {});
   const missingResult = entries.filter(([, r]) => !r.auditResult);
   if (missingResult.length > 0) {
@@ -12091,7 +12109,7 @@ function closeCount2() {
 let recountFilter = 'all';
 // v1.41: per-zone recount filter. 'all' = every zone; otherwise a specific
 // zone string. Counter on Main Bar picks "Main Bar" to focus their work.
-// No assigned-zone enforcement Ã¢â‚¬â€ onsite manager decides who counts what.
+// No assigned-zone enforcement — onsite manager decides who counts what.
 let recountZoneFilter = 'all';
 function setRecountZoneFilter(value) {
   recountZoneFilter = value || 'all';
@@ -12135,7 +12153,7 @@ function renderRecountPage() {
     '<div class="progress-bar"><div class="progress-fill" style="width:' + (totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0) + '%"></div></div>';
 
   // Populate the zone dropdown with whichever zones actually have recount
-  // rows. Sorted alpha; "Ã¢â‚¬â€" used for unzoned rows so the counter can see
+  // rows. Sorted alpha; "—" used for unzoned rows so the counter can see
   // they exist (per user direction: items should always have a zone, but
   // surface the unzoned ones explicitly rather than hiding them).
   const zonesPresent = Array.from(new Set(entries.map(function ([, r]) {
@@ -12163,7 +12181,7 @@ function renderRecountPage() {
     }
   }
 
-  // Filter Ã¢â‚¬â€ severity AND zone compose
+  // Filter — severity AND zone compose
   let filtered = entries;
   if (recountFilter === 'critical') filtered = filtered.filter(([, r]) => r.severity === 'CRITICAL');
   if (recountFilter === 'high')     filtered = filtered.filter(([, r]) => r.severity === 'HIGH');
@@ -12174,9 +12192,9 @@ function renderRecountPage() {
     });
   }
 
-  // Sort: zone (alpha) Ã¢â€ â€™ category (alpha) Ã¢â€ â€™ severity (CRITICAL first as a
+  // Sort: zone (alpha) → category (alpha) → severity (CRITICAL first as a
   // tie-breaker so within a (zone, category) the most urgent item leads).
-  // Items missing zone/category land at the end of the list under "Ã¢â‚¬â€".
+  // Items missing zone/category land at the end of the list under "—".
   filtered.sort((a, b) => {
     const az = (a[1].zone || '').toLowerCase();
     const bz = (b[1].zone || '').toLowerCase();
@@ -12213,12 +12231,12 @@ function renderRecountPage() {
       '<div class="focus-item ' + (isRecorded ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
       // BUG FIX (v1.40): wines have single quotes in their names
       // ('Special Selection', 'Yellow Label', etc). The previous inline
-      // onclick passed the key as a JS string literal Ã¢â‚¬â€ esc() turned `'`
+      // onclick passed the key as a JS string literal — esc() turned `'`
       // into `&#39;`, the browser decoded that back to `'` when reading
       // the attribute, and the resulting JS string had unescaped quotes
       // that broke the parse. Wine click silently no-op'd.
       // Switching to data-key + a delegated handler bypasses the JS-string
-      // escape problem entirely Ã¢â‚¬â€ the browser stores the key on the
+      // escape problem entirely — the browser stores the key on the
       // dataset, and we read it via el.dataset.key with no string parsing.
       'data-recount-key="' + esc(key) + '" ' +
       'onclick="openRecountEntryFromCard(this)" style="cursor:pointer">' +
@@ -12244,7 +12262,7 @@ function renderRecountPage() {
 }
 
 /* Delegated click handler for recount cards. Reads the row's data-recount-key
-   instead of receiving the key inline as a JS string Ã¢â‚¬â€ avoids the wine-quote
+   instead of receiving the key inline as a JS string — avoids the wine-quote
    parse bug where names like "Caymus, 'Special Selection'" broke onclick. */
 function openRecountEntryFromCard(el) {
   if (!el) return;
@@ -12280,9 +12298,9 @@ function openRecountEntry(key) {
     const priorLine = prior
       ? '<br><span style="color:var(--warning);font-weight:600">\u26a0 Previously recorded as ' + prior + ' \u2014 re-check before confirming</span>'
       : '';
-    // v1.41: each recount row IS one zone. Show that zone prominently Ã¢â‚¬â€
+    // v1.41: each recount row IS one zone. Show that zone prominently —
     // the modal hero is the counter's anchor for "where am I counting".
-    // No more multi-zone hint Ã¢â‚¬â€ the recount LIST shows the same item
+    // No more multi-zone hint — the recount LIST shows the same item
     // multiple times if it lives in multiple zones, so the counter sees
     // every zone they need to visit at the list level.
     const zoneLine = rec.zone
@@ -12299,7 +12317,7 @@ function openRecountEntry(key) {
   const dupe = document.getElementById('guidedDupeWarning');
   if (dupe) dupe.innerHTML = '';
 
-  // Pre-fill recount qty with whatever's stored Ã¢â‚¬â€ if nothing yet, default to
+  // Pre-fill recount qty with whatever's stored — if nothing yet, default to
   // the Count 1 number so a "Verified" row only needs one tap on Confirm.
   const qtyInput = document.getElementById('guidedQty');
   if (rec.recountQty != null) qtyInput.value = rec.recountQty;
@@ -12325,7 +12343,7 @@ function openRecountEntry(key) {
 
 function submitRecount() {
   if (!appState.audit?.recounts) return;
-  // Manager-only Ã¢â‚¬â€ counters can keep recording recount entries but cannot
+  // Manager-only — counters can keep recording recount entries but cannot
   // close the recount themselves. The button is also hidden for counters
   // (see renderRecountPage's footer toggle), this is the defense-in-depth.
   const role = appState.user && appState.user.role;
@@ -12333,7 +12351,7 @@ function submitRecount() {
     showToast('Only managers can close the recount', 'error');
     return;
   }
-  // Block close if any row hasn't been "recorded" Ã¢â‚¬â€ i.e., the manager
+  // Block close if any row hasn't been "recorded" — i.e., the manager
   // hasn't marked it Corrected or Verified yet. Quantity alone isn't
   // enough because the count may have stayed the same on purpose.
   // We also re-validate the reason text here even though the entry modal
@@ -12389,7 +12407,7 @@ function finalizeCount2() {
   // After the meta-sync succeeds, also kick off compute_avt_for_audit so
   // the variance screen populates without an admin Craftable upload.
   // The RPC is idempotent on (audit_id) so retries are safe. Failures
-  // here MUST NOT block audit close Ã¢â‚¬â€ log + queue, never throw.
+  // here MUST NOT block audit close — log + queue, never throw.
   const _auditSupabaseIdForAvt = appState.audit.supabaseId;
   syncAuditMetaToSupabase({
     count_phase: 'final',
@@ -12397,7 +12415,7 @@ function finalizeCount2() {
     completed_at:    appState.audit.completedAt,
     status: 'submitted',
   }).then(async function () {
-    // Solo (offline-only) audits have no supabaseId Ã¢â‚¬â€ nothing to compute.
+    // Solo (offline-only) audits have no supabaseId — nothing to compute.
     if (!_auditSupabaseIdForAvt) return;
     try {
       if (navigator.onLine) {
@@ -12725,7 +12743,7 @@ async function syncIssueResolutionToSupabase(issue) {
   };
   const appendNote = issue.resolveNotes ? ' [resolved: ' + issue.resolveNotes + ']' : '';
 
-  // supabaseRest never throws Ã¢â‚¬â€ failures come back in resp.error. Surface
+  // supabaseRest never throws — failures come back in resp.error. Surface
   // them and hand transient ones to the retry queue (same pattern as the
   // guided edit-in-place sync) so the desktop Issues screen heals.
   const _onFail = function (err, filter, body) {
@@ -12798,7 +12816,7 @@ function exportIssuesCSV() {
 }
 
 /* ================================================================
-   CSV EXPORTS Ã¢â‚¬â€ Count 1 and Count 2
+   CSV EXPORTS — Count 1 and Count 2
    Matches the format from the inventory workflow app.
    ================================================================ */
 function exportCountCSV(countNumber) {
@@ -12822,7 +12840,7 @@ function exportCountCSV(countNumber) {
     venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id);
   }
 
-  // Headers matching workflow app format Ã¢â‚¬â€ with Issues columns
+  // Headers matching workflow app format — with Issues columns
   const headers = [
     'Store', 'Source', 'Product', 'Category', 'Location', 'Zone',
     'Actual Qty (Craftable)', 'Theo Qty (Craftable)', 'Qty Variance (Craftable)',
@@ -12987,7 +13005,7 @@ function exportCountCSV(countNumber) {
 }
 
 /* ================================================================
-   RECOUNT LIST GENERATION (legacy Ã¢â‚¬â€ now uses AVT-based flow)
+   RECOUNT LIST GENERATION (legacy — now uses AVT-based flow)
    ================================================================ */
 function generateRecountList() {
   closeCount1();
@@ -12999,7 +13017,7 @@ function generateRecountList() {
    ================================================================ */
 let summaryAuditData = null;
 
-/* Historic audits fetched from Supabase Ã¢â‚¬â€ source of truth for completed
+/* Historic audits fetched from Supabase — source of truth for completed
    audits regardless of how long ago they happened. Seeded at boot, re-
    fetched when the summary page opens so newly-closed audits land too.
    Held in-memory only; not persisted. */
@@ -13301,7 +13319,7 @@ function renderAuditHistory() {
    FIX #7: Proper RFC 4180 quote escaping
    FIX (review): formula-injection guard. Cells starting with
      =, +, -, @, tab, or carriage return can execute as Excel
-     formulas when the CSV is opened in a spreadsheet app Ã¢â‚¬â€ prefix
+     formulas when the CSV is opened in a spreadsheet app — prefix
      those with a single quote so the spreadsheet treats them as
      text. Other cells are still always quoted (the original RFC
      4180 behavior, kept for compatibility with downstream parsers).
@@ -13465,8 +13483,8 @@ function confirmAsync(message) {
 /* ================================================================
    AI INTEGRATION
    - Two separate keys: OpenAI (image parsing) + Anthropic (chat)
-   - OpenAI GPT-4o mini Ã¢â€ â€™ Vision for label/bottle parsing (cheap + fast)
-   - Anthropic Claude Ã¢â€ â€™ Ask AI chat (better at long context)
+   - OpenAI GPT-4o mini → Vision for label/bottle parsing (cheap + fast)
+   - Anthropic Claude → Ask AI chat (better at long context)
    - Both keys stored per-device in localStorage (user-provided)
    ================================================================ */
 const AI_MODEL = 'claude-sonnet-4-5-20250929';          // chat model
@@ -13503,7 +13521,7 @@ function openAPIKeySettings() {
   var oaInput = document.getElementById('openaiKeyInput');
   var status = document.getElementById('apiKeyStatus');
 
-  // Anthropic field Ã¢â‚¬â€ masked placeholder if already saved
+  // Anthropic field — masked placeholder if already saved
   var anth = getStoredAPIKey();
   anthInput.value = '';
   anthInput.placeholder = anth
@@ -13740,7 +13758,7 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
   }
 
   // Resolve a UPC for this entry. Preference order:
-  //   1. UPC from the matched catalog row (most reliable Ã¢â‚¬â€ already known good)
+  //   1. UPC from the matched catalog row (most reliable — already known good)
   //   2. UPC the model reported back from the label or echoed from the catalog
   // Stored on the input's dataset so submitPhotoEntry can pass it through to
   // addCountEntry as the sku/upc field.
@@ -13778,12 +13796,12 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     // If the matched product comes in multiple sizes, prompt before locking
     // in. Counter feedback (Jonathan @ Poppy 2026-06): photo recognized
     // "Komos Reserva Anejo" but couldn't see the size, so a 1.5L got
-    // counted as 750ml. The picker pre-selects Claude's match Ã¢â‚¬â€ one tap
+    // counted as 750ml. The picker pre-selects Claude's match — one tap
     // confirms; one tap switches.
     var siblings = findSizeSiblings(matchedItem);
     if (siblings.length > 0) {
       showSizePicker(matchedItem, siblings, function (chosen) {
-        if (!chosen) return; // user dismissed by tapping outside Ã¢â‚¬â€ keep current
+        if (!chosen) return; // user dismissed by tapping outside — keep current
         if (String(chosen.id) === String(matchedItem.id)) return; // confirmed original
         applyMatch(chosen, { switched: true });
       });
@@ -13813,7 +13831,7 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     }
 
     // No exact catalog match. Per counter feedback we no longer auto-select
-    // the "Not in Craftable" issue here Ã¢â‚¬â€ counters were having to un-select
+    // the "Not in Craftable" issue here — counters were having to un-select
     // it on every photo even when the extracted info was usable. Leave the
     // issue unset; the counter tags it only if they actually want to.
     appState.photoIssue = 'none';
@@ -13843,7 +13861,7 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
 async function parseLabelWithClaude(imageDataUrl) {
   // Split the catalog into "carried" (this venue actually stocks it,
   // tracked in carriedSet) and "other" (broader inventory). Claude is
-  // instructed to try carried first Ã¢â‚¬â€ that's where almost every match
+  // instructed to try carried first — that's where almost every match
   // should land for a real audit. Both lists are alphabetized by name so
   // the prompt prefix is byte-stable and the Edge Function's cache hits.
   const toPayload = function (it) {
@@ -13876,7 +13894,7 @@ async function parseLabelWithClaude(imageDataUrl) {
     headers: {
       'Content-Type': 'application/json',
       // Edge Functions require an apikey or Authorization header. The
-      // anon key is fine Ã¢â‚¬â€ the function gates on its own ANTHROPIC_API_KEY
+      // anon key is fine — the function gates on its own ANTHROPIC_API_KEY
       // secret, not on Supabase auth.
       'apikey': SUPABASE_ANON_KEY,
       'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
@@ -13896,17 +13914,17 @@ async function parseLabelWithClaude(imageDataUrl) {
 
 /* ---------- parsePhotoLabel WRAPPER ---------- */
 /* Order of preference:
-   1. Claude (via Edge Function) Ã¢â‚¬â€ server-side key, best accuracy, no client setup
-   2. OpenAI Ã¢â‚¬â€ only if user pasted a personal key (legacy path)
-   3. Tesseract Ã¢â‚¬â€ on-device fallback for offline / both APIs failing
+   1. Claude (via Edge Function) — server-side key, best accuracy, no client setup
+   2. OpenAI — only if user pasted a personal key (legacy path)
+   3. Tesseract — on-device fallback for offline / both APIs failing
    The wrapper falls down the chain on each failure, so a flaky network or a
-   transient Anthropic 5xx won't leave the user stuck Ã¢â‚¬â€ Tesseract still runs. */
+   transient Anthropic 5xx won't leave the user stuck — Tesseract still runs. */
 async function parsePhotoLabel(imageDataUrl) {
   var statusEl = document.getElementById('parsingStatus');
 
   // Prefer Claude when the Supabase client is initialized (which means the
   // Edge Function URL is reachable in principle). No client-side key check
-  // needed Ã¢â‚¬â€ the key lives in supabase secrets.
+  // needed — the key lives in supabase secrets.
   if (typeof supabaseClient !== 'undefined' && supabaseClient) {
     try {
       statusEl.textContent = 'Analyzing with Claude\u2026';
@@ -13930,7 +13948,7 @@ async function parsePhotoLabel(imageDataUrl) {
   }
 
   if (!hasOpenAIKey()) {
-    // No OpenAI key either Ã¢â‚¬â€ use the original Tesseract flow as a final fallback
+    // No OpenAI key either — use the original Tesseract flow as a final fallback
     return parsePhotoLabelTesseract(imageDataUrl);
   }
 
@@ -13945,7 +13963,7 @@ async function parsePhotoLabel(imageDataUrl) {
     console.error('[OpenAI Vision] parse failed, falling back to OCR:', err);
     statusEl.textContent = 'AI failed (' + (err.message || 'unknown') + ') \u2014 using OCR fallback\u2026';
     statusEl.style.color = 'var(--warning)';
-    // Graceful fallback Ã¢â‚¬â€ never leave user stuck
+    // Graceful fallback — never leave user stuck
     try { await parsePhotoLabelTesseract(imageDataUrl); }
     catch (e2) {
       statusEl.textContent = 'Parsing failed. Enter details manually.';
@@ -14033,7 +14051,7 @@ async function sendAIMessage() {
   }
   appendChatBubble('user', userHtml);
 
-  // Build the API content Ã¢â‚¬â€ image first, then text (or text only)
+  // Build the API content — image first, then text (or text only)
   var content;
   if (imgAttached) {
     content = [
@@ -14123,7 +14141,7 @@ document.addEventListener('visibilitychange', function() {
   loadApprovedUpcMappings(false).catch(function() {});
 });
 
-// Public refresh hook Ã¢â‚¬â€ UI can call this from a button, and we expose it on
+// Public refresh hook — UI can call this from a button, and we expose it on
 // window so a counter can run kountRefresh() from the console as a panic
 // button if anything ever looks stale.
 window.kountRefresh = function () {
@@ -14144,7 +14162,7 @@ initUpcMappingsSync();
 if (appState.user) {
   if (appState.currentVenue) {
     document.getElementById('headerVenue').textContent = appState.currentVenue.name;
-    // Restored session Ã¢â‚¬â€ pull custom zones + start realtime for this venue
+    // Restored session — pull custom zones + start realtime for this venue
     loadVenueZonesFromSupabase(appState.currentVenue.id).catch(function() {});
     startVenueZonesRealtime(appState.currentVenue.id);
     // v1.45: reconcile the restored audit against the server before

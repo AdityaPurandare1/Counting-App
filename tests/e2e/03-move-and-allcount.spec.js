@@ -141,6 +141,48 @@ test.describe('move between zones + All Count', () => {
     }).toBe(10);
   });
 
+  test('This Zone: tap-to-edit qty + "+N" button add in the current zone (v1.71)', async ({ page, db }) => {
+    // Parity with All Count: the current-zone list now has the same
+    // tap-to-edit + bulk-add affordance, keyed to appState.currentZone, so a
+    // counter doesn't have to switch to All Count to "+6" a stack.
+    await addManual(page, 'Belvedere 1L', 3);             // Liquor Room (default zone)
+
+    // The This Zone card carries a tappable qty cell pre-filled with the current.
+    const zoneCard = card(page, 'Belvedere 1L');
+    const qtyCell = zoneCard.locator('.qty-editable').first();
+    await qtyCell.click();
+    let input = zoneCard.locator('input.qty-editable').first();
+    await input.waitFor({ state: 'visible' });
+    await expect(input).toHaveValue('3');
+
+    // Typing "+6" ADDS in the current zone (3 → 9), not SETs to 6.
+    await input.fill('+6');
+    await input.press('Enter');
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L' && i.zone === 'Liquor Room');
+      return it ? it.qty : null;
+    }).toBe(9);
+
+    // The explicit +N button opens the input pre-filled with "+".
+    await zoneCard.getByRole('button', { name: /Add multiple at once/i }).click();
+    input = zoneCard.locator('input.qty-editable').first();
+    await input.waitFor({ state: 'visible' });
+    await expect(input).toHaveValue('+');
+
+    // Counter types just "2" then Enter → 9 + 2 = 11, still in Liquor Room.
+    await input.press('2');
+    await input.press('Enter');
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L' && i.zone === 'Liquor Room');
+      return it ? it.qty : null;
+    }).toBe(11);
+    // DB row updated in place (single row, qty=11).
+    await expect.poll(() => {
+      const row = db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L');
+      return row ? row.qty : null;
+    }).toBe(11);
+  });
+
   test('All Count: move a per-zone entry to another zone (counter feedback @ Poppy, 2026-06)', async ({ page, db }) => {
     // Counter put an item in the wrong zone — previously they had to delete
     // and re-add. Now there's a ⇄ button on each zone row in All Count.
