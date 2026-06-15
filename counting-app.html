@@ -2999,7 +2999,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.69';
+const APP_VERSION = '1.70';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3735,24 +3735,7 @@ async function loadAvtFromSupabase() {
       return false;
     }
 
-    appState.avtData = rows.map(function(r) {
-      return {
-        store:         r.store || '',
-        venueId:       r.venue_id,
-        venueName:     r.venue_name || '',
-        itemName:      r.item_name,
-        category:      r.category || '',
-        actual:        Number(r.actual || 0),
-        theo:          Number(r.theo || 0),
-        variance:      Number(r.variance || 0),
-        varianceValue: Number(r.variance_value || 0),
-        variancePct:   Number(r.variance_pct || 0),
-        cuPrice:       Number(r.cu_price || 0),
-        start:         Number(r.start_qty || 0),
-        purchases:     Number(r.purchases || 0),
-        depletions:    Number(r.depletions || 0),
-      };
-    });
+    appState.avtData = rows.map(_mapAvtRow);
     appState.avtUploadedAt = report.uploaded_at;
     appState.avtStores = Array.from(new Set(rows.map(function(r) { return r.store; }).filter(Boolean)));
     saveState();
@@ -3775,6 +3758,76 @@ async function loadAvtFromSupabase() {
     return true;
   } catch (e) {
     console.warn('[avt] Supabase load failed, keeping local copy:', e);
+    return false;
+  }
+}
+
+// Map a kount_avt_rows row into the appState.avtData shape. Factored out of
+// loadAvtFromSupabase so loadAvtForAudit can reuse the exact same mapping.
+function _mapAvtRow(r) {
+  return {
+    store:         r.store || '',
+    venueId:       r.venue_id,
+    venueName:     r.venue_name || '',
+    itemName:      r.item_name,
+    category:      r.category || '',
+    actual:        Number(r.actual || 0),
+    theo:          Number(r.theo || 0),
+    variance:      Number(r.variance || 0),
+    varianceValue: Number(r.variance_value || 0),
+    variancePct:   Number(r.variance_pct || 0),
+    cuPrice:       Number(r.cu_price || 0),
+    start:         Number(r.start_qty || 0),
+    purchases:     Number(r.purchases || 0),
+    depletions:    Number(r.depletions || 0),
+  };
+}
+
+// v1.70: load the freshly-computed report for a SPECIFIC audit into
+// appState.avtData. Unlike loadAvtFromSupabase (which picks the venue-latest
+// report), this targets the exact report produced by compute_avt_for_audit
+// for this audit — so closeCount1 / finalizeCount2 generate variance from the
+// report they just computed, not a stale venue-wide one. Returns the number of
+// rows loaded (0 = computed but no rows, false on hard failure).
+async function loadAvtForAudit(auditId) {
+  if (!auditId) return false;
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  try {
+    // Newest computed report for this audit. The RPC is idempotent on
+    // audit_id but a re-run inserts a fresh report row, so order desc + limit 1.
+    var repResp = await supabaseRest.query(
+      'kount_avt_reports',
+      'select=*&audit_id=eq.' + encodeURIComponent(auditId) +
+        '&source=eq.computed&order=uploaded_at.desc&limit=1'
+    );
+    if (repResp.error || !repResp.data || repResp.data.length === 0) return false;
+    var report = repResp.data[0];
+
+    // Pull all rows for that report, paginated (same shape as loadAvtFromSupabase).
+    var rows = [];
+    var PAGE = 1000;
+    var MAX_PAGES = 100;
+    for (var p = 0; p < MAX_PAGES; p++) {
+      var qs = 'select=*&report_id=eq.' + encodeURIComponent(report.id) +
+               '&order=item_name&limit=' + PAGE + '&offset=' + (p * PAGE);
+      var pg = await supabaseRest.query('kount_avt_rows', qs);
+      if (pg.error || !pg.data || pg.data.length === 0) break;
+      rows = rows.concat(pg.data);
+      if (pg.data.length < PAGE) break;
+    }
+
+    appState.avtData = rows.map(_mapAvtRow);
+    appState.avtUploadedAt = report.uploaded_at;
+    appState.avtStores = Array.from(new Set(rows.map(function(r) { return r.store; }).filter(Boolean)));
+    saveState();
+    console.log('[avt] loaded ' + rows.length + ' rows for audit ' + auditId + ' (report ' + report.id + ')');
+
+    // Refresh the variance view if the user is on it.
+    var currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage && currentPage.id === 'page-variance') renderVariancePage();
+    return rows.length;
+  } catch (e) {
+    console.warn('[avt] loadAvtForAudit failed:', e);
     return false;
   }
 }
@@ -11747,14 +11800,16 @@ function closeCount1() {
     return;
   }
 
-  const avtData = appState.avtData || [];
-  const hasAvt = avtData.length > 0;
+  // v1.70: closeCount1 now COMPUTES the variance at close (computed AVT is the
+  // product; Craftable pre-loads are gone). The recount list is built from the
+  // freshly-computed report, so the message no longer depends on a stale
+  // appState.avtData snapshot.
+  const networkedAudit = !!appState.audit.supabaseId;
+  const msg = networkedAudit
+    ? 'Close Count 1? This computes variance from POS + recipes + purchases and generates the recount list.'
+    : 'Close Count 1? This is a local audit \u2014 the recount list will include all counted items for verification.';
 
-  const msg = hasAvt
-    ? 'Close Count 1? This will compare against the AVT report and generate the recount list.'
-    : 'Close Count 1? No AVT data available \u2014 the recount list will include all counted items for verification. An AVT report is computed automatically when Count 2 closes.';
-
-  showConfirm(msg, () => {
+  showConfirm(msg, async () => {
     if (_closingCount1) return;
     // Re-check the phase at confirm-accept time: the dialog can sit open
     // while another manager closes Count 1 (realtime flips countPhase), and
@@ -11773,11 +11828,54 @@ function closeCount1() {
       appState.audit.count1ClosedAt = new Date().toISOString();
       appState.audit.countPhase = 'review';
 
+      const auditSupabaseId = appState.audit.supabaseId;
+
       // Propagate to Supabase so the desktop sees the phase flip live (v1.7).
-      syncAuditMetaToSupabase({
+      // AWAIT it for networked audits so compute_avt_for_audit reads the
+      // count1_closed_at it depends on (migration 0038 ends the AVT window at
+      // coalesce(count2_closed_at, completed_at, count1_closed_at)).
+      const metaSync = syncAuditMetaToSupabase({
         count_phase: 'review',
         count1_closed_at: appState.audit.count1ClosedAt,
-      }).catch(() => {});
+      });
+      if (auditSupabaseId) {
+        try { await metaSync; } catch (e) {}
+      } else {
+        metaSync.catch(() => {});
+      }
+
+      // v1.70: compute the variance now and load THIS audit's report. The
+      // outcome decides which recount list we build:
+      //   computeOk + rows  -> variance-driven recount (generateRecountFromAvt)
+      //   computeOk + 0 rows -> legitimate "nothing to recount" (empty list)
+      //   compute failed     -> all-items fallback + warn toast + queue retry
+      //   not networked      -> all-items (local audit, no POS link)
+      let computeOk = false;
+      if (auditSupabaseId && navigator.onLine) {
+        try {
+          const { error } = await supabaseRest.rpc(
+            'compute_avt_for_audit',
+            { p_audit_id: auditSupabaseId }
+          );
+          if (error) {
+            console.warn('[avt] compute_avt_for_audit (count1) failed:', error.message || error);
+            enqueueComputeAvt(auditSupabaseId);
+          } else {
+            // Suppress the realtime echo for our own RPC-triggered insert.
+            _avtSelfComputedAuditId = auditSupabaseId;
+            setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+            // Load the report we just produced (by audit_id, not venue-latest).
+            const loaded = await loadAvtForAudit(auditSupabaseId);
+            computeOk = (loaded !== false);
+          }
+        } catch (e) {
+          console.warn('[avt] compute_avt_for_audit (count1) threw:', e);
+          enqueueComputeAvt(auditSupabaseId);
+        }
+      }
+
+      const avtData = appState.avtData || [];
+      const hasAvt = computeOk && avtData.length > 0;
 
       // Generate recount list
       appState.audit.recounts = {};
@@ -11791,7 +11889,7 @@ function closeCount1() {
       const recountKey = function (name, zone) { return String(name) + '|' + String(zone || ''); };
 
       if (hasAvt) {
-        // AVT-based recount: flag items with high variance from Craftable data
+        // AVT-based recount: flag items whose computed variance is significant.
         const recountItems = generateRecountFromAvt();
         let totalRows = 0;
         recountItems.forEach(item => {
@@ -11827,12 +11925,23 @@ function closeCount1() {
             totalRows++;
           });
         });
-        logActivity('Count 1 closed (AVT). ' + recountItems.length + ' items / ' + totalRows + ' zone rows flagged for recount.');
-        showToast('Count 1 closed. ' + totalRows + ' rows need recount across ' + recountItems.length + ' items.', 'success');
+        if (totalRows === 0) {
+          // Computed cleanly but nothing crosses the recount threshold. This is
+          // a legitimate outcome, not an error: don't strand the user on an
+          // empty page with no explanation. The recount page + Count-2 close
+          // path both work with zero rows (closeCount2's gates short-circuit on
+          // an empty entries list), so finalize stays reachable.
+          logActivity('Count 1 closed (computed). No significant variance — no items flagged for recount.');
+          showToast('Count 1 closed — no significant variance, no items need recount. You can finalize the audit.', 'success');
+        } else {
+          logActivity('Count 1 closed (computed). ' + recountItems.length + ' items / ' + totalRows + ' zone rows flagged for recount.');
+          showToast('Count 1 closed. ' + totalRows + ' rows need recount across ' + recountItems.length + ' items.', 'success');
+        }
       } else {
-        // No AVT: create recount rows from ALL counted items so counters can verify.
-        // One row per (item, zone) so the same item across zones gets multiple
-        // independent recount targets.
+        // No usable computed AVT (compute failed / offline / not bridged /
+        // local audit): create recount rows from ALL counted items so counters
+        // can verify. One row per (item, zone) so the same item across zones
+        // gets multiple independent recount targets.
         const byName = {};
         allItems.forEach(item => {
           const key = item.name;
@@ -11866,7 +11975,7 @@ function closeCount1() {
               count1Qty: qty,                  // per-zone qty
               recountQty: null,
               status: 'pending',
-              notes: 'No AVT data \u2014 verify count',
+              notes: 'No variance data \u2014 verify count',
               zone: zone,
               category: entry.category,
               auditResult: null,
@@ -11875,8 +11984,14 @@ function closeCount1() {
             totalRows++;
           });
         });
-        logActivity('Count 1 closed (no AVT). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
-        showToast('Count 1 closed. ' + totalRows + ' rows listed for recount verification.', 'success');
+        logActivity('Count 1 closed (all-items fallback). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
+        if (networkedAudit) {
+          // Networked but compute didn't produce a usable report: tell the user
+          // why every item is listed and that a retry is queued.
+          showToast('Variance couldn\u2019t be computed (offline or no POS link) \u2014 recount list shows all counted items.', 'warning');
+        } else {
+          showToast('Count 1 closed. ' + totalRows + ' rows listed for recount verification.', 'success');
+        }
       }
 
       saveState();
@@ -12293,18 +12408,25 @@ function finalizeCount2() {
         if (error) {
           console.warn('[avt] compute_avt_for_audit RPC failed:', error.message || error);
           enqueueComputeAvt(_auditSupabaseIdForAvt);
+          // v1.70: surface the failure (was silent). The audit is already
+          // submitted at this point — close never blocks on compute.
+          showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
         } else {
           // Suppress the realtime echo for our own RPC-triggered insert.
           _avtSelfComputedAuditId = _auditSupabaseIdForAvt;
           setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
           console.log('[avt] computed report id:', reportId);
+          // v1.70: reload the final report so the Variance tab shows it now.
+          await loadAvtForAudit(_auditSupabaseIdForAvt);
         }
       } else {
         enqueueComputeAvt(_auditSupabaseIdForAvt);
+        showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
       }
     } catch (e) {
       console.warn('[avt] compute_avt_for_audit threw:', e);
       enqueueComputeAvt(_auditSupabaseIdForAvt);
+      showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
     }
   }).catch(() => {});
 

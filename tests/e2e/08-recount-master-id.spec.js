@@ -19,8 +19,13 @@ test.describe('M1: kount_recounts.master_item_id', () => {
     expect((await page.evaluate(() => window.getAllCountedItems()))
       .find(i => i.name === 'Belvedere 1L').masterId).toBe(M.belv);
 
-    // No AVT uploaded → closeCount1 takes the all-counted-items fallback branch
-    // that derives recount rows from counted entries (and so carries masterId).
+    // v1.70: closeCount1 normally COMPUTES variance and builds the recount list
+    // from the (name-derived, masterId=null) AVT rows. The all-counted-items
+    // fallback — which preserves masterId — fires when compute can't run. Force
+    // that path by going offline before the close (the warning toast confirms
+    // the fallback). syncRecountsToSupabase still reaches the in-process mock.
+    await page.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }); });
+
     await page.locator('#closeCount1Bar').getByRole('button', { name: /Close Count 1/i }).click();
     await page.locator('#confirmDialog').waitFor({ state: 'visible' });
     await page.evaluate(() => window.closeConfirm(true));
@@ -40,39 +45,17 @@ test.describe('M1: kount_recounts.master_item_id', () => {
   test('AVT/name-derived recount row carries master_item_id = null', async ({ page, db }) => {
     await startAuditAs(page, 'manager');
 
-    // Count a catalog item so the audit is non-empty. (When AVT is present,
-    // closeCount1 builds the recount list purely from AVT variance items via
-    // generateRecountFromAvt — it does NOT fold in counted-derived rows, so the
-    // only synced recount row here is the AVT one we assert on below.)
+    // Count a catalog item so the audit is non-empty. v1.70: closeCount1
+    // computes variance and builds the recount list purely from the AVT rows
+    // (generateRecountFromAvt) — it does NOT fold in counted-derived rows. AVT
+    // rows are name-derived from the variance report and carry no master id, so
+    // the synced recount row must have master_item_id = null even though the
+    // counted entry it corresponds to DID link a master.
     await addManual(page, 'Belvedere 1L', 3);
 
-    // Seed an AVT report into the mock for an item that is NOT in the catalog,
-    // so the recount row it generates is name-derived with no master id. A large
-    // variance_value scores HIGH → needsRecount() flags it. venue_id must match
-    // the active venue (v-delilah) or generateRecountFromAvt filters it out.
-    // We drive the app's real loadAvtFromSupabase() (reads kount_avt_reports +
-    // kount_avt_rows) rather than poking module-private appState directly.
-    // v1.62: report selection filters venue_ids (text[]) with the PostgREST
-    // contains operator (`venue_ids=cs.{venue}`) and prefers source ASC
-    // ('computed' < 'uploaded'), newest first — so the seed must carry the
-    // venue_ids array or the report is correctly filtered out.
-    db.t.kount_avt_reports = [{
-      id: 'avt-rep-1', venue_id: 'v-delilah', venue_ids: ['v-delilah'],
-      source: 'uploaded', uploaded_at: '2026-05-27T12:00:00Z',
-    }];
-    db.t.kount_avt_rows = [{
-      id: 'avt-row-1', report_id: 'avt-rep-1', store: 'Delilah LA',
-      venue_id: 'v-delilah', venue_name: 'Delilah LA',
-      item_name: 'Phantom Amaro 700ml', category: 'Liquor Cost',
-      actual: 0, theo: 12, variance: -12, variance_value: 9999, variance_pct: -100,
-      cu_price: 50, start_qty: 12, purchases: 0, depletions: 0,
-    }];
-    // Load it through the real code path (returns a promise that resolves true
-    // once appState.avtData is populated from the seeded rows).
-    const loaded = await page.evaluate(() => window.loadAvtFromSupabase());
-    expect(loaded, 'loadAvtFromSupabase must pick up the seeded AVT report').toBe(true);
-
-    // With AVT present, closeCount1 takes the AVT branch (masterId: null).
+    // The mock's compute_avt_for_audit stub emits a HIGH-variance Belvedere row
+    // (actual 1 vs theo 6 → flagged). Close Count 1 to drive compute → load →
+    // generateRecountFromAvt → syncRecountsToSupabase.
     await page.locator('#closeCount1Bar').getByRole('button', { name: /Close Count 1/i }).click();
     await page.locator('#confirmDialog').waitFor({ state: 'visible' });
     await page.evaluate(() => window.closeConfirm(true));
@@ -80,7 +63,7 @@ test.describe('M1: kount_recounts.master_item_id', () => {
 
     await expect.poll(() => db.t.kount_recounts.length).toBeGreaterThan(0);
 
-    const avtRow = db.t.kount_recounts.find(r => r.item_name === 'Phantom Amaro 700ml');
+    const avtRow = db.t.kount_recounts.find(r => r.item_name === 'Belvedere 1L');
     expect(avtRow, 'the AVT-flagged item must produce a recount row').toBeTruthy();
     // M1: AVT/name-derived rows legitimately carry null.
     expect(avtRow.master_item_id).toBeNull();

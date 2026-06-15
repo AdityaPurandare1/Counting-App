@@ -12,6 +12,17 @@ test.describe('Count 1 → Count 2 lifecycle', () => {
     await page.evaluate(() => window.closeConfirm(true));
     await expect.poll(() => db.t.kount_audits[0].count_phase).toBe('review');
 
+    // v1.70: closing Count 1 on a networked audit COMPUTES variance (the mock
+    // compute_avt_for_audit stub emits a HIGH-variance Belvedere row), so the
+    // recount list is variance-driven, not all-items. The Belvedere row is
+    // present; the zero-variance Tito's row is NOT flagged.
+    await expect.poll(() => db.t.kount_avt_reports.filter(r => r.audit_id === db.t.kount_audits[0].id && r.source === 'computed').length).toBe(1);
+    await expect.poll(() => page.evaluate(() => Object.keys((appState.audit && appState.audit.recounts) || {}).length), { timeout: 5000 }).toBeGreaterThan(0);
+    const recountNames = await page.evaluate(() =>
+      Object.values(appState.audit.recounts).map((r) => r.itemName));
+    expect(recountNames).toContain('Belvedere 1L');
+    expect(recountNames).not.toContain("Tito's Handmade Vodka 750ml");
+
     // v1.62: the strict close gate is RESTORED — every recount row needs a
     // manager decision + reason + numeric recountQty before Count 2 can
     // close (the 2026-05-27 relaxed bypass is gone). Complete the rows the

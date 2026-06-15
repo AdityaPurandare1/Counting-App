@@ -223,7 +223,76 @@ class MockDB {
     }
     if (fn === 'find_auth_user_by_email') return { status: 200, body: null };
     if (fn === 'list_auth_user_emails') return { status: 200, body: [] };
+    if (fn === 'compute_avt_for_audit') return this.computeAvtForAudit(args || {});
     return { status: 200, body: { ok: true } };
+  }
+
+  /* Faithful stub for the compute_avt_for_audit RPC (migration 0038). The
+     real function computes theoretical-vs-actual variance from POS + recipes +
+     purchases + starts and inserts a source='computed' kount_avt_reports row
+     (+ its kount_avt_rows) for the audit's venue. It's now called at COUNT 1
+     CLOSE (not just count 2), so the count-1 compute → loadAvtForAudit →
+     generateRecountFromAvt path must be exercised end to end.
+
+     We can't reproduce the real arithmetic in the mock, so we synthesize a
+     deterministic report: one HIGH-variance row whose item_name matches what
+     the lifecycle test counts (Belvedere 1L) so a recount IS generated, plus
+     a zero-variance row so the "nothing flagged" branch has data to ignore.
+     Returns the new report id (the RPC returns the report uuid). */
+  computeAvtForAudit(args) {
+    const auditId = args.p_audit_id;
+    const audit = this.t.kount_audits.find(function (a) { return a.id === auditId; });
+    if (!audit) return err(400, '22P02', 'audit not found: ' + auditId);
+    const venueId = audit.venue_id;
+    const venue = this.t.kount_venues.find(function (v) { return v.id === venueId; });
+    const venueName = venue ? venue.name : '';
+
+    const reportId = uuid();
+    const now = new Date().toISOString();
+    if (!this.t.kount_avt_reports) this.t.kount_avt_reports = [];
+    if (!this.t.kount_avt_rows) this.t.kount_avt_rows = [];
+
+    // Idempotent-ish: drop any prior computed report for this audit so a
+    // re-run (count 1 then count 2) leaves a single current report, like the
+    // real RPC's upsert-on-audit behavior.
+    const self = this;
+    this.t.kount_avt_reports = this.t.kount_avt_reports.filter(function (r) {
+      if (r.audit_id === auditId && r.source === 'computed') {
+        self.t.kount_avt_rows = self.t.kount_avt_rows.filter(function (row) { return row.report_id !== r.id; });
+        return false;
+      }
+      return true;
+    });
+
+    this.t.kount_avt_reports.push({
+      id: reportId,
+      audit_id: auditId,
+      venue_ids: [venueId],          // text[]: the v1.62 venue-scoped selection
+      source: 'computed',
+      uploaded_at: now,
+      computed_at: now,
+    });
+
+    const mkRow = function (name, category, actual, theo, cuPrice) {
+      const variance = actual - theo;                 // qty variance
+      const varianceValue = variance * cuPrice;        // $ variance
+      const variancePct = theo ? (variance / theo) * 100 : 0;
+      return {
+        id: uuid(), report_id: reportId, venue_id: venueId, venue_name: venueName,
+        store: venueName, item_name: name, category: category,
+        actual: actual, theo: theo, variance: variance,
+        variance_value: varianceValue, variance_pct: variancePct,
+        cu_price: cuPrice, start_qty: 0, purchases: 0, depletions: 0,
+      };
+    };
+
+    // HIGH-variance liquor row: $150 over the $50 liquor threshold → MEDIUM+
+    // → needsRecount() true → a recount row is generated for Belvedere 1L.
+    this.t.kount_avt_rows.push(mkRow('Belvedere 1L', 'Liquor Cost', 1, 6, 30));
+    // Zero-variance row that must NOT be flagged.
+    this.t.kount_avt_rows.push(mkRow("Tito's Handmade Vodka 750ml", 'Liquor Cost', 4, 4, 20));
+
+    return { status: 200, body: reportId };
   }
 
   edge(fn, headers, body) {

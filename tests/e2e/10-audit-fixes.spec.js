@@ -12,11 +12,18 @@ test.describe('v1.62 audit fixes', () => {
     await startAuditAs(page, 'manager');
     await addManual(page, 'Belvedere 1L', 3);
 
-    // Close Count 1 → review (generates pending recount rows, no AVT).
+    // Close Count 1 → review. v1.70: this computes variance (mock stub emits a
+    // HIGH-variance Belvedere row), so the recount list is variance-driven and
+    // has at least one pending row to gate on below.
     await page.locator('#closeCount1Bar').getByRole('button', { name: /Close Count 1/i }).click();
     await page.locator('#confirmDialog').waitFor({ state: 'visible' });
     await page.evaluate(() => window.closeConfirm(true));
     await expect.poll(() => db.t.kount_audits[0].count_phase).toBe('review');
+    // v1.70: the recount list is built AFTER the async compute+load in the
+    // close callback — wait for it to populate before exercising the gate.
+    await expect
+      .poll(() => page.evaluate(() => Object.keys((appState.audit && appState.audit.recounts) || {}).length), { timeout: 5000 })
+      .toBeGreaterThan(0);
 
     // 1) No decision yet → hard toast, no confirm dialog, nothing submitted.
     await page.evaluate(() => window.closeCount2());

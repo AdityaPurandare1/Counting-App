@@ -97,9 +97,12 @@ test.describe('M1: kount_recounts.master_item_id (hydrated entry)', () => {
       'PRE-FIX this is null (masterId came from the null item_id); the fix maps it from master_item_id'
     ).toBe(M.belv);
 
-    // No AVT uploaded → closeCount1 takes the all-counted-items branch, which
-    // derives the recount row from the (hydrated) counted entry and carries its
-    // masterId through to syncRecountsToSupabase.
+    // v1.70: closeCount1 normally computes variance (AVT rows carry null
+    // masterId). The all-counted-items branch — which preserves the hydrated
+    // entry's masterId — fires when compute can't run, so go offline to take it.
+    // (syncRecountsToSupabase still reaches the in-process mock.)
+    await page.evaluate(() => { Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }); });
+
     await page.locator('#closeCount1Bar').getByRole('button', { name: /Close Count 1/i }).click();
     await page.locator('#confirmDialog').waitFor({ state: 'visible' });
     await page.evaluate(() => window.closeConfirm(true));

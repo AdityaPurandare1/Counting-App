@@ -61,6 +61,9 @@ function seed() {
     kount_recounts: [],
     kount_pending_items: [],
     kount_venue_zones: [],
+    // v1.70: compute_avt_for_audit (called at count-1 close now) inserts here.
+    kount_avt_reports: [],
+    kount_avt_rows: [],
   };
 }
 
