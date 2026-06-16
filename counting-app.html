@@ -2997,10 +2997,19 @@ html, body {
 const VARIANCE_THRESHOLD = 10; // percent
 const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 
+/* Max reference/browse rows to render at once when there's no search query.
+   The List tab and the zone "expected here" reference used to render the
+   ENTIRE carried catalog (hundreds–thousands of DOM rows) on every render —
+   that was the live lag complaint. We cap the rendered rows and tell the
+   counter to search to narrow. Counted items in a zone are always shown in
+   full; only the reference/browse lists are capped. Search results have their
+   own limit (searchItemMaster's `limit`). */
+const REFERENCE_RENDER_CAP = 150;
+
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.72';
+const APP_VERSION = '1.73';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3381,7 +3390,6 @@ function findSizeSiblings(matchedItem) {
   if (!matchedItem || !matchedItem.name) return [];
   const baseKey = stripSizeTokens(matchedItem.name);
   if (!baseKey || baseKey.length < 3) return [];
-  const SIZE_IN_NAME = /\b\d+(?:\.\d+)?\s*(?:ml|cl|l|oz|liter|litre|gal)\b/i;
   const out = [];
   for (let i = 0; i < itemMaster.length; i++) {
     const it = itemMaster[i];
@@ -3394,6 +3402,51 @@ function findSizeSiblings(matchedItem) {
     if (!hasSize) continue;
     if (stripSizeTokens(it.name) === baseKey) out.push(it);
   }
+  return out;
+}
+
+/* True if a product name embeds an explicit bottle size (750ml, 1L, 1.5L,
+   70cl, …). Shared regex used by the dedupe builder below and matches the
+   SIZE_IN_NAME idiom inside findSizeSiblings. */
+const SIZE_IN_NAME = /\b\d+(?:\.\d+)?\s*(?:ml|cl|l|oz|liter|litre|gal)\b/i;
+
+/* Build the deduped DISPLAY catalog from the full itemMaster.
+
+   The master_items catalog carries dup-canon pairs: a bare-name row and a
+   size-suffixed row for the SAME product+size (e.g. "1800 Anejo Cristalino"
+   AND "1800 Anejo Cristalino 750ml"; "1800 Reposado" AND "1800 Reposado 1L").
+   Counters browsing the List/reference see the product twice. We collapse
+   those pairs here, preferring the sized name, WITHOUT mutating itemMaster
+   (every row stays resolvable by id).
+
+   Grouping is by stripSizeTokens(name) (the base product key, size removed):
+   - If a group has BOTH sized and bare variants, drop the bare ones and keep
+     every sized one (multiple legit sizes stay — 750ml AND 1L).
+   - If a group has ONLY bare variants (no sized twin), keep them all — they're
+     distinct no-size products, not dupes.
+   - Rows whose base key is empty/too short (<3) are kept as-is (can't group
+     them safely). */
+function buildItemMasterDisplay() {
+  const groups = new Map(); // baseKey -> array of items
+  const out = [];
+  for (let i = 0; i < itemMaster.length; i++) {
+    const it = itemMaster[i];
+    if (!it || !it.name) { out.push(it); continue; }
+    const baseKey = stripSizeTokens(it.name);
+    if (!baseKey || baseKey.length < 3) { out.push(it); continue; }
+    if (!groups.has(baseKey)) groups.set(baseKey, []);
+    groups.get(baseKey).push(it);
+  }
+  groups.forEach(function (members) {
+    const sized = members.filter(function (it) {
+      return (it.size && String(it.size).trim()) || SIZE_IN_NAME.test(it.name);
+    });
+    // Both sized + bare present → keep only sized (drop the bare twin).
+    // Otherwise keep everything in the group.
+    const kept = (sized.length > 0 && sized.length < members.length) ? sized : members;
+    for (let i = 0; i < kept.length; i++) out.push(kept[i]);
+  });
+  itemMasterDisplay = out;
   return out;
 }
 
@@ -3465,8 +3518,12 @@ function searchItemMaster(query, limit) {
   const useCarried = carriedSet.size > 0;
 
   function pushFiltered(carriedWanted, sizedWanted) {
-    for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
-      const item = itemMaster[i];
+    // Search the DEDUPED display catalog so bare-name twins of size-suffixed
+    // products don't surface as separate hits. Id-based lookups elsewhere
+    // still use the full itemMaster.
+    const source = (itemMasterDisplay && itemMasterDisplay.length) ? itemMasterDisplay : itemMaster;
+    for (let i = 0; i < source.length && results.length < limit; i++) {
+      const item = source[i];
       if (have.has(item.id)) continue;
       const isCarried = useCarried && carriedSet.has(String(item.id));
       if (carriedWanted !== null && isCarried !== carriedWanted) continue;
@@ -4421,6 +4478,13 @@ function seededRandom(seed, max) {
    ITEM MASTER (simulates Keva/Supabase data)
    ================================================================ */
 let itemMaster = [];
+/* Deduped DISPLAY catalog derived from itemMaster (built by
+   buildItemMasterDisplay). itemMaster itself stays COMPLETE so id-based
+   lookups (scan resolver, openGuidedEntry, UPC mapping) never lose a row;
+   browse/search/list/reference render from this deduped view instead so the
+   bare-name twin of a size-suffixed product (e.g. "1800 Anejo Cristalino"
+   alongside "1800 Anejo Cristalino 750ml") doesn't show up twice. */
+let itemMasterDisplay = [];
 let itemMasterLoaded = false;
 
 /* ================================================================
@@ -4441,7 +4505,8 @@ async function loadItemMaster() {
     itemMaster = mapSupabaseToItemMaster(supabaseItems);
     itemMasterLoaded = true;
     mergeCustomItemsIntoMaster();
-    console.log('Item master from Supabase: ' + itemMaster.length + ' items');
+    buildItemMasterDisplay();
+    console.log('Item master from Supabase: ' + itemMaster.length + ' items (display: ' + itemMasterDisplay.length + ')');
     showToast(itemMaster.length + ' items loaded from database', 'success');
     validateItemMaster('supabase');
     var currentPage = document.querySelector('.page:not(.hide)');
@@ -4471,7 +4536,8 @@ async function loadItemMaster() {
 
     itemMasterLoaded = true;
     mergeCustomItemsIntoMaster();
-    console.log('Item master from items.json: ' + itemMaster.length + ' items');
+    buildItemMasterDisplay();
+    console.log('Item master from items.json: ' + itemMaster.length + ' items (display: ' + itemMasterDisplay.length + ')');
     showToast(itemMaster.length + ' items loaded', 'success');
     validateItemMaster('items.json');
 
@@ -6457,6 +6523,7 @@ function addCustomItem(name, brand, category, subcategory, upc) {
 
   // Also add to live itemMaster so it's immediately searchable
   itemMaster.push(item);
+  buildItemMasterDisplay();
 
   console.log('Custom item added: ' + name + ' (ID: ' + id + ')');
   return id;
@@ -6568,6 +6635,7 @@ async function createMasterItemFromApp(payload) {
     category: master.category, subcategory: '',
     sku: upcDigits || '', upc: upcDigits || '', par: 0, expectedQty: 0,
   });
+  buildItemMasterDisplay();
   try { carriedSet.add(String(master.id)); } catch (e) {}
   logActivity('Created catalog item "' + master.name + '"');
   showToast('Added to catalog: ' + master.name, 'success');
@@ -8014,9 +8082,13 @@ function setCountView(v) {
    is empty (no admin curation yet) we fall back to the whole catalog so the
    list is never blank. */
 function getCarriedMasterItems() {
+  // Derive from the DEDUPED display catalog so the List tab and zone reference
+  // show one row per product (the properly-sized variant), not the bare-name
+  // twin too. Full itemMaster stays the source for id-based lookups.
+  const source = (itemMasterDisplay && itemMasterDisplay.length) ? itemMasterDisplay : itemMaster;
   const carried = (carriedSet && carriedSet.size > 0)
-    ? itemMaster.filter(function (i) { return carriedSet.has(String(i.id)); })
-    : itemMaster.slice();
+    ? source.filter(function (i) { return i && carriedSet.has(String(i.id)); })
+    : source.slice();
   return carried.sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
 }
 
@@ -8073,7 +8145,14 @@ function renderListTab() {
       '<p>No carried items for this venue yet.</p></div>';
   }
   let h = '<div class="list-header"><h3>Carried items</h3><span class="total">' + items.length + '</span></div>';
-  h += items.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+  // Cap the rendered rows — rendering the full carried catalog (hundreds–
+  // thousands of rows) on every render was the live slowness complaint.
+  const shown = items.slice(0, REFERENCE_RENDER_CAP);
+  h += shown.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+  if (items.length > REFERENCE_RENDER_CAP) {
+    h += '<div class="list-cap-note" style="padding:12px;font-size:12px;color:var(--text-dim);text-align:center">' +
+      'Showing first ' + REFERENCE_RENDER_CAP + ' of ' + items.length + ' — search to narrow.</div>';
+  }
   return h;
 }
 
@@ -8389,7 +8468,15 @@ function renderGuidedMode() {
     if (reference.length > 0) {
       html += '<div class="list-header" style="margin-top:18px"><h3>Not yet counted — expected here</h3>' +
         '<span class="total">' + reference.length + '</span></div>';
-      html += reference.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+      // Same cap as the List tab — the zone reference fallback is the venue's
+      // full carried list and rendering all of it was the lag. Counted rows
+      // above are always shown in full; only this reference list is capped.
+      const refShown = reference.slice(0, REFERENCE_RENDER_CAP);
+      html += refShown.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+      if (reference.length > REFERENCE_RENDER_CAP) {
+        html += '<div class="list-cap-note" style="padding:12px;font-size:12px;color:var(--text-dim);text-align:center">' +
+          'Showing first ' + REFERENCE_RENDER_CAP + ' of ' + reference.length + ' — search to narrow.</div>';
+      }
     } else if (zoneItems.length === 0) {
       html += '<div class="empty-state">' +
         '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +

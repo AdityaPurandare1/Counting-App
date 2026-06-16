@@ -1,4 +1,5 @@
 const { test, expect, startAuditAs, addManual, counted } = require('../fixtures');
+const { M } = require('../mock/fixtures');
 
 /* v1.72 additions:
    - Task 3: a third count tab, "List", showing the venue's CARRIED items as
@@ -150,5 +151,70 @@ test.describe('List tab + zone reference list (v1.72)', () => {
       page.locator('#guidedContent .c-item').filter({ hasText: 'Campari 1L' }).count()
     ).toBe(1);
     await expect(page.locator('#guidedContent .c-item').filter({ hasText: 'Don Julio 1942' })).toHaveCount(0);
+  });
+});
+
+/* v1.73: deduped DISPLAY catalog + render cap.
+   - master_items carries dup-canon pairs (a bare-name row + a size-suffixed
+     row for the SAME product+size). The List/reference must show only the
+     properly-sized variant, never the bare twin — while keeping unique no-size
+     products and the full id-keyed itemMaster for scan/lookup intact.
+   - The List/reference render is capped (REFERENCE_RENDER_CAP) so a venue with
+     a huge carried catalog doesn't render thousands of DOM rows at once. */
+test.describe('Deduped display catalog + render cap (v1.73)', () => {
+  test('List tab shows only the sized variant of a dup pair, and keeps a no-size unique', async ({ page }) => {
+    await startAuditAs(page, 'manager');
+    await page.getByRole('button', { name: 'List', exact: true }).click();
+
+    const list = page.locator('#guidedContent .c-item');
+
+    // The dup-canon pair: ONLY the size-suffixed row shows; the bare twin is
+    // dropped from the display catalog.
+    await expect(list.filter({ hasText: '1800 Anejo Cristalino 750ml' })).toHaveCount(1);
+    await expect(
+      list.filter({ hasText: /^1800 Anejo Cristalino$/ }).filter({ hasNotText: '750ml' })
+    ).toHaveCount(0);
+    // Belt-and-suspenders: exactly one row in the whole list matches the base
+    // product name (i.e. no duplicate).
+    const cristalino = await page.locator('#guidedContent .c-name', { hasText: '1800 Anejo Cristalino' }).allTextContents();
+    expect(cristalino).toEqual(['1800 Anejo Cristalino 750ml']);
+
+    // A unique product with no sized twin survives the dedupe (not lost).
+    await expect(list.filter({ hasText: 'Castelvetrano Olives' })).toHaveCount(1);
+
+    // The FULL itemMaster keeps BOTH rows so an id/scan lookup still resolves
+    // the bare row — dedupe is display-only. itemMaster is a module-level `let`,
+    // not on window; openGuidedEntry resolves by id, so confirm the dropped bare
+    // id still opens its entry modal.
+    await page.evaluate((id) => window.openGuidedEntry(id), M.cris);
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    await expect(page.locator('#guidedHeroTitle')).toHaveText('1800 Anejo Cristalino');
+  });
+
+  test('List tab caps rendered rows and shows the "search to narrow" note', async ({ page, db }) => {
+    // Seed > cap carried items BEFORE the app loads them.
+    const CAP = 150;
+    const extra = CAP + 40;
+    for (let i = 0; i < extra; i++) {
+      const id = 'cap00000-0000-4000-8000-' + String(i).padStart(12, '0');
+      db.t.master_items.push({
+        id, organization_id: 'org-1', name: 'Capfill Bottle ' + String(i).padStart(4, '0') + ' 750ml',
+        category: 'Liquor Cost', subcategory: null, base_size: 750, base_unit: 'ml',
+        is_active: true, created_at: '2026-01-01T00:00:00Z', product_id: null,
+      });
+      db.t.kount_carried_items.push({ master_item_id: id });
+    }
+
+    await startAuditAs(page, 'manager');
+    await page.getByRole('button', { name: 'List', exact: true }).click();
+
+    // Rendered rows are capped at CAP even though far more are carried.
+    await expect.poll(async () => page.locator('#guidedContent .c-item').count()).toBe(CAP);
+    // The header total reflects the FULL carried count (not the capped view).
+    const total = await page.locator('#guidedContent .list-header .total').first().textContent();
+    expect(Number(total)).toBeGreaterThan(CAP);
+    // The note tells the counter to narrow.
+    await expect(page.locator('#guidedContent .list-cap-note')).toContainText('Showing first ' + CAP);
+    await expect(page.locator('#guidedContent .list-cap-note')).toContainText('search to narrow');
   });
 });
