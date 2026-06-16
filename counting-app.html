@@ -2651,7 +2651,8 @@ html, body {
       <div class="issue-chips" id="barcodeIssueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectBarcodeIssue(this)">None</span>
         <span class="issue-chip" data-issue="no-sticker" onclick="selectBarcodeIssue(this)">No sticker</span>
-        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectBarcodeIssue(this)">Not in Craftable</span>
+        <!-- data-issue value kept as "not-in-craftable": it's persisted to kount_entries.issue and the admin Issues page matches on this exact token; only the visible label changed. -->
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectBarcodeIssue(this)">Not in inventory</span>
         <span class="issue-chip" data-issue="no-upc" onclick="selectBarcodeIssue(this)">No UPC/barcode</span>
         <span class="issue-chip" data-issue="wrong-location" onclick="selectBarcodeIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectBarcodeIssue(this)">Damaged</span>
@@ -2716,7 +2717,7 @@ html, body {
       <div class="issue-chips" id="issueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectIssue(this)">None</span>
         <span class="issue-chip" data-issue="no-sticker" onclick="selectIssue(this)">No sticker</span>
-        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectIssue(this)">Not in inventory</span>
         <span class="issue-chip" data-issue="no-upc" onclick="selectIssue(this)">No UPC/barcode</span>
         <span class="issue-chip" data-issue="wrong-location" onclick="selectIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectIssue(this)">Damaged</span>
@@ -2856,7 +2857,7 @@ html, body {
       <div class="issue-chips" id="photoIssueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectPhotoIssue(this)">None</span>
         <span class="issue-chip" data-issue="no-sticker" onclick="selectPhotoIssue(this)">No sticker</span>
-        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectPhotoIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectPhotoIssue(this)">Not in inventory</span>
         <span class="issue-chip" data-issue="no-upc" onclick="selectPhotoIssue(this)">No UPC/barcode</span>
         <span class="issue-chip" data-issue="wrong-location" onclick="selectPhotoIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectPhotoIssue(this)">Damaged</span>
@@ -2917,7 +2918,7 @@ html, body {
       <div class="issue-chips" id="guidedIssueChips">
         <span class="issue-chip selected" data-issue="none" onclick="selectGuidedIssue(this)">None</span>
         <span class="issue-chip" data-issue="no-sticker" onclick="selectGuidedIssue(this)">No sticker</span>
-        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectGuidedIssue(this)">Not in Craftable</span>
+        <span class="issue-chip" data-issue="not-in-craftable" onclick="selectGuidedIssue(this)">Not in inventory</span>
         <span class="issue-chip" data-issue="no-upc" onclick="selectGuidedIssue(this)">No UPC/barcode</span>
         <span class="issue-chip" data-issue="wrong-location" onclick="selectGuidedIssue(this)">Wrong location</span>
         <span class="issue-chip" data-issue="damaged" onclick="selectGuidedIssue(this)">Damaged</span>
@@ -2999,7 +3000,7 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.71';
+const APP_VERSION = '1.72';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4441,7 +4442,7 @@ async function loadItemMaster() {
     itemMasterLoaded = true;
     mergeCustomItemsIntoMaster();
     console.log('Item master from Supabase: ' + itemMaster.length + ' items');
-    showToast(itemMaster.length + ' items from Supabase', 'success');
+    showToast(itemMaster.length + ' items loaded from database', 'success');
     validateItemMaster('supabase');
     var currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-count') renderCountPage();
@@ -4610,6 +4611,11 @@ const appState = {
   avtData: [],
   avtUploadedAt: null,
   avtStores: [],
+  // Reference list for the zone view (Task 4): the most-recent submitted
+  // audit's entries grouped by zone for the current venue. Shape:
+  // { venueId, byZone: { '<zone>': [ {id,name,category,size}, ... ] } }.
+  // In-memory only; refreshed on audit load.
+  priorAuditReference: null,
 };
 
 /* ================================================================
@@ -7486,6 +7492,13 @@ function renderCountPage() {
 
     renderGuidedMode();
 
+    // Load the prior-audit reference list (Task 4) once per venue so the zone
+    // view can show expected items instead of an empty state. Fire-and-forget;
+    // loadPriorAuditReference re-renders when the data lands.
+    if (!appState.priorAuditReference || appState.priorAuditReference.venueId !== appState.currentVenue.id) {
+      loadPriorAuditReference(appState.currentVenue.id);
+    }
+
     // Show "Close Count 1" button for managers/admins during count1 phase
     const isAdmin = appState.user?.role === 'corporate' || appState.user?.role === 'manager';
     const isCount1 = appState.audit.countPhase === 'count1';
@@ -7985,13 +7998,83 @@ function updateHeaderCount() {
 
 /* All Count view: 'zone' = current zone (default, inline-editable),
    'all' = every zone's totals per item, expandable to a per-zone breakdown
-   that's also editable. */
+   that's also editable, 'list' = the venue's carried full-bottle reference
+   list (one row per carried master, tap to start counting). */
 let countView = 'zone';
 const allCountExpanded = new Set();
 
 function setCountView(v) {
-  countView = (v === 'all') ? 'all' : 'zone';
+  countView = (v === 'all') ? 'all' : (v === 'list') ? 'list' : 'zone';
   renderGuidedMode();
+}
+
+/* The venue's carried items as full bottles — itemMaster filtered to
+   carriedSet, one row per master, sorted by name. Shared by the List tab
+   (Task 3) and the zone-view reference fallback (Task 4). When carriedSet
+   is empty (no admin curation yet) we fall back to the whole catalog so the
+   list is never blank. */
+function getCarriedMasterItems() {
+  const carried = (carriedSet && carriedSet.size > 0)
+    ? itemMaster.filter(function (i) { return carriedSet.has(String(i.id)); })
+    : itemMaster.slice();
+  return carried.sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+}
+
+/* Best-effort size string for a catalog row. master_items gives us `size`
+   (composed from base_size + base_unit in mapSupabaseToItemMaster); if that's
+   blank, parse a trailing size token out of the name (e.g. "Belvedere 1L"). */
+function itemSizeLabel(item) {
+  if (item && item.size) return item.size;
+  const m = item && item.name ? String(item.name).match(/(\d+(?:\.\d+)?\s?(?:ml|mL|ML|cl|cL|L|l|oz|OZ|g|kg|gal))\b/) : null;
+  return m ? m[1] : '';
+}
+
+/* Render one tappable reference row (carried/expected item). Mirrors the
+   count-row card style: category color chip + bold name on top, size as
+   subtext. Tapping opens the guided-entry modal to count it in the current
+   zone. NOTE: no unit price is shown — master_items carries no cost on the
+   phone (avg_cost lives on purchase_items, which the phone doesn't load), so
+   we omit price rather than fetch it. */
+function renderReferenceRow(item, isLocked) {
+  const size = itemSizeLabel(item);
+  // The tap target is the inner row (thumb + info), NOT the outer .c-item, and
+  // a non-interactive "+" cue sits in the right-edge band. This mirrors the
+  // counted-card layout (where a trailing control keeps the tappable .c-info
+  // off the right edge) so the docked floating-calculator FAB never sits on a
+  // measurable interactive element. item.id may be null for prior-audit rows
+  // that no longer resolve to a master — those are shown but not tappable.
+  const canTap = !isLocked && item.id;
+  const tap = canTap
+    ? ' onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;display:flex;align-items:center;gap:14px;flex:1;min-width:0"'
+    : ' style="display:flex;align-items:center;gap:14px;flex:1;min-width:0"';
+  return '<div class="c-item fade-in" style="gap:8px">' +
+      '<div' + tap + '>' +
+        '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
+        '<div class="c-info">' +
+          '<div class="c-name">' + esc(item.name) + '</div>' +
+          '<div class="c-meta">' +
+            (size ? '<span>' + esc(size) + '</span>' : '') +
+            '<span>' + esc(getCategoryLabel(item.category)) + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+      (canTap ? '<span aria-hidden="true" style="color:var(--text-dim);font-size:20px;width:56px;text-align:center;flex-shrink:0;pointer-events:none">+</span>' : '') +
+    '</div>';
+}
+
+/* List tab (Task 3): the venue's carried items as full bottles, one row per
+   master, tap to start counting in the current zone. */
+function renderListTab() {
+  const items = getCarriedMasterItems();
+  const isLocked = appState.audit && appState.audit.status === 'submitted';
+  if (items.length === 0) {
+    return '<div class="empty-state">' +
+      '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
+      '<p>No carried items for this venue yet.</p></div>';
+  }
+  let h = '<div class="list-header"><h3>Carried items</h3><span class="total">' + items.length + '</span></div>';
+  h += items.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+  return h;
 }
 
 function toggleAllCountRow(keyEnc) {
@@ -8195,10 +8278,12 @@ function renderGuidedMode() {
   // Search results appear here
   html += '<div id="guidedSearchResults"></div>';
 
-  // Tab toggle just below the search bar: current zone vs all-zone totals.
+  // Tab toggle just below the search bar: current zone vs all-zone totals
+  // vs the carried-item reference list.
   html += '<div class="mode-toggle" style="margin-bottom:12px">' +
     '<button class="mode-btn ' + (countView === 'zone' ? 'active' : '') + '" onclick="setCountView(\'zone\')">This Zone</button>' +
     '<button class="mode-btn ' + (countView === 'all' ? 'active' : '') + '" onclick="setCountView(\'all\')">All Count</button>' +
+    '<button class="mode-btn ' + (countView === 'list' ? 'active' : '') + '" onclick="setCountView(\'list\')">List</button>' +
   '</div>';
 
   // Scan buttons for quick entry
@@ -8214,9 +8299,16 @@ function renderGuidedMode() {
       'Manual</button>' +
   '</div>';
 
-  // "All Count" → every zone's totals; "This Zone" → current zone inline list.
+  // "All Count" → every zone's totals; "List" → carried reference list;
+  // "This Zone" → current zone inline list.
   if (countView === 'all') {
     html += renderAllCountList();
+    document.getElementById('guidedContent').innerHTML = html;
+    return;
+  }
+
+  if (countView === 'list') {
+    html += renderListTab();
     document.getElementById('guidedContent').innerHTML = html;
     return;
   }
@@ -8276,10 +8368,38 @@ function renderGuidedMode() {
         top + bottom +
       '</div>';
     }).join('');
-  } else {
+  }
+
+  // Reference list (Task 4): show what's EXPECTED in this zone so counters
+  // never face an empty screen. Source is the most recent prior submitted
+  // audit's items for this zone; if there's no per-zone history yet (Poppy's
+  // current reality — only a single-zone BASELINE exists), fall back to the
+  // venue's carried full-bottle list. Items already counted in THIS zone are
+  // filtered out so they don't double-show. Each row is tappable to count.
+  if (!isLocked) {
+    const countedHere = {};
+    zoneItems.forEach(function (it) {
+      const k = it.masterId ? String(it.masterId) : ('n:' + String(it.name || '').toLowerCase());
+      countedHere[k] = true;
+    });
+    const reference = getZoneReferenceItems(appState.currentZone).filter(function (ref) {
+      const k = ref.id ? String(ref.id) : ('n:' + String(ref.name || '').toLowerCase());
+      return !countedHere[k];
+    });
+    if (reference.length > 0) {
+      html += '<div class="list-header" style="margin-top:18px"><h3>Not yet counted — expected here</h3>' +
+        '<span class="total">' + reference.length + '</span></div>';
+      html += reference.map(function (item) { return renderReferenceRow(item, isLocked); }).join('');
+    } else if (zoneItems.length === 0) {
+      html += '<div class="empty-state">' +
+        '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
+        '<p>Nothing counted in ' + esc(appState.currentZone) + ' yet. Search above, scan, or add manually.</p>' +
+      '</div>';
+    }
+  } else if (zoneItems.length === 0) {
     html += '<div class="empty-state">' +
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
-      '<p>Nothing counted in ' + esc(appState.currentZone) + ' yet. Search above, scan, or add manually.</p>' +
+      '<p>Nothing counted in ' + esc(appState.currentZone) + ' yet.</p>' +
     '</div>';
   }
 
@@ -13044,6 +13164,122 @@ async function loadHistoricAuditsFromSupabase() {
   }
 }
 
+/* Zone-view reference list (Task 4): load the most recent SUBMITTED audit for
+   the current venue and group its entries by zone, so the zone view can show
+   "what was counted here last time" instead of an empty state. Lightweight —
+   one header lookup + one entries fetch — and fired once on audit load. The
+   result caches in appState.priorAuditReference; renderGuidedMode re-renders
+   when it lands. When there's no prior per-zone history (Poppy today: the only
+   prior audit is a single-zone BASELINE), the zone view falls back to the
+   carried list, so nothing is needed here for that case. */
+let _priorRefLoading = false;
+async function loadPriorAuditReference(venueId) {
+  if (!venueId) return;
+  if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return;
+  // Skip if we already have it for this venue.
+  if (appState.priorAuditReference && appState.priorAuditReference.venueId === venueId) return;
+  // In-flight guard: a rapid double renderCountPage must not fire two
+  // concurrent fetches for the same (yet-uncached) venue.
+  if (_priorRefLoading) return;
+  _priorRefLoading = true;
+  try {
+    // Robust "most recent submission" ordering: completed_at can be NULL on
+    // some submitted audits, so fall back to count2_closed_at, then started_at.
+    const headerResp = await supabaseRest.query('kount_audits',
+      'select=id&venue_id=eq.' + encodeURIComponent(venueId) +
+      '&status=eq.submitted' +
+      '&order=completed_at.desc.nullslast,count2_closed_at.desc.nullslast,started_at.desc&limit=1');
+    // An error means we couldn't tell whether a prior audit exists — do NOT
+    // cache, so a later render retries once the network recovers. Caching a
+    // degraded {} here would pin a permanent carried-fallback for the session.
+    if (headerResp.error) {
+      console.warn('[prior-ref] header fetch failed; not caching:', headerResp.error);
+      return;
+    }
+    const headers = headerResp.data || [];
+    if (!headers.length) {
+      // Legitimate empty: no prior submitted audit. This is data, not an
+      // error — cache it so we don't re-query every render.
+      appState.priorAuditReference = { venueId: venueId, byZone: {} };
+      return;
+    }
+    const priorId = headers[0].id;
+    // Paginate the entries fetch — PostgREST silently caps (~1000 rows) for a
+    // large prior audit, which would truncate a zone's reference. Same idiom
+    // as loadAvtFromSupabase: a short page terminates; MAX_PAGES is a safety
+    // ceiling that warns rather than spinning forever.
+    const entries = [];
+    const PAGE = 1000;
+    const MAX_PAGES = 100;  // 100k entries headroom
+    let hitCap = false;
+    for (let p = 0; p < MAX_PAGES; p++) {
+      const pg = await supabaseRest.query('kount_entries',
+        'select=item_name,category,zone,master_item_id,item_id,sku&audit_id=eq.' +
+        encodeURIComponent(priorId) +
+        '&order=item_name.asc&limit=' + PAGE + '&offset=' + (p * PAGE));
+      // Error mid-fetch → incomplete reference. Bail without caching so a
+      // later render retries with a clean slate.
+      if (pg.error) {
+        console.warn('[prior-ref] entries fetch failed; not caching:', pg.error);
+        return;
+      }
+      if (!pg.data || pg.data.length === 0) break;
+      for (let i = 0; i < pg.data.length; i++) entries.push(pg.data[i]);
+      if (pg.data.length < PAGE) break;
+      if (p === MAX_PAGES - 1) hitCap = true;
+    }
+    if (hitCap) {
+      console.warn('[prior-ref] hit MAX_PAGES cap of ' + MAX_PAGES + ' (' + (MAX_PAGES * PAGE) + ' entries). Zone reference may be incomplete.');
+    }
+    const byZone = {};
+    const seen = {};
+    entries.forEach(function (e) {
+      const zone = e.zone || '';
+      if (!byZone[zone]) { byZone[zone] = []; seen[zone] = {}; }
+      const masterId = e.master_item_id != null ? String(e.master_item_id) : (e.item_id != null ? String(e.item_id) : null);
+      const key = masterId || ('n:' + String(e.item_name || '').toLowerCase());
+      if (seen[zone][key]) return; // one row per distinct item per zone
+      seen[zone][key] = true;
+      byZone[zone].push({
+        id: masterId,
+        name: e.item_name,
+        category: e.category,
+        sku: e.sku,
+        size: '',
+      });
+    });
+    appState.priorAuditReference = { venueId: venueId, byZone: byZone };
+    // Re-render if the count page is showing the zone view so the reference
+    // section appears once data lands.
+    const page = document.querySelector('.page:not(.hide)');
+    if (page && page.id === 'page-count' && countView === 'zone') {
+      try { renderGuidedMode(); } catch (e) {}
+    }
+  } catch (e) {
+    console.warn('[prior-ref] load threw:', e);
+  } finally {
+    _priorRefLoading = false;
+  }
+}
+
+/* The reference list for a given zone: prior-audit items counted in this zone
+   last time, else the venue's carried full-bottle list (Poppy's reality). Each
+   entry is reshaped to match what renderReferenceRow expects (id/name/category/
+   size); prior-audit rows are resolved against itemMaster so we get a real
+   size and a tappable master id where possible. */
+function getZoneReferenceItems(zone) {
+  const ref = appState.priorAuditReference;
+  const priorRows = (ref && ref.byZone && ref.byZone[zone]) ? ref.byZone[zone] : null;
+  if (priorRows && priorRows.length > 0) {
+    return priorRows.map(function (r) {
+      const master = r.id ? itemMaster.find(function (i) { return i.id === r.id; }) : null;
+      return master || { id: r.id, name: r.name, category: r.category, size: '', sku: r.sku };
+    });
+  }
+  // Fallback: the venue's carried list.
+  return getCarriedMasterItems();
+}
+
 function renderSummaryPage() {
   const select = document.getElementById('summaryVenueSelect');
   select.innerHTML = '';
@@ -13831,7 +14067,7 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     }
 
     // No exact catalog match. Per counter feedback we no longer auto-select
-    // the "Not in Craftable" issue here — counters were having to un-select
+    // the "Not in inventory" issue here — counters were having to un-select
     // it on every photo even when the extracted info was usable. Leave the
     // issue unset; the counter tags it only if they actually want to.
     appState.photoIssue = 'none';
