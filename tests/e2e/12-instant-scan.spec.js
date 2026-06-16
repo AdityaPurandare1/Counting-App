@@ -13,6 +13,7 @@ const { test, expect, startAuditAs, counted, qtyOf, M } = require('../fixtures')
 
 // GTIN-13 checksum-valid codes (validateBarcode rejects bad check digits).
 const KNOWN_UPC   = '5060071510018'; // mapped to Belvedere 1L below
+const KNOWN_UPC_B = '5060071510025'; // mapped to Belvedere 1.75L (the "B" bottle)
 const UNKNOWN_UPC = '9998887776662'; // no mapping, no master inline UPC
 
 // Inject a learned mapping into the live upcMappingsCache so resolveInstantScan
@@ -27,6 +28,17 @@ async function mapKnownUpc(page) {
       masterId: masterId, barcode: upc, approvedAt: '2026-01-01T00:00:00Z',
     };
   }, { upc: KNOWN_UPC, masterId: M.belv });
+}
+
+// Map a SECOND known UPC (the "B" bottle) → Belvedere 1.75L for the
+// interleaved A,B,A double-count regression (FIX 1, v1.74).
+async function mapKnownUpcB(page) {
+  await page.evaluate(({ upc, masterId }) => {
+    upcMappingsCache[upc] = {
+      title: 'Belvedere 1.75L', brand: '', category: 'Liquor Cost',
+      masterId: masterId, barcode: upc, approvedAt: '2026-01-01T00:00:00Z',
+    };
+  }, { upc: KNOWN_UPC_B, masterId: M.belv175 });
 }
 
 // Fire enough confirming frames through the real detect handoff to lock.
@@ -86,6 +98,31 @@ test.describe('instant scan: known barcode counts without the modal', () => {
     expect(await qtyOf(page, 'Belvedere 1L')).toBe(1);
   });
 
+  test('interleaved A,B,A within the cooldown counts A once (FIX 1)', async ({ page }) => {
+    // PRE-FIX: the cooldown remembered only the SINGLE last code. Scanning A
+    // set lastScannedCode=A; scanning B overwrote it with B; scanning A again
+    // then passed the guard (last code was B, not A) and double-counted A.
+    // POST-FIX: every recently-locked code is remembered in recentlyScanned,
+    // so the second A is blocked while still inside the window.
+    await mapKnownUpc(page);
+    await mapKnownUpcB(page);
+    await openScanner(page);
+
+    await scan(page, KNOWN_UPC);   // A
+    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
+    await scan(page, KNOWN_UPC_B); // B
+    await expect.poll(() => qtyOf(page, 'Belvedere 1.75L')).toBe(1);
+    await scan(page, KNOWN_UPC);   // A again, still within the 2.5s window
+    await page.waitForTimeout(200);
+
+    // A must NOT have double-counted; B counted once.
+    expect(await qtyOf(page, 'Belvedere 1L')).toBe(1);
+    expect(await qtyOf(page, 'Belvedere 1.75L')).toBe(1);
+    // Each is a single merged row.
+    expect((await counted(page)).filter(i => i.name === 'Belvedere 1L').length).toBe(1);
+    expect((await counted(page)).filter(i => i.name === 'Belvedere 1.75L').length).toBe(1);
+  });
+
   test('after the cooldown elapses the same KNOWN UPC merges (+1)', async ({ page }) => {
     await mapKnownUpc(page);
     await openScanner(page);
@@ -93,7 +130,9 @@ test.describe('instant scan: known barcode counts without the modal', () => {
     await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
 
     // Advance past the 2.5s cooldown, then scan the same bottle again.
-    await page.evaluate(() => { lastScanTime = 0; lastScannedCode = ''; });
+    // v1.74: the cooldown is governed by the recentlyScanned MAP (per-code
+    // timestamps), so clear it as well as the legacy single-code vars.
+    await page.evaluate(() => { lastScanTime = 0; lastScannedCode = ''; recentlyScanned.clear(); });
     await scan(page, KNOWN_UPC);
     await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(2);
     // Still a single merged entry, not two rows.

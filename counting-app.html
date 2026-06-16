@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.73';
+const APP_VERSION = '1.74';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3149,12 +3149,19 @@ const supabaseRest = {
   },
   async deleteRows(table, match) {
     try {
+      // return=representation so callers can tell a real deletion (rows
+      // returned) from a 0-row no-op (empty array). Without it the body is
+      // empty and a 0-row DELETE is indistinguishable from a successful one,
+      // which masks lost writes (FIX 7).
       const resp = await fetch(SUPABASE_URL + '/rest/v1/' + table + '?' + match, {
         method: 'DELETE',
-        headers: _supabaseAuthHeaders(),
+        headers: _supabaseAuthHeaders({ 'Prefer': 'return=representation' }),
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
-      return { data: null, error: null };
+      // 204 No Content (or empty body) -> treat as no rows returned.
+      let rows = [];
+      try { const txt = await resp.text(); rows = txt ? JSON.parse(txt) : []; } catch (e) { rows = []; }
+      return { data: rows, error: null };
     } catch (e) { return { data: null, error: e }; }
   },
 };
@@ -3853,12 +3860,25 @@ async function loadAvtForAudit(auditId) {
   try {
     // Newest computed report for this audit. The RPC is idempotent on
     // audit_id but a re-run inserts a fresh report row, so order desc + limit 1.
-    var repResp = await supabaseRest.query(
-      'kount_avt_reports',
-      'select=*&audit_id=eq.' + encodeURIComponent(auditId) +
-        '&source=eq.computed&order=uploaded_at.desc&limit=1'
-    );
-    if (repResp.error || !repResp.data || repResp.data.length === 0) return false;
+    var repQs = 'select=*&audit_id=eq.' + encodeURIComponent(auditId) +
+      '&source=eq.computed&order=uploaded_at.desc&limit=1';
+    var repResp = await supabaseRest.query('kount_avt_reports', repQs);
+    // A read ERROR (not empty) right after we computed is almost always a
+    // read-replica/visibility lag, not a genuinely-missing report. Retry once
+    // after a short delay before giving up so callers don't misclassify a
+    // successful compute as "couldn't compute" and fall back to all-items.
+    if (repResp.error) {
+      await new Promise(function (r) { setTimeout(r, 800); });
+      repResp = await supabaseRest.query('kount_avt_reports', repQs);
+      // Still erroring after the retry: report the error distinctly from a
+      // confirmed-absent report so callers can avoid the all-items fallback.
+      if (repResp.error) {
+        console.warn('[avt] loadAvtForAudit report query errored after retry:', repResp.error.message || repResp.error);
+        return 'error';
+      }
+    }
+    // No error + 0 rows = genuinely no computed report for this audit.
+    if (!repResp.data || repResp.data.length === 0) return false;
     var report = repResp.data[0];
 
     // Pull all rows for that report, paginated (same shape as loadAvtFromSupabase).
@@ -5600,6 +5620,19 @@ async function joinNetworkedAudit(rawCode) {
 async function syncRecountsToSupabase() {
   if (!appState.audit || !appState.audit.supabaseId) return;
   const auditId = appState.audit.supabaseId;
+
+  // FIX 8 (S2): the blanket delete-all + bulk-reinsert is ONLY safe at the
+  // initial Count-1 close, when no count2 progress exists yet. Once the phase
+  // has advanced past 'review' (recount in progress), other counters have
+  // synced count2_qty / audit_result into these rows; deleting + reinserting
+  // from local state would destroy that peer progress. For later syncs, push
+  // rows individually instead (which never clobbers count2 columns).
+  const phase = appState.audit.countPhase || 'count1';
+  if (phase === 'count2' || phase === 'final') {
+    await syncRecountsIndividually();
+    return;
+  }
+
   try {
     // Clear any prior recounts so the (audit_id, item_name) unique index can't collide
     await supabaseRest.deleteRows('kount_recounts', 'audit_id=eq.' + encodeURIComponent(auditId));
@@ -5661,6 +5694,66 @@ async function syncRecountsToSupabase() {
     }
   } catch (e) {
     console.warn('[recounts] sync failed:', e);
+  }
+}
+
+/* FIX 8 (S2): per-row recount sync for use AFTER the recount has begun. Unlike
+   the count1-close path this NEVER deletes existing rows, so it can't wipe the
+   count2_qty / audit_result other counters synced. For each local row:
+     - has a supabaseId  -> patch only the count1-side / metadata columns,
+                            leaving count2_qty + audit_result untouched.
+     - no supabaseId yet -> the row is genuinely new locally; look it up by
+                            (audit_id, item_name, zone) and adopt it if present
+                            (preserving its count2 progress), else insert it. */
+async function syncRecountsIndividually() {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  const auditId = appState.audit.supabaseId;
+  const recounts = appState.audit.recounts || {};
+  const keys = Object.keys(recounts);
+  for (const k of keys) {
+    const rec = recounts[k];
+    const cleanName = rec.itemName
+      || (rec.avtItem && rec.avtItem.itemName)
+      || (typeof k === 'string' ? k.split('|')[0] : k);
+    // Count1-side / metadata only — deliberately NOT count2_qty / audit_result,
+    // which are owned by whoever is recording the recount.
+    const meta = {
+      severity: String(rec.severity || 'MEDIUM').toUpperCase(),
+      variance_value: Number(rec.varianceValue || 0),
+      count1_qty: rec.count1Qty != null ? Number(rec.count1Qty) : null,
+      zone: rec.zone || null,
+      category: rec.category || null,
+    };
+    if (rec.masterId) meta.master_item_id = rec.masterId;
+    try {
+      if (rec.supabaseId) {
+        await supabaseRest.update('kount_recounts', 'id=eq.' + encodeURIComponent(rec.supabaseId), meta);
+        continue;
+      }
+      const zoneClause = rec.zone
+        ? '&zone=eq.' + encodeURIComponent(rec.zone)
+        : '&zone=is.null';
+      const lookup = await supabaseRest.query('kount_recounts',
+        'audit_id=eq.' + encodeURIComponent(auditId) +
+        '&item_name=eq.' + encodeURIComponent(cleanName) + zoneClause + '&select=id');
+      if (!lookup.error && lookup.data && lookup.data[0]) {
+        rec.supabaseId = lookup.data[0].id;
+        await supabaseRest.update('kount_recounts', 'id=eq.' + encodeURIComponent(rec.supabaseId), meta);
+        try { saveState(); } catch (e) {}
+      } else if (!lookup.error) {
+        // Genuinely absent — insert it (new row added after count1 close).
+        const ins = await supabaseRest.insert('kount_recounts', Object.assign({
+          audit_id: auditId,
+          item_id: null,
+          item_name: cleanName,
+          status: rec.status || 'pending',
+          count2_qty: rec.recountQty != null ? Number(rec.recountQty) : null,
+        }, meta));
+        if (!ins.error && ins.data && ins.data[0]) { rec.supabaseId = ins.data[0].id; try { saveState(); } catch (e) {} }
+      }
+    } catch (e) {
+      console.warn('[recounts] individual sync failed for', k, e);
+    }
   }
 }
 
@@ -6289,7 +6382,31 @@ async function refreshRecountsFromSupabase() {
         counterInitials: r.counter_initials || '',
       };
     });
-    appState.audit.recounts = remote;
+    // FIX 9 (S3): MERGE, don't replace. A wholesale `recounts = remote` erases
+    // any local row whose count2 entry is still queued (_pendingSync) before
+    // its retry fires — the counter's recountQty silently vanishes. For each
+    // key, keep the local row when it carries a pending, not-yet-synced edit;
+    // otherwise take the remote row. Remote-only keys are added; local-only
+    // keys with pending edits survive even if not yet on the server.
+    const local = appState.audit.recounts || {};
+    const merged = {};
+    Object.keys(remote).forEach(function(key) {
+      const loc = local[key];
+      if (loc && loc._pendingSync && loc.recountQty != null) {
+        // Local pending edit wins, but adopt the remote row id if we didn't
+        // have one yet so the queued sync can target it by id.
+        if (!loc.supabaseId && remote[key].supabaseId) loc.supabaseId = remote[key].supabaseId;
+        merged[key] = loc;
+      } else {
+        merged[key] = remote[key];
+      }
+    });
+    // Preserve local-only rows that are still pending (their insert/update
+    // hasn't reached the server yet, so they're absent from `remote`).
+    Object.keys(local).forEach(function(key) {
+      if (!merged[key] && local[key] && local[key]._pendingSync) merged[key] = local[key];
+    });
+    appState.audit.recounts = merged;
     saveState();
     const currentPage = document.querySelector('.page:not(.hide)');
     if (currentPage && currentPage.id === 'page-recount') renderRecountPage();
@@ -8812,7 +8929,19 @@ function submitGuidedEntry() {
         updateOfflineBannerState('error');
       };
       supabaseRest.update('kount_entries', _filter, _body)
-        .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+        .then(function (resp) {
+          if (resp && resp.error) { _enqueue(resp.error); return; }
+          // FIX 7: 0 rows matched despite holding a supabaseId — the row was
+          // removed under us, so this absolute edit was silently lost. Re-run
+          // the full insert (heal path) so the edited qty/issue isn't dropped.
+          if (resp && (!resp.data || resp.data.length === 0)) {
+            console.warn('[audit] guided edit-in-place matched 0 rows (expected 1) — re-inserting');
+            const orphan = Object.assign({}, sameZoneEntry, { supabaseId: undefined });
+            syncEntryToSupabase(orphan, appState.currentZone).then(function () {
+              if (orphan.supabaseId) { sameZoneEntry.supabaseId = orphan.supabaseId; saveState(); }
+            }).catch(function () { updateOfflineBannerState('error'); });
+          }
+        })
         .catch(_enqueue);
     } else if (appState.audit && appState.audit.supabaseId && !sameZoneEntry.supabaseId) {
       // Heal an orphan counted during the item_id FK-bug outage (no
@@ -9042,16 +9171,46 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   const networked = !!(appState.audit && appState.audit.supabaseId);
 
   // Mirror the existing sync sites: retry queue on transient errors, error
-  // banner otherwise.
-  const runUpdate = function (filter, body, label) {
+  // banner otherwise. FIX 7: a PATCH/DELETE that matches 0 rows returns
+  // {data:[],error:null} — i.e. it looks like success but our target row was
+  // never touched (a lost write). Where we hold a supabaseId we KNOW a row
+  // should exist, so treat 0 rows affected as a miss and recover rather than
+  // silently succeeding.
+  const runUpdate = function (filter, body, label, onZeroRows) {
     supabaseRest.update('kount_entries', filter, body)
-      .then(function (r) { if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body }, { label: label }); updateOfflineBannerState('error'); } })
+      .then(function (r) {
+        if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body }, { label: label }); updateOfflineBannerState('error'); return; }
+        // No error but 0 rows matched: the row we expected by id is gone.
+        if (r && (!r.data || r.data.length === 0)) { console.warn('[audit] ' + label + ' matched 0 rows (expected 1) — recovering'); if (onZeroRows) onZeroRows(); }
+      })
       .catch(function (e) { if (isRetryableError(e)) enqueuePendingMutation('rest-update', { table: 'kount_entries', filter: filter, body: body }, { label: label }); updateOfflineBannerState('error'); });
   };
-  const runDelete = function (filter, label) {
+  const runDelete = function (filter, label, onZeroRows) {
     supabaseRest.deleteRows('kount_entries', filter)
-      .then(function (r) { if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: filter }, { label: label }); updateOfflineBannerState('error'); } })
+      .then(function (r) {
+        if (r && r.error) { if (isRetryableError(r.error)) enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: filter }, { label: label }); updateOfflineBannerState('error'); return; }
+        if (r && (!r.data || r.data.length === 0)) { console.warn('[audit] ' + label + ' matched 0 rows (expected 1) — recovering'); if (onZeroRows) onZeroRows(); }
+      })
       .catch(function (e) { if (isRetryableError(e)) enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: filter }, { label: label }); updateOfflineBannerState('error'); });
+  };
+
+  // FIX 6: the source row may have committed server-side without its id being
+  // stamped back onto entry.supabaseId (response lost / still in flight). If
+  // we only delete `if (entry.supabaseId)`, the row survives in BOTH zones.
+  // Look it up by its idempotency key (client_entry_id) and delete that.
+  const deleteSourceByClientKey = function (srcEntry) {
+    if (!networked) return;
+    const ck = srcEntry.clientEntryId || srcEntry.id;
+    if (!ck) return;
+    const auditId = appState.audit.supabaseId;
+    supabaseRest.query('kount_entries',
+      'audit_id=eq.' + auditId + '&client_entry_id=eq.' + encodeURIComponent(ck) + '&select=id')
+      .then(function (r) {
+        if (r && !r.error && r.data && r.data[0]) {
+          runDelete('id=eq.' + encodeURIComponent(r.data[0].id), 'move source delete (by client key)');
+        }
+      })
+      .catch(function () {});
   };
 
   const dup = toItems.find(function (i) {
@@ -9060,14 +9219,44 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   });
 
   if (dup) {
-    dup.qty = (Number(dup.qty) || 0) + (Number(entry.qty) || 0);
+    const movedQty = Number(entry.qty) || 0;
+    dup.qty = (Number(dup.qty) || 0) + movedQty;
     fromItems.splice(idx, 1);
     logActivity('Moved ' + entry.name + ' from ' + fromZone + ' to ' + toZone + ' (merged)');
     saveState();
     if (networked) {
-      if (dup.supabaseId) runUpdate('id=eq.' + encodeURIComponent(dup.supabaseId), { qty: Number(dup.qty) || 0, timestamp: new Date().toISOString() }, 'move-merge update');
-      else syncEntryToSupabase(dup, toZone).catch(function () { updateOfflineBannerState('error'); });
-      if (entry.supabaseId) runDelete('id=eq.' + encodeURIComponent(entry.supabaseId), 'move-merge delete');
+      if (dup.supabaseId) {
+        // Absolute UPDATE against the known row. FIX 7: if it matches 0 rows
+        // the row was deleted under us — re-insert the running total via a
+        // fresh delta so the merge re-creates it server-side.
+        runUpdate('id=eq.' + encodeURIComponent(dup.supabaseId), { qty: Number(dup.qty) || 0, timestamp: new Date().toISOString() }, 'move-merge update', function () {
+          const reEntry = Object.assign({}, dup, {
+            qty: Number(dup.qty) || 0,
+            clientEntryId: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+          });
+          syncEntryToSupabase(reEntry, toZone).then(function () {
+            if (reEntry.supabaseId) { dup.supabaseId = reEntry.supabaseId; saveState(); }
+          }).catch(function () { updateOfflineBannerState('error'); });
+        });
+      } else {
+        // FIX 6 (BLOCKER B1): dup has no supabaseId yet. The OLD code sent
+        // syncEntryToSupabase(dup, toZone) with dup.qty = the POST-MERGE
+        // running total; the 23505 path then either adopted-without-writing
+        // (dropping the moved qty) or merge-added (double-counting). Instead
+        // send only the moved DELTA with a FRESH client key so the server-side
+        // merge adds it exactly once on top of dup's in-flight row.
+        const deltaEntry = Object.assign({}, dup, {
+          qty: movedQty,
+          clientEntryId: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+        });
+        syncEntryToSupabase(deltaEntry, toZone).then(function () {
+          if (!dup.supabaseId && deltaEntry.supabaseId) { dup.supabaseId = deltaEntry.supabaseId; saveState(); }
+        }).catch(function () { updateOfflineBannerState('error'); });
+      }
+      // Source-row delete. FIX 6: handle the case where the source committed
+      // but its id wasn't stamped back (delete by client key instead).
+      if (entry.supabaseId) runDelete('id=eq.' + encodeURIComponent(entry.supabaseId), 'move-merge delete', function () { deleteSourceByClientKey(entry); });
+      else deleteSourceByClientKey(entry);
     }
     showToast('Moved & merged into ' + toZone, 'success');
   } else {
@@ -9076,12 +9265,53 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
     logActivity('Moved ' + entry.name + ' from ' + fromZone + ' to ' + toZone);
     saveState();
     if (networked) {
-      if (entry.supabaseId) runUpdate('id=eq.' + encodeURIComponent(entry.supabaseId), { zone: toZone, timestamp: new Date().toISOString() }, 'move zone');
-      else syncEntryToSupabase(entry, toZone).catch(function () { updateOfflineBannerState('error'); });
+      if (entry.supabaseId) {
+        // Re-zone the known row. FIX 7: 0 rows affected => the row is gone;
+        // re-insert into the target zone via a fresh delta.
+        runUpdate('id=eq.' + encodeURIComponent(entry.supabaseId), { zone: toZone, timestamp: new Date().toISOString() }, 'move zone', function () {
+          const reEntry = Object.assign({}, entry, {
+            clientEntryId: 'E' + Date.now() + '_' + Math.random().toString(36).slice(2, 5),
+          });
+          syncEntryToSupabase(reEntry, toZone).then(function () {
+            if (reEntry.supabaseId) { entry.supabaseId = reEntry.supabaseId; saveState(); }
+          }).catch(function () { updateOfflineBannerState('error'); });
+        });
+      } else {
+        // Source not stamped yet. Re-zone is just an insert into the target
+        // zone; the merge/idempotency path dedupes if the original insert
+        // committed under our client key.
+        syncEntryToSupabase(entry, toZone).then(function () {
+          // The original row (if it committed in fromZone under this client
+          // key) must not survive in both zones — but syncEntryToSupabase's
+          // client-key adopt path returns the SAME row id and PostgREST won't
+          // move its zone, so explicitly clean up any stale fromZone row.
+          deleteStaleSourceAfterMove(entry, fromZone, toZone);
+        }).catch(function () { updateOfflineBannerState('error'); });
+      }
     }
     showToast('Moved to ' + toZone, 'success');
   }
   renderCountPage();
+}
+
+/* After a non-merge move where the source row had no stamped supabaseId, the
+   re-insert into the target zone can adopt a row that committed in fromZone
+   under the same client_entry_id (idempotency). PostgREST adopt-without-write
+   leaves that committed row in fromZone, so the entry would appear in BOTH
+   zones. If the adopted row is still in fromZone, patch its zone to toZone. */
+function deleteStaleSourceAfterMove(entry, fromZone, toZone) {
+  if (!appState.audit || !appState.audit.supabaseId) return;
+  if (!entry.supabaseId) return;
+  const auditId = appState.audit.supabaseId;
+  supabaseRest.query('kount_entries',
+    'id=eq.' + encodeURIComponent(entry.supabaseId) + '&select=id,zone')
+    .then(function (r) {
+      if (r && !r.error && r.data && r.data[0] && r.data[0].zone === fromZone) {
+        supabaseRest.update('kount_entries', 'id=eq.' + encodeURIComponent(entry.supabaseId),
+          { zone: toZone, timestamp: new Date().toISOString() }).catch(function () {});
+      }
+    })
+    .catch(function () {});
 }
 
 /* ================================================================
@@ -9509,7 +9739,19 @@ function adjustQuantity(itemId, delta, zoneOverride) {
       updateOfflineBannerState('error');
     };
     supabaseRest.update('kount_entries', _filter, _body)
-      .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
+      .then(function (resp) {
+        if (resp && resp.error) { _enqueue(resp.error); return; }
+        // FIX 7: 0 rows matched but we held a supabaseId — the row was deleted
+        // under us (concurrent removal / read-replica). The absolute write was
+        // silently lost. Re-insert via the heal path so the qty isn't dropped.
+        if (resp && (!resp.data || resp.data.length === 0)) {
+          console.warn('[audit] adjustQuantity update matched 0 rows (expected 1) — re-inserting');
+          const orphan = Object.assign({}, item, { supabaseId: undefined });
+          syncEntryToSupabase(orphan, zone).then(function () {
+            if (orphan.supabaseId) { item.supabaseId = orphan.supabaseId; saveState(); }
+          }).catch(function () { updateOfflineBannerState('error'); });
+        }
+      })
       .catch(_enqueue);
   } else if (appState.audit && appState.audit.supabaseId && !item.supabaseId) {
     // Heal an orphan: this item was counted while the item_id FK bug was
@@ -9534,6 +9776,11 @@ let barcodeActive = false;
 let barcodeListenerAttached = false;
 let lastScannedCode = '';
 let lastScanTime = 0;
+// INSTANT SCAN per-barcode cooldown: code -> last-locked timestamp. A single
+// last-code guard double-counted A when scanning A,B,A within the window
+// (B reset the single slot). The map remembers every recently-locked code so
+// each one is independently debounced; stale entries are evicted on each pass.
+const recentlyScanned = new Map();
 let nativeBarcodeStream = null;
 let nativeScanInterval = null;
 
@@ -9660,11 +9907,15 @@ function processDetection(code, format) {
   const required = requiredFramesFor(confidence);
   const now = Date.now();
 
-  // Debounce: same code just fired within 3s — ignore
-  // INSTANT SCAN keeps the scanner open after a count, so this same-code
-  // guard is the single per-barcode cooldown (a DIFFERENT code resets the
-  // candidate below and locks immediately).
-  if (code === lastScannedCode && now - lastScanTime < SCAN_COOLDOWN_MS) return false;
+  // Debounce: this code locked within SCAN_COOLDOWN_MS — ignore.
+  // INSTANT SCAN keeps the scanner open after a count, so this per-barcode
+  // cooldown stops a lingering bottle re-firing. We track EVERY recently
+  // locked code (not just the last) so scanning A,B,A within the window
+  // doesn't double-count A. Evict stale entries first.
+  for (const [c, t] of recentlyScanned) {
+    if (now - t >= SCAN_COOLDOWN_MS) recentlyScanned.delete(c);
+  }
+  if (recentlyScanned.has(code)) return false;
 
   // If we lost the target for >600ms, reset the candidate
   if (scanCandidateCode && now - scanLastSeenAt > 600) {
@@ -9686,6 +9937,7 @@ function processDetection(code, format) {
   if (scanCandidateCount >= required) {
     lastScannedCode = code;
     lastScanTime = now;
+    recentlyScanned.set(code, now);
     return true;
   }
   return false;
@@ -9727,6 +9979,7 @@ function openBarcodeScanner() {
   document.getElementById('barcodeStatus').textContent = 'Initializing...';
   barcodeActive = true;
   lastScannedCode = '';
+  recentlyScanned.clear();
   resetScanConfirmation();
   _calcFabSetCamera(true); // hide floating calculator while camera is live
 
@@ -12076,27 +12329,57 @@ function closeCount1() {
       //   compute failed     -> all-items fallback + warn toast + queue retry
       //   not networked      -> all-items (local audit, no POS link)
       let computeOk = false;
+      // computeReadError = RPC succeeded but reading back the report errored
+      // (read-replica lag); distinct from a genuine "no POS link" so the toast
+      // doesn't mislead the user into thinking nothing computed.
+      let computeReadError = false;
       if (auditSupabaseId && navigator.onLine) {
         try {
+          // FIX 3: claim the self-echo BEFORE the RPC. The report INSERT (and
+          // its realtime echo) happens DURING the RPC, so setting the flag
+          // after it returns can let onAvtReportInserted -> loadAvtFromSupabase
+          // (venue-latest) fire on a possibly-wrong report first.
+          _avtSelfComputedAuditId = auditSupabaseId;
+          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
           const { error } = await supabaseRest.rpc(
             'compute_avt_for_audit',
             { p_audit_id: auditSupabaseId }
           );
           if (error) {
             console.warn('[avt] compute_avt_for_audit (count1) failed:', error.message || error);
+            // Compute didn't run — release the self-echo claim so a later
+            // legitimate report for this audit isn't suppressed.
+            _avtSelfComputedAuditId = null;
             enqueueComputeAvt(auditSupabaseId);
           } else {
-            // Suppress the realtime echo for our own RPC-triggered insert.
-            _avtSelfComputedAuditId = auditSupabaseId;
-            setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+            // FIX 4: re-verify the audit didn't change under us during the
+            // awaits before mutating its recount list below.
+            if (!appState.audit || appState.audit.supabaseId !== auditSupabaseId) {
+              showToast('Audit changed — reopen to close Count 1', 'error');
+              return;
+            }
             // Load the report we just produced (by audit_id, not venue-latest).
             const loaded = await loadAvtForAudit(auditSupabaseId);
-            computeOk = (loaded !== false);
+            if (loaded === 'error') {
+              // Compute succeeded but the read-back lagged even after retry.
+              computeReadError = true;
+              enqueueComputeAvt(auditSupabaseId);
+            } else {
+              computeOk = (loaded !== false);
+            }
           }
         } catch (e) {
           console.warn('[avt] compute_avt_for_audit (count1) threw:', e);
+          _avtSelfComputedAuditId = null;
           enqueueComputeAvt(auditSupabaseId);
         }
+      }
+
+      // FIX 4: re-verify once more after the full await chain before we mutate
+      // appState.audit.recounts (loadAvtForAudit awaits a retry delay too).
+      if (auditSupabaseId && (!appState.audit || appState.audit.supabaseId !== auditSupabaseId)) {
+        showToast('Audit changed — reopen to close Count 1', 'error');
+        return;
       }
 
       const avtData = appState.avtData || [];
@@ -12210,7 +12493,12 @@ function closeCount1() {
           });
         });
         logActivity('Count 1 closed (all-items fallback). All ' + allItems.length + ' items / ' + totalRows + ' zone rows listed for verification.');
-        if (networkedAudit) {
+        if (computeReadError) {
+          // Compute SUCCEEDED \u2014 only reading the report back lagged. Don't
+          // imply there's no POS link; the variance will appear once it's
+          // visible (a re-read is queued).
+          showToast('Variance computed, but the report wasn\u2019t readable yet \u2014 recount list shows all counted items for now; variance will update shortly.', 'warning');
+        } else if (networkedAudit) {
           // Networked but compute didn't produce a usable report: tell the user
           // why every item is listed and that a retry is queued.
           showToast('Variance couldn\u2019t be computed (offline or no POS link) \u2014 recount list shows all counted items.', 'warning');
@@ -12626,23 +12914,36 @@ function finalizeCount2() {
     if (!_auditSupabaseIdForAvt) return;
     try {
       if (navigator.onLine) {
+        // FIX 3: claim the self-echo BEFORE the RPC. The report INSERT and its
+        // realtime echo happen DURING the RPC; setting the flag afterwards can
+        // let onAvtReportInserted -> loadAvtFromSupabase (venue-latest) fire on
+        // a possibly-wrong report before the flag is set.
+        _avtSelfComputedAuditId = _auditSupabaseIdForAvt;
+        setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
         const { data: reportId, error } = await supabaseRest.rpc(
           'compute_avt_for_audit',
           { p_audit_id: _auditSupabaseIdForAvt }
         );
         if (error) {
           console.warn('[avt] compute_avt_for_audit RPC failed:', error.message || error);
+          // Compute didn't run — release the self-echo claim.
+          _avtSelfComputedAuditId = null;
           enqueueComputeAvt(_auditSupabaseIdForAvt);
           // v1.70: surface the failure (was silent). The audit is already
           // submitted at this point — close never blocks on compute.
           showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
         } else {
-          // Suppress the realtime echo for our own RPC-triggered insert.
-          _avtSelfComputedAuditId = _auditSupabaseIdForAvt;
-          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
           console.log('[avt] computed report id:', reportId);
-          // v1.70: reload the final report so the Variance tab shows it now.
-          await loadAvtForAudit(_auditSupabaseIdForAvt);
+          // FIX 2: the user may have started a NEW audit while this late
+          // compute ran. loadAvtForAudit writes appState.avtData and renders
+          // the variance page; only do that if the current audit is still the
+          // one we computed for, otherwise we'd clobber the new context.
+          if (appState.audit && appState.audit.supabaseId === _auditSupabaseIdForAvt) {
+            // v1.70: reload the final report so the Variance tab shows it now.
+            await loadAvtForAudit(_auditSupabaseIdForAvt);
+          } else {
+            console.log('[avt] audit changed during compute — skipping avtData write/render to avoid clobbering the new audit');
+          }
         }
       } else {
         enqueueComputeAvt(_auditSupabaseIdForAvt);
@@ -12650,10 +12951,16 @@ function finalizeCount2() {
       }
     } catch (e) {
       console.warn('[avt] compute_avt_for_audit threw:', e);
+      _avtSelfComputedAuditId = null;
       enqueueComputeAvt(_auditSupabaseIdForAvt);
       showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
     }
-  }).catch(() => {});
+  }).catch(() => {}).finally(function () {
+    // FIX 2: hold the double-fire guard until compute+load settle. It was
+    // previously released synchronously at the end of finalizeCount2 while the
+    // async chain was still running, allowing a re-entrant finalize.
+    _finalizingCount2 = false;
+  });
 
   // Mark recount items as resolved
   if (appState.audit.recounts) {
@@ -12673,7 +12980,8 @@ function finalizeCount2() {
 
   logActivity('Recount complete. Audit auto-closed and submitted.');
   saveState();
-  _finalizingCount2 = false;
+  // FIX 2: guard is released in the .finally() of the compute chain above, so
+  // it stays held until compute+load settle (was released here synchronously).
   loadHistoricAuditsFromSupabase().catch(function() {});   // keep picker fresh
   showToast('Audit complete! Final report ready.', 'success');
   showPage('summary');

@@ -217,4 +217,54 @@ test.describe('move between zones + All Count', () => {
     // Total across zones still 8 (6 Service Well + 2 Bar).
     await expect.poll(() => page.evaluate(() => window.getAllCountAggregated().find(g => g.name === "Tito's Handmade Vodka 750ml").total)).toBe(8);
   });
+
+  test('move-merge when source + target supabaseId is not yet stamped (FIX 6, B1)', async ({ page, db }) => {
+    // Count the same item in two zones. Both rows commit server-side and get
+    // their supabaseId stamped back locally.
+    await addManual(page, 'Belvedere 1L', 3);            // Liquor Room (source)
+    await switchZone(page, 'Bar');
+    await addManual(page, 'Belvedere 1L', 2);            // Bar (target / dup)
+    await expect.poll(() => db.t.kount_entries.filter(r => r.item_name === 'Belvedere 1L').length).toBe(2);
+
+    // Simulate the race the bug lives in: the rows committed server-side but
+    // their ids were NOT stamped back onto local state (response lost / still
+    // in flight). Null both local supabaseIds. PRE-FIX, the merge then sent
+    // syncEntryToSupabase(dup, toZone) with dup.qty = the POST-MERGE running
+    // total (5), so the 23505 path either adopted-without-writing (dropping
+    // the moved 3) or merge-added (double-counting to 7); and the source row,
+    // gated on `if (entry.supabaseId)`, was never deleted → survived in BOTH
+    // zones. POST-FIX: a fresh-key DELTA merges +3 exactly once, and the
+    // source is deleted by client-key lookup.
+    await page.evaluate(() => {
+      const c = appState.audit.counts;
+      (c['Liquor Room'] || []).forEach(e => { if (e.name === 'Belvedere 1L') e.supabaseId = undefined; });
+      (c['Bar'] || []).forEach(e => { if (e.name === 'Belvedere 1L') e.supabaseId = undefined; });
+      saveState();
+    });
+
+    // Move the Liquor Room entry into Bar via All Count.
+    await page.getByRole('button', { name: 'All Count', exact: true }).click();
+    await page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' }).click();
+    // Two per-zone rows in alpha order: Bar (0), Liquor Room (1). Move the
+    // Liquor Room one into Bar.
+    await page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' })
+      .getByRole('button', { name: /Move to another zone/i }).nth(1).click();
+    await page.locator('#moveZoneModal').waitFor({ state: 'visible' });
+    await page.locator('#moveZoneModal').getByRole('button', { name: 'Bar', exact: true }).click();
+
+    // Local: merged into Bar (3 + 2 = 5), Liquor Room gone.
+    await expect.poll(async () => {
+      const it = (await counted(page)).find(i => i.name === 'Belvedere 1L');
+      return it ? it.zone + ':' + it.qty : null;
+    }).toBe('Bar:5');
+    expect((await counted(page)).filter(i => i.name === 'Belvedere 1L').length).toBe(1);
+
+    // Server: exactly ONE row, in Bar, qty 5 — no double-count, no orphan
+    // survivor in Liquor Room.
+    await expect.poll(() => db.t.kount_entries.filter(r => r.item_name === 'Belvedere 1L').length).toBe(1);
+    const row = db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L');
+    expect(row.zone).toBe('Bar');
+    expect(row.qty).toBe(5);
+    expect(db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L' && r.zone === 'Liquor Room')).toBeUndefined();
+  });
 });
