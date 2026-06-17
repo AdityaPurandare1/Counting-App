@@ -104,6 +104,26 @@ async function loginAs(page, personaKey) {
   return p;
 }
 
+/* The catalog (itemMaster) loads asynchronously via loadItemMaster() after
+   navigation/auth and is NOT awaited by the login/start flow. Any test that
+   types a name and relies on matching (exact-name link, the fuzzy "Did you
+   mean?" gate, search suggestions) races that load: if itemMaster is still
+   empty when the name is submitted, the match silently falls through to
+   custom-item creation and the expected picker/link never appears. Wait for
+   the seed catalog to be searchable — the same window.searchItemMaster signal
+   the photo-OCR specs poll on — before any test interacts. "Belvedere" is a
+   carried seed item present in every fixture, so its presence is a reliable
+   catalog-loaded predicate. */
+async function waitForCatalog(page) {
+  await base.expect.poll(
+    () => page.evaluate(() =>
+      (typeof window.searchItemMaster === 'function')
+        ? window.searchItemMaster('Belvedere', 5).length
+        : 0),
+    { timeout: 10000 }
+  ).toBeGreaterThan(0);
+}
+
 async function selectVenueAndStart(page) {
   await page.getByText('Delilah LA').first().click();
   await page.locator('#preAuditScreen').waitFor({ state: 'visible' });
@@ -114,6 +134,8 @@ async function selectVenueAndStart(page) {
   const gotIt = page.getByRole('button', { name: /^Got it/i });
   if (await gotIt.isVisible().catch(() => false)) await gotIt.click();
   await page.locator('#auditCodeModal').waitFor({ state: 'hidden' }).catch(() => {});
+  // Don't hand control back to the test until the catalog is matchable.
+  await waitForCatalog(page);
 }
 
 async function startAuditAs(page, personaKey) {
@@ -131,6 +153,7 @@ async function joinAuditAs(page, personaKey, code) {
   await page.fill('#joinAuditCodeInput', code);
   await page.getByRole('button', { name: /^Join$/ }).click();
   await page.locator('#activeAuditContent').waitFor({ state: 'visible' });
+  await waitForCatalog(page);
 }
 
 /* Add an item via the Manual entry modal. An exact catalog name auto-links to
@@ -190,6 +213,6 @@ async function restInsert(page, table, body, asEmail) {
 
 module.exports = {
   test, expect: base.expect, PERSONAS, M,
-  loginAs, selectVenueAndStart, startAuditAs, joinAuditAs, addManual, switchZone, counted,
+  loginAs, selectVenueAndStart, startAuditAs, joinAuditAs, waitForCatalog, addManual, switchZone, counted,
   card, tapPlus, tapMinus, qtyOf, restInsert,
 };
