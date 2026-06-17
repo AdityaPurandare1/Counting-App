@@ -154,6 +154,48 @@ test.describe('List tab + zone reference list (v1.72)', () => {
   });
 });
 
+/* D-H1: archived masters must be excluded from carriedSet.
+   loadCarriedItemsFromSupabase() embeds master_items!inner(is_active) and
+   filters master_items.is_active=eq.true, so a kount_carried_items row pointing
+   at an ARCHIVED (is_active=false) master must NOT enter carriedSet — otherwise
+   reconcileCarriedAgainstMaster scores it as unresolved and can wrongly force an
+   itemMaster reload. The fixtures seed one such archived master
+   ("Belvedere 1L (old)", M.arch) with a carried row; the active carried rows
+   number 9. This spec asserts the archived item is treated as NOT carried. */
+test.describe('D-H1 archived-master exclusion from carriedSet', () => {
+  test('the archived carried row is excluded; carriedSet holds only the 9 active rows', async ({ page }) => {
+    await startAuditAs(page, 'manager');
+
+    // carriedSet is populated at boot from loadCarriedItemsFromSupabase(). Wait
+    // for it to settle, then re-load explicitly so the assertion is not racing
+    // the boot fetch. carriedSet is a script-scoped binding (reachable from
+    // page.evaluate the same way appState/loadPriorAuditReference are in the
+    // specs above), not a property of window.
+    await page.evaluate(async () => { await loadCarriedItemsFromSupabase(); });
+
+    // Exactly the 9 ACTIVE carried masters — the archived one is dropped by the
+    // !inner is_active filter.
+    await expect.poll(() => page.evaluate(() => carriedSet.size)).toBe(9);
+
+    // The archived master id is NOT in carriedSet.
+    expect(await page.evaluate((id) => carriedSet.has(String(id)), M.arch)).toBe(false);
+    // A real active master IS in carriedSet (sanity: the filter didn't nuke all).
+    expect(await page.evaluate((id) => carriedSet.has(String(id)), M.belv)).toBe(true);
+
+    // And it never reaches the user-facing carried list either: the archived
+    // "Belvedere 1L (old)" must not render as a carried row, while the active
+    // "Belvedere 1L" does. (getCarriedMasterItems derives from carriedSet.)
+    await page.getByRole('button', { name: 'List', exact: true }).click();
+    const list = page.locator('#guidedContent .c-item');
+    await expect(list.filter({ hasText: 'Belvedere 1L (old)' })).toHaveCount(0);
+    // The active "Belvedere 1L" still shows. Match its exact name on .c-name so
+    // the (old) variant's row text can't accidentally satisfy it.
+    const belvNames = await page.locator('#guidedContent .c-name', { hasText: 'Belvedere 1L' }).allTextContents();
+    expect(belvNames).toContain('Belvedere 1L');
+    expect(belvNames).not.toContain('Belvedere 1L (old)');
+  });
+});
+
 /* v1.73: deduped DISPLAY catalog + render cap.
    - master_items carries dup-canon pairs (a bare-name row + a size-suffixed
      row for the SAME product+size). The List/reference must show only the

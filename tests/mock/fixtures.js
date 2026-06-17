@@ -18,6 +18,10 @@ const M = {
   cris750: '99999999-9999-4999-8999-999999999999', // 1800 Anejo Cristalino 750ml (sized, kept)
   // Unique product with NO sized twin — must survive dedupe (not lost).
   olives:  'aaaaaaa1-aaaa-4aaa-8aaa-aaaaaaaaaaa1', // Castelvetrano Olives (no size)
+  // Archived (is_active=false) master with a carried row pointing at it. The
+  // loadCarriedItemsFromSupabase embed-join filter (D-H1) must keep this OUT
+  // of carriedSet, so the carried count stays at the 9 active rows below.
+  arch:    'bbbbbbb2-bbbb-4bbb-8bbb-bbbbbbbbbbb2', // Old Belvedere variant (archived)
 };
 
 const PURCHASE = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; // a legacy purchase_items id
@@ -56,6 +60,8 @@ function seed() {
       masterItem(M.cris750, '1800 Anejo Cristalino 750ml',        'Liquor Cost', 750,  'ml'),
       // Unique no-size product (no sized twin) — must still appear.
       masterItem(M.olives,  'Castelvetrano Olives',               'Bar Consumables', null, null),
+      // Archived variant — soft-deleted via the Fix F admin workflow.
+      (function () { const m = masterItem(M.arch, 'Belvedere 1L (old)', 'Liquor Cost', 1, 'L'); m.is_active = false; return m; })(),
     ],
     // Carried subset: everything EXCEPT Don Julio 1942 — so a manual search for
     // "Don Julio" must fall through to the full-catalog ("Not in your
@@ -66,6 +72,10 @@ function seed() {
       { master_item_id: M.titos }, { master_item_id: M.cab }, { master_item_id: M.redbull },
       { master_item_id: M.cris }, { master_item_id: M.cris750 },
       { master_item_id: M.olives },
+      // Carried row on an ARCHIVED master — the embed-join filter (D-H1) must
+      // drop this so it never enters carriedSet (would otherwise skew
+      // reconcileCarriedAgainstMaster).
+      { master_item_id: M.arch },
     ],
     master_item_upcs: [
       { id: 'upc-1', master_item_id: M.belv, upc_raw: '5060071510019', upc_normalized: '5060071510019', source: 'seed' },

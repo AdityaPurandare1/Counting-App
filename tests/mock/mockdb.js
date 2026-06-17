@@ -85,8 +85,40 @@ function matchFilter(row, f) {
   return true; // unknown operator → don't exclude
 }
 
-function applyQuery(rows, q) {
-  let out = rows.filter(function (r) { return q.filters.every(function (f) { return matchFilter(r, f); }); });
+/* Resolves a PostgREST embed-join filter (e.g. master_items.is_active=eq.true)
+   the way an !inner embed does on the server: the parent row is kept only if
+   its joined-table row passes the filter. We map embed-table → {fk on the
+   parent, pk on the embedded table} so the carried-items query (D-H1) and any
+   future embed filter exclude rows whose parent points at a non-matching
+   (e.g. archived) row. Unknown embeds fall through to "keep" so unrelated
+   tests aren't affected. */
+const EMBED_JOINS = {
+  // kount_carried_items.master_item_id → master_items.id
+  master_items: { fk: 'master_item_id', pk: 'id' },
+};
+
+function applyEmbedFilters(tables, rows, filters) {
+  const embedFilters = filters.filter(function (f) { return f.col.indexOf('.') !== -1; });
+  if (embedFilters.length === 0) return rows;
+  return rows.filter(function (r) {
+    return embedFilters.every(function (f) {
+      const dot = f.col.indexOf('.');
+      const embed = f.col.slice(0, dot);
+      const col = f.col.slice(dot + 1);
+      const join = EMBED_JOINS[embed];
+      if (!join) return true; // unknown embed → don't exclude
+      const fkVal = r[join.fk];
+      const ref = (tables[embed] || []).find(function (x) { return x[join.pk] === fkVal; });
+      if (!ref) return false; // !inner: no joined row → drop the parent
+      return matchFilter(ref, { col: col, op: f.op });
+    });
+  });
+}
+
+function applyQuery(rows, q, tables) {
+  const topFilters = q.filters.filter(function (f) { return f.col.indexOf('.') === -1; });
+  let out = rows.filter(function (r) { return topFilters.every(function (f) { return matchFilter(r, f); }); });
+  if (tables) out = applyEmbedFilters(tables, out, q.filters);
   if (q.order) {
     // PostgREST multi-column order: "col1.asc,col2.desc". The v1.62 AVT
     // report selection orders by source.asc,uploaded_at.desc — a single-
@@ -194,7 +226,7 @@ class MockDB {
 
   select(table, headers, qs) {
     const rows = this.t[table] || [];
-    return { status: 200, body: applyQuery(rows, parseQuery(qs)) };
+    return { status: 200, body: applyQuery(rows, parseQuery(qs), this.t) };
   }
 
   update(table, headers, qs, body) {
