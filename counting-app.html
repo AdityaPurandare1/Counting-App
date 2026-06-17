@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.74';
+const APP_VERSION = '1.75';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -11913,6 +11913,22 @@ function severityOrder(sev) {
 function renderVariancePage() {
   updateCountPhaseIndicator();
 
+  // Recount targeting is a RECOUNT-STAGE concept. Count 1 is still in
+  // progress (or there's no audit) means the variance numbers are
+  // preliminary and nothing is "flagged for recount" yet — recounting only
+  // begins once Count 1 closes (count_phase 'review' or 'count2'). Outside
+  // that window the Variance tab shows variance as a preview but suppresses
+  // all recount framing.
+  const inRecountStage = !!(appState.audit &&
+    (appState.audit.countPhase === 'review' || appState.audit.countPhase === 'count2'));
+
+  // If the user parked on the 'flagged' filter and then left (or never
+  // entered) the recount stage, fall back to 'all' so we don't render an
+  // unexplained empty list — the flagged chip is hidden in that state.
+  if (!inRecountStage && appState.varianceFilter === 'flagged') {
+    appState.varianceFilter = 'all';
+  }
+
   const avtData = appState.avtData || [];
   let filteredAvt = avtData;
 
@@ -11938,7 +11954,9 @@ function renderVariancePage() {
       category: avt.category,
       weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
     });
-    const recount = needsRecount(severity);
+    // Only surface recount targeting in the recount stage; during Count 1
+    // (or no audit) this stays false so no row is presented "to recount".
+    const recount = inRecountStage && needsRecount(severity);
     const isMissing = counted === 0 && expected > 0;
 
     totalExpected += expected;
@@ -11964,12 +11982,29 @@ function renderVariancePage() {
   document.getElementById('varianceStats').innerHTML =
     '<div class="stat-row"><span class="stat-label">AVT items</span><span class="stat-value">' + filteredAvt.length + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Items counted</span><span class="stat-value accent">' + Object.keys(countedMap).length + '</span></div>' +
-    '<div class="stat-row"><span class="stat-label">Flagged for recount</span><span class="stat-value danger">' + flaggedCount + '</span></div>' +
+    // "Flagged for recount" only means something once Count 1 has closed.
+    (inRecountStage
+      ? '<div class="stat-row"><span class="stat-label">Flagged for recount</span><span class="stat-value danger">' + flaggedCount + '</span></div>'
+      : '') +
     '<div class="stat-row"><span class="stat-label">Critical</span><span class="stat-value danger">' + criticalCount + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Missing (not counted)</span><span class="stat-value warning">' + missingCount + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Total variance value</span><span class="stat-value ' +
       (filteredAvt.reduce((s, a) => s + a.varianceValue, 0) < 0 ? 'danger' : 'success') + '">$' +
       Math.abs(filteredAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '</span></div>';
+
+  // Hide the "Flagged" filter chip outside the recount stage — there are no
+  // recount targets to filter to, and the active filter has already been
+  // reset to 'all' above so the chip won't be left selected-but-hidden.
+  const flaggedChip = document.querySelector('.mode-toggle [data-vf="flagged"]');
+  if (flaggedChip) {
+    flaggedChip.classList.toggle('hide', !inRecountStage);
+    // Keep the active highlight in sync with appState.varianceFilter — it may
+    // have just been reset away from 'flagged' above, so re-derive from state
+    // rather than trusting whatever chip the user last clicked.
+    flaggedChip.closest('.mode-toggle').querySelectorAll('.mode-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.vf === appState.varianceFilter);
+    });
+  }
 
   // Filter
   let filtered = rows;
