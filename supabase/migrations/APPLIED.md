@@ -50,6 +50,7 @@ editor over the project's early history; individual dates were not recorded (mar
 | 0038 | avt_window_count1                      | 2026-06-12   | ✅ Window end = `coalesce(count2_closed_at, completed_at, count1_closed_at)` so AVT computes at Count 1 close (was 22023 error). |
 | 0039 | avt_purchases_invoice_date             | 2026-06-15   | ✅ Purchases window falls back to `invoices.invoice_date` when `v_effective_receipts.received_at` is NULL. NOTE: upstream invoice-LINE ingestion for hwood venues is still broken (Poppy silent since 2026-04-21) — not app-fixable. |
 | 0040 | repoint_carried_to_active              | 2026-06-17   | ✅ Re-pointed 296 carried rows off archived masters onto the active same-name twin (collision-guarded), pruned 879 unresolvable. Post-commit verify = 0 carried rows pointing at an inactive master. |
+| 0041 | client_error_log                       | 2026-06-17   | ✅ New `kount_client_errors` telemetry table (12 cols). RLS: INSERT for anon+authenticated, SELECT for authenticated corporate only. Both indexes present. |
 
 > When you apply the next migration, add its row here with the real date and a one-line
 > note, and confirm its verification block returned the expected result.

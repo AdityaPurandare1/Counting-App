@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.76';
+const APP_VERSION = '1.77';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3172,6 +3172,101 @@ const supabaseRest = {
   },
 };
 
+/* ----------------------------------------------------------------
+   Client-side error telemetry (v1.77).
+
+   Best-effort, fire-and-forget capture of errors that prod currently
+   swallows silently. Writes ONE row to kount_client_errors via a
+   direct fetch POST with Prefer: return=minimal (NOT supabaseRest.insert,
+   whose return=representation triggers an INSERT...RETURNING read-back
+   that anon has no SELECT RLS for -> 42501). The whole helper is wrapped
+   so it can NEVER throw, block the UI, or recurse:
+
+   - Reentrancy guard (_logErrInFlight): an error raised *inside* this
+     helper (or its insert) is dropped, never re-logged.
+   - Throttle/dedupe: a Map of signature ("context|message") -> last
+     send time skips identical errors fired within 60s.
+   - Session cap: at most ERR_LOG_MAX_PER_SESSION sends per page load,
+     so a tight error loop can't flood the table.
+   - Gated on navigator.onLine and a configured anon key.
+   ---------------------------------------------------------------- */
+const _errLogLastSent = new Map();      // signature -> ms timestamp
+const ERR_LOG_DEDUPE_MS = 60 * 1000;
+const ERR_LOG_MAX_PER_SESSION = 25;
+let _errLogSessionCount = 0;
+let _logErrInFlight = false;
+
+function logClientError(context, errOrMessage, extra) {
+  // Reentrancy guard FIRST so anything below that throws can't recurse.
+  if (_logErrInFlight) return;
+  _logErrInFlight = true;
+  try {
+    if (_errLogSessionCount >= ERR_LOG_MAX_PER_SESSION) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+    if (!SUPABASE_ANON_KEY || SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return;
+
+    const err = (errOrMessage && typeof errOrMessage === 'object') ? errOrMessage : null;
+    const rawMessage = err ? (err.message != null ? err.message : errOrMessage) : errOrMessage;
+    const message = String(rawMessage == null ? '' : rawMessage).slice(0, 1000);
+    const stack = String((err && err.stack) || '').slice(0, 4000);
+
+    const signature = String(context) + '|' + message;
+    const now = Date.now();
+    const last = _errLogLastSent.get(signature);
+    if (last != null && (now - last) < ERR_LOG_DEDUPE_MS) return;
+    _errLogLastSent.set(signature, now);
+    _errLogSessionCount += 1;
+
+    // appState is declared further down; reference it defensively so this
+    // helper is safe to call before it exists (e.g. a boot-time error).
+    const state = (typeof appState !== 'undefined' && appState) ? appState : null;
+    const row = {
+      app: 'phone',
+      app_version: APP_VERSION,
+      level: (extra && extra.level) || 'error',
+      context: String(context),
+      message: message,
+      stack: stack,
+      url: (typeof location !== 'undefined' && location.href) || null,
+      user_email: (state && state.user && state.user.email) || null,
+      venue_id: (state && state.currentVenue && state.currentVenue.id) || null,
+      user_agent: (typeof navigator !== 'undefined' && navigator.userAgent) || null,
+    };
+
+    // Fire-and-forget. We do NOT go through supabaseRest.insert because that
+    // sends Prefer: return=representation, which makes PostgREST do an
+    // INSERT ... RETURNING read-back — and kount_client_errors grants SELECT
+    // only to corporate users, not anon, so every anon error-log insert is
+    // rejected by RLS (42501). With return=minimal there's no read-back, so
+    // the anon INSERT lands (201). The fetch promise is best-effort: never
+    // awaited (can't block) and .catch'd so a rejection can't surface.
+    fetch(SUPABASE_URL + '/rest/v1/kount_client_errors', {
+      method: 'POST',
+      headers: _supabaseAuthHeaders({
+        'Content-Type': 'application/json',
+        'Prefer': 'return=minimal',
+      }),
+      body: JSON.stringify(row),
+    }).catch(function () {});
+  } catch (e) {
+    // Swallow — telemetry must never break the app.
+  } finally {
+    _logErrInFlight = false;
+  }
+}
+
+/* Global capture for the errors that never reach a try/catch. Registered
+   once here, after supabase init. addEventListener (not onerror=) so we
+   never clobber any other handler. logClientError is itself best-effort. */
+if (typeof window !== 'undefined') {
+  window.addEventListener('error', function (e) {
+    logClientError('window.error', (e && e.error) || (e && e.message));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    logClientError('unhandledrejection', e && e.reason);
+  });
+}
+
 let supabaseItems = [];
 let supabaseLoaded = false;
 
@@ -3222,7 +3317,7 @@ async function loadSupabaseItems() {
     supabaseLoaded = true;
     console.log('Supabase: loaded ' + all.length + ' master_items (in-scope, paginated)');
     return true;
-  } catch (e) { console.error('Supabase load failed:', e); return false; }
+  } catch (e) { console.error('Supabase load failed:', e); logClientError('loadSupabaseItems', e); return false; }
 }
 
 /* ================================================================
@@ -3268,6 +3363,7 @@ async function loadCarriedItemsFromSupabase() {
     return true;
   } catch (e) {
     console.warn('[carried] load threw:', e);
+    logClientError('loadCarriedItemsFromSupabase', e);
     return false;
   }
 }
@@ -3834,6 +3930,7 @@ async function loadAvtFromSupabase() {
     return true;
   } catch (e) {
     console.warn('[avt] Supabase load failed, keeping local copy:', e);
+    logClientError('loadAvtFromSupabase', e);
     return false;
   }
 }
@@ -3917,6 +4014,7 @@ async function loadAvtForAudit(auditId) {
     return rows.length;
   } catch (e) {
     console.warn('[avt] loadAvtForAudit failed:', e);
+    logClientError('loadAvtForAudit', e);
     return false;
   }
 }
@@ -9592,6 +9690,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   if (appState.audit && appState.audit.supabaseId) {
     syncEntryToSupabase(newEntry, appState.currentZone).catch(err => {
       console.warn('[audit] syncEntryToSupabase failed:', err);
+      logClientError('syncEntryToSupabase', err);
       updateOfflineBannerState('error');
     });
   }
