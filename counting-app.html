@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.81';
+const APP_VERSION = '1.82';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -12407,10 +12407,21 @@ function findCountedQtyForAvtItem(avt, countedMap) {
 function findCountedZonesForAvtItem(avt) {
   if (!appState.audit) return [];
   const avtName = avt.itemName || '';
+  // The AVT row is name-derived (no master id). Resolve the name to a master id
+  // ONCE so we can also match counted entries by masterId — a guarantee that the
+  // zone(s) populate even if the counted name string differs subtly from the
+  // compute name. Compute's item_name and the counted entries both come from
+  // master_items.name, so name match is the common path; id match is the safety.
+  let masterId = null;
+  if (typeof itemMaster !== 'undefined' && Array.isArray(itemMaster)) {
+    const m = itemMaster.find(mm => _avtNamesMatch(mm.name, avtName));
+    if (m) masterId = m.id;
+  }
   const totals = {};
   for (const [zone, items] of Object.entries(appState.audit.counts)) {
     for (const item of items) {
-      if (_avtNamesMatch(item.name, avtName)) {
+      const matches = (masterId && item.masterId === masterId) || _avtNamesMatch(item.name, avtName);
+      if (matches) {
         totals[zone] = (totals[zone] || 0) + (Number(item.qty) || 0);
       }
     }
