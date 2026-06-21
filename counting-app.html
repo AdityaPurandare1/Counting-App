@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.79';
+const APP_VERSION = '1.81';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8032,20 +8032,29 @@ async function startNewAudit() {
     if (appState.audit.supabaseId) leaveNetworkedAudit();
   }
 
-  // Try networked path first; fall back to solo if not eligible / offline / error.
-  const role = appState.user && appState.user.role;
-  const canNetwork = (role === 'corporate' || role === 'manager') && navigator.onLine && !!supabaseClient;
-  if (canNetwork) {
-    const audit = await startNetworkedAudit(venue);
-    if (audit) {
-      createAndStartAudit(venue, { supabaseId: audit.id, joinCode: audit.join_code });
-      showAuditCodeModal(audit.join_code, venue.name);
-      return;
-    }
-    showToast('Could not start shared audit \u2014 starting solo', 'warn');
+  // A shared audit MUST be written to Supabase to be useful \u2014 that write is what
+  // makes it visible on admin and joinable by counters. The old behavior fell
+  // back to a silent LOCAL-ONLY ("solo") audit when the network write failed or
+  // the device was briefly offline; those audits never sync, so admin and other
+  // counters never see them. Never do that. Require the network write; on failure
+  // surface a clear error and start NOTHING, so the manager simply taps Start
+  // again rather than unknowingly counting into an invisible audit.
+  if (!navigator.onLine || !supabaseClient) {
+    showToast('You must be online to start a shared audit. Reconnect and tap Start again \u2014 nothing was started.', 'error');
+    return;
   }
-
-  createAndStartAudit(venue);
+  let audit = await startNetworkedAudit(venue);
+  if (!audit) {
+    // One retry to ride out a transient blip before giving up.
+    await new Promise(function (r) { setTimeout(r, 800); });
+    audit = await startNetworkedAudit(venue);
+  }
+  if (!audit) {
+    showToast('Could not create the shared audit (network issue). Nothing was started \u2014 check your connection and tap Start again.', 'error');
+    return;
+  }
+  createAndStartAudit(venue, { supabaseId: audit.id, joinCode: audit.join_code });
+  showAuditCodeModal(audit.join_code, venue.name);
 }
 
 function createAndStartAudit(venue, opts) {
@@ -8931,7 +8940,12 @@ function openGuidedEntry(masterId) {
   appState.guidedCurrentItem = item;
   appState.guidedIssue = 'none';
 
-  const existing = findCountEntry(masterId);
+  // Pre-fill the qty from THIS zone only. An item counted in another zone
+  // (including by another counter, surfaced via cross-device sync) must NOT
+  // pre-fill here — an item not yet counted in this zone starts blank (0),
+  // never carried over from Back Bar / another counter's zone.
+  const _curZoneItems = (appState.audit && appState.audit.counts[appState.currentZone]) || [];
+  const existing = _curZoneItems.find(i => i.masterId === masterId) || null;
 
   document.getElementById('guidedItemTitle').childNodes[0].textContent = item.name + ' ';
   // Populate hero card
@@ -9126,29 +9140,16 @@ function submitGuidedEntry() {
   const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
   const issue = appState.guidedIssue;
 
-  // Two cases to handle:
-  //   (a) Same-zone edit — user is fixing the qty on an item already
-  //       counted in this zone. The OLD code did splice + addCountEntry,
-  //       which fired a server-side INSERT that 23505-collided with the
-  //       existing remote row and SUM-merged old + new qty (double-count).
-  //       Fix: edit in place locally + remote, no delete/insert dance.
-  //   (b) Move — user picked the item from a zone where it was previously
-  //       counted, then chose a different zone. Old rows in other zones
-  //       become orphans on the desktop unless we delete them server-side.
+  // Same-zone edit only. An item can legitimately be counted in MULTIPLE
+  // zones (e.g. Red Bull in both bars), and with cross-device sync each phone
+  // holds every counter's entries across zones. The old code treated "same
+  // item in another zone" as a MOVE and deleted those rows server-side — which
+  // deleted OTHER counters' valid counts AND made this counter's qty field
+  // pre-fill from the other zone. Removed entirely: counting an item in this
+  // zone never touches its rows in other zones. Real moves go through
+  // moveEntryToZone (the explicit ⇄ button).
   const currentZoneItems = appState.audit.counts[appState.currentZone] || [];
   const sameZoneEntry = currentZoneItems.find(i => i.masterId === item.id);
-
-  // Collect old entries from OTHER zones to remove (move case).
-  const movedFromSupabaseIds = [];
-  Object.entries(appState.audit.counts).forEach(([zone, zoneItems]) => {
-    if (zone === appState.currentZone) return;
-    const index = zoneItems.findIndex(i => i.masterId === item.id);
-    if (index > -1) {
-      const removed = zoneItems[index];
-      if (removed && removed.supabaseId) movedFromSupabaseIds.push(removed.supabaseId);
-      zoneItems.splice(index, 1);
-    }
-  });
 
   if (sameZoneEntry) {
     // Edit-in-place: replace fields, mirror as direct UPDATE on supabaseId.
@@ -9207,26 +9208,6 @@ function submitGuidedEntry() {
     // which fires its own sync. The merge_key insert won't collide because
     // any same-item rows in OTHER zones use a different key (zone differs).
     addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, issue, null, null, item.id);
-  }
-
-  // Move-cleanup: delete the orphan rows from other zones server-side.
-  // Fire-and-forget; ordering vs the insert/update above doesn't affect
-  // correctness (different merge_keys), only data hygiene timing.
-  if (appState.audit && appState.audit.supabaseId && movedFromSupabaseIds.length > 0) {
-    const idsList = movedFromSupabaseIds.map(id => encodeURIComponent(id)).join(',');
-    const _filter = 'id=in.(' + idsList + ')';
-    const _enqueue = function (err) {
-      if (isRetryableError(err)) {
-        enqueuePendingMutation('rest-delete', { table: 'kount_entries', filter: _filter },
-          { label: 'guided move-cleanup (' + (item.name || 'unknown') + ')' });
-      } else {
-        console.error('[audit] guided move-cleanup non-retryable, dropping:', err);
-      }
-      updateOfflineBannerState('error');
-    };
-    supabaseRest.deleteRows('kount_entries', _filter)
-      .then(function (resp) { if (resp && resp.error) _enqueue(resp.error); })
-      .catch(_enqueue);
   }
 
   closeGuidedEntry();
