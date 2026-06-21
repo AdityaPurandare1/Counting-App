@@ -8716,6 +8716,14 @@ function applyQtyEdit(entryId, zone, raw, currentQty) {
    GUIDED MODE
    ================================================================ */
 function renderGuidedMode() {
+  // Background catalog/realtime/reconciliation refreshes can reach this
+  // renderer while a counter is typing. Replacing #guidedContent in that
+  // moment destroys the focused input, which dismisses the mobile keyboard
+  // and loses the query. The debounced search updates its own results, so the
+  // count list can safely wait until the input is no longer active.
+  const activeSearch = document.getElementById('guidedSearchInput');
+  if (activeSearch && document.activeElement === activeSearch) return;
+
   const countedIds = getCountedItemIds();
   const isLocked = appState.audit.status === 'submitted';
   const totalItems = itemMaster.length;

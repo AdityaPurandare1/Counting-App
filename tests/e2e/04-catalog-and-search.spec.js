@@ -50,6 +50,26 @@ test.describe('catalog create + matching', () => {
     await expect(page.locator('#manualSuggestions')).toContainText(/Not in your inventory list/i);
   });
 
+  test('background refresh does not close the guided search or erase its query', async ({ page }) => {
+    await startAuditAs(page, 'manager');
+    const search = page.locator('#guidedSearchInput');
+
+    await search.focus();
+    await search.pressSequentially('Belvedere');
+    await expect(page.locator('#guidedSearchResults')).toContainText('Belvedere');
+
+    const keptSameInput = await page.evaluate(() => {
+      const before = document.getElementById('guidedSearchInput');
+      window.renderCountPage();
+      return before === document.getElementById('guidedSearchInput');
+    });
+
+    await expect(search).toBeFocused();
+    await expect(search).toHaveValue('Belvedere');
+    await expect(page.locator('#guidedSearchResults')).toContainText('Belvedere');
+    expect(keptSameInput).toBe(true);
+  });
+
   test('Fuzzy gate: typing a near-name shows "Did you mean?" instead of silently creating a dup (Anna @ Poppy 2026-06)', async ({ page, db }) => {
     await startAuditAs(page, 'manager');
     const masterBefore = db.t.master_items.length;
