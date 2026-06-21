@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.78';
+const APP_VERSION = '1.79';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6057,37 +6057,43 @@ function stopAuditEntriesPoll() {
 }
 
 async function reconcileAuditEntries() {
-  if (!appState.audit || !appState.audit.supabaseId || !navigator.onLine || !supabaseClient) return;
-  const auditId = appState.audit.supabaseId;
-  const rows = await fetchAuditEntries(auditId);
-  // If the fetch failed mid-pagination (null), do NOTHING this cycle: pruning
-  // against an incomplete snapshot would delete valid, already-synced local
-  // entries. Skip upsert + prune and let the next tick try again.
-  if (!rows) return;
-  // The audit may have changed (left/switched) during the await — re-guard
-  // before mutating state so we don't reconcile against the wrong audit.
-  if (!appState.audit || appState.audit.supabaseId !== auditId) return;
+  // Whole body is best-effort: this is a 12s background safety net, so it must
+  // NEVER surface an error mid-count (no console error, no unhandledrejection).
+  try {
+    if (!appState.audit || !appState.audit.supabaseId || !navigator.onLine || !supabaseClient) return;
+    const auditId = appState.audit.supabaseId;
+    const rows = await fetchAuditEntries(auditId);
+    // If the fetch failed mid-pagination (null), do NOTHING this cycle: pruning
+    // against an incomplete snapshot would delete valid, already-synced local
+    // entries. Skip upsert + prune and let the next tick try again.
+    if (!rows) return;
+    // The audit may have changed (left/switched) during the await — re-guard
+    // before mutating state so we don't reconcile against the wrong audit.
+    if (!appState.audit || appState.audit.supabaseId !== auditId) return;
 
-  const serverIds = new Set(rows.map(r => r.id));
-  // Upsert every server row through the existing merge path (inserts if
-  // absent, updates if present) so we reuse the same dedupe/idempotency logic.
-  for (let i = 0; i < rows.length; i++) {
-    mergeRemoteEntryIntoLocal(rows[i], 'UPDATE');
+    const serverIds = new Set(rows.map(r => r.id));
+    // Upsert every server row through the existing merge path (inserts if
+    // absent, updates if present) so we reuse the same dedupe/idempotency logic.
+    for (let i = 0; i < rows.length; i++) {
+      mergeRemoteEntryIntoLocal(rows[i], 'UPDATE');
+    }
+
+    // Prune entries deleted on other devices: drop only entries that HAVE a
+    // supabaseId the server no longer knows about. Keep any local entry without
+    // a supabaseId (not yet synced / offline / pending) so we never delete
+    // un-mirrored work.
+    const counts = appState.audit.counts || {};
+    for (const zone in counts) {
+      if (!Object.prototype.hasOwnProperty.call(counts, zone)) continue;
+      counts[zone] = counts[zone].filter(e => !e.supabaseId || serverIds.has(e.supabaseId));
+    }
+
+    saveState();
+    const currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage && currentPage.id === 'page-count') renderCountPage();
+  } catch (e) {
+    console.debug('[reconcile] skipped this cycle:', e && e.message);
   }
-
-  // Prune entries deleted on other devices: drop only entries that HAVE a
-  // supabaseId the server no longer knows about. Keep any local entry without
-  // a supabaseId (not yet synced / offline / pending) so we never delete
-  // un-mirrored work.
-  const counts = appState.audit.counts || {};
-  for (const zone in counts) {
-    if (!Object.prototype.hasOwnProperty.call(counts, zone)) continue;
-    counts[zone] = counts[zone].filter(e => !e.supabaseId || serverIds.has(e.supabaseId));
-  }
-
-  saveState();
-  const currentPage = document.querySelector('.page:not(.hide)');
-  if (currentPage && currentPage.id === 'page-count') renderCountPage();
 }
 
 function entryFromSupabaseRow(row) {
@@ -6483,11 +6489,17 @@ function leaveNetworkedAudit() {
 }
 
 function onAuditEntryRealtime(evt) {
-  const row = evt.new || evt.old;
-  if (!row) return;
-  mergeRemoteEntryIntoLocal(row, evt.eventType);
-  const currentPage = document.querySelector('.page:not(.hide)');
-  if (currentPage && currentPage.id === 'page-count') renderCountPage();
+  // Fires on every remote count during the audit — best-effort so a single
+  // malformed event can never surface an error or break the live feed.
+  try {
+    const row = evt.new || evt.old;
+    if (!row) return;
+    mergeRemoteEntryIntoLocal(row, evt.eventType);
+    const currentPage = document.querySelector('.page:not(.hide)');
+    if (currentPage && currentPage.id === 'page-count') renderCountPage();
+  } catch (e) {
+    console.debug('[entry realtime] skipped event:', e && e.message);
+  }
 }
 
 function mergeRemoteEntryIntoLocal(row, evtType) {
