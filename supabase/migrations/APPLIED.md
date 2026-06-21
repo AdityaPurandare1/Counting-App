@@ -51,6 +51,7 @@ editor over the project's early history; individual dates were not recorded (mar
 | 0039 | avt_purchases_invoice_date             | 2026-06-15   | ✅ Purchases window falls back to `invoices.invoice_date` when `v_effective_receipts.received_at` is NULL. NOTE: upstream invoice-LINE ingestion for hwood venues is still broken (Poppy silent since 2026-04-21) — not app-fixable. |
 | 0040 | repoint_carried_to_active              | 2026-06-17   | ✅ Re-pointed 296 carried rows off archived masters onto the active same-name twin (collision-guarded), pruned 879 unresolvable. Post-commit verify = 0 carried rows pointing at an inactive master. |
 | 0041 | client_error_log                       | 2026-06-17   | ✅ New `kount_client_errors` telemetry table (12 cols). RLS: INSERT for anon+authenticated, SELECT for authenticated corporate only. Both indexes present. |
+| 0042 | recounts_replica_identity_full         | 2026-06-21   | ✅ `kount_recounts` → REPLICA IDENTITY FULL so realtime UPDATE/DELETE events carry audit_id for the filter (Count-2 recount edits now propagate across devices). |
 
 > When you apply the next migration, add its row here with the real date and a one-line
 > note, and confirm its verification block returned the expected result.

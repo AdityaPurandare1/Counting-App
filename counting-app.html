@@ -3009,7 +3009,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.77';
+const APP_VERSION = '1.78';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3025,7 +3025,7 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
    pre-auth/bootstrap calls. */
 const supabaseClient = (window.supabase && window.supabase.createClient)
   ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      realtime: { params: { eventsPerSecond: 2 } },
+      realtime: { params: { eventsPerSecond: 10 } },
       auth: {
         persistSession: true,
         autoRefreshToken: true,
@@ -3039,13 +3039,29 @@ const supabaseClient = (window.supabase && window.supabase.createClient)
    (autoRefreshToken) is picked up without restarting the app. Null while
    the user is signed out. */
 let currentSupabaseJwt = null;
+
+/* Push the current JWT (or the anon key when signed out) onto the realtime
+   socket. Without this the socket keeps running as anon — even after sign-in —
+   so RLS-scoped postgres_changes can be silently filtered out. Fully guarded:
+   the Playwright mock's stubbed client has no .realtime.setAuth, so this is a
+   no-op there rather than a throw. */
+function syncRealtimeAuth() {
+  try {
+    if (supabaseClient && supabaseClient.realtime && typeof supabaseClient.realtime.setAuth === 'function') {
+      supabaseClient.realtime.setAuth(currentSupabaseJwt || SUPABASE_ANON_KEY);
+    }
+  } catch (e) {}
+}
+
 if (supabaseClient) {
   supabaseClient.auth.getSession().then(function (resp) {
     var session = resp && resp.data && resp.data.session;
     currentSupabaseJwt = session ? session.access_token : null;
+    syncRealtimeAuth();
   });
   supabaseClient.auth.onAuthStateChange(function (event, session) {
     currentSupabaseJwt = session ? session.access_token : null;
+    syncRealtimeAuth();
     // PASSWORD_RECOVERY fires when the user lands on the page via a
     // reset-password email link. We surface a prompt so they can set
     // a new password right there instead of being silently signed in.
@@ -5693,7 +5709,8 @@ async function joinNetworkedAudit(rawCode) {
   } catch (e) { console.warn('[audit] join threw:', e); }
 
   // Pull the existing entries so the counter starts in sync
-  const existing = await fetchAuditEntries(audit.id);
+  // A failed pre-fetch (null) just starts empty; the reconcile poll converges.
+  const existing = await fetchAuditEntries(audit.id) || [];
   const counts = {};
   (matchingVenue.zones || []).forEach(z => { counts[z] = []; });
   existing.forEach(row => {
@@ -5992,12 +6009,85 @@ async function syncAuditMetaToSupabase(patch) {
 }
 
 async function fetchAuditEntries(auditId) {
-  const { data, error } = await supabaseRest.query(
-    'kount_entries',
-    'audit_id=eq.' + encodeURIComponent(auditId) + '&select=*&order=timestamp.asc'
-  );
-  if (error) { console.warn('[audit] fetch entries failed:', error); return []; }
-  return data || [];
+  // PostgREST caps an un-ranged query at ~1000 rows. A large audit (or one
+  // the reconciliation poll prunes against) MUST return every entry, or the
+  // prune would delete real rows that fell past the cap and joiners would
+  // start out of sync. Page via limit/offset until a short page comes back.
+  const PAGE = 1000;
+  const all = [];
+  for (let offset = 0; ; offset += PAGE) {
+    const { data, error } = await supabaseRest.query(
+      'kount_entries',
+      'audit_id=eq.' + encodeURIComponent(auditId) +
+      '&select=*&order=timestamp.asc' +
+      '&limit=' + PAGE + '&offset=' + offset
+    );
+    // Signal failure (null), NOT a partial array: a partial result would make
+    // reconcileAuditEntries build serverIds from an incomplete snapshot and
+    // prune valid, already-synced local entries that simply weren't fetched
+    // yet. Bailing with null lets the caller skip the prune entirely this tick.
+    if (error) { console.warn('[audit] fetch entries failed:', error); return null; }
+    const page = data || [];
+    for (let i = 0; i < page.length; i++) all.push(page[i]);
+    // A short (or empty) page means we've reached the end.
+    if (page.length < PAGE) break;
+  }
+  return all;
+}
+
+/* ---------- Reconciliation poll ----------
+   Realtime postgres_changes can be dropped (server throttle, socket blips,
+   tab backgrounding) and never re-converge on their own. While we're on a
+   shared audit we periodically re-pull every entry and reconcile it into
+   local state — this is the safety net that makes counts reliably appear
+   across all counters' devices even when a realtime event is missed. */
+let _auditEntriesPollTimer = null;
+const AUDIT_ENTRIES_POLL_MS = 12000;
+
+function startAuditEntriesPoll() {
+  stopAuditEntriesPoll();
+  _auditEntriesPollTimer = setInterval(reconcileAuditEntries, AUDIT_ENTRIES_POLL_MS);
+}
+
+function stopAuditEntriesPoll() {
+  if (_auditEntriesPollTimer) {
+    clearInterval(_auditEntriesPollTimer);
+    _auditEntriesPollTimer = null;
+  }
+}
+
+async function reconcileAuditEntries() {
+  if (!appState.audit || !appState.audit.supabaseId || !navigator.onLine || !supabaseClient) return;
+  const auditId = appState.audit.supabaseId;
+  const rows = await fetchAuditEntries(auditId);
+  // If the fetch failed mid-pagination (null), do NOTHING this cycle: pruning
+  // against an incomplete snapshot would delete valid, already-synced local
+  // entries. Skip upsert + prune and let the next tick try again.
+  if (!rows) return;
+  // The audit may have changed (left/switched) during the await — re-guard
+  // before mutating state so we don't reconcile against the wrong audit.
+  if (!appState.audit || appState.audit.supabaseId !== auditId) return;
+
+  const serverIds = new Set(rows.map(r => r.id));
+  // Upsert every server row through the existing merge path (inserts if
+  // absent, updates if present) so we reuse the same dedupe/idempotency logic.
+  for (let i = 0; i < rows.length; i++) {
+    mergeRemoteEntryIntoLocal(rows[i], 'UPDATE');
+  }
+
+  // Prune entries deleted on other devices: drop only entries that HAVE a
+  // supabaseId the server no longer knows about. Keep any local entry without
+  // a supabaseId (not yet synced / offline / pending) so we never delete
+  // un-mirrored work.
+  const counts = appState.audit.counts || {};
+  for (const zone in counts) {
+    if (!Object.prototype.hasOwnProperty.call(counts, zone)) continue;
+    counts[zone] = counts[zone].filter(e => !e.supabaseId || serverIds.has(e.supabaseId));
+  }
+
+  saveState();
+  const currentPage = document.querySelector('.page:not(.hide)');
+  if (currentPage && currentPage.id === 'page-count') renderCountPage();
 }
 
 function entryFromSupabaseRow(row) {
@@ -6337,8 +6427,16 @@ setInterval(function () { replayPendingMutations(); }, PENDING_REPLAY_INTERVAL_M
 function subscribeToAuditRealtime(auditId) {
   if (!supabaseClient || !auditId) return;
   if (auditChannel) unsubscribeFromAuditRealtime();
+  // Make sure the realtime socket carries the signed-in JWT (not anon)
+  // before we open the channel, so RLS-scoped changes aren't filtered out.
+  syncRealtimeAuth();
   auditChannelState = 'connecting';
   updateOfflineBannerState();
+
+  // Reconciliation safety net — covers start, join, and session-restore
+  // resubscribe (all route through here). Re-pulls entries on a cadence so a
+  // dropped realtime event still converges across devices.
+  startAuditEntriesPoll();
 
   auditChannel = supabaseClient
     .channel('kount-audit-' + auditId)
@@ -6354,6 +6452,7 @@ function subscribeToAuditRealtime(auditId) {
 }
 
 function unsubscribeFromAuditRealtime() {
+  stopAuditEntriesPoll();
   if (auditChannel && supabaseClient) {
     try { supabaseClient.removeChannel(auditChannel); } catch (e) {}
   }
@@ -6378,6 +6477,7 @@ function leaveNetworkedAudit() {
     ).catch(function (e) { console.warn('[audit] leave: delete member row failed', e); });
   }
 
+  stopAuditEntriesPoll();
   unsubscribeFromAuditRealtime();
   hideOfflineBanner();
 }
@@ -7222,6 +7322,7 @@ async function handleLogin() {
       // out, which falls back to the anon key.
       if (data.session && data.session.access_token) {
         currentSupabaseJwt = data.session.access_token;
+        syncRealtimeAuth();
       }
     } else if (error && /invalid login|invalid_credentials|invalid grant/i.test(error.message || '')) {
       authInvalidCredentials = true;
@@ -7419,6 +7520,7 @@ function teardownSessionResources() {
   stopAppUsersRealtime();
   stopVenuesRealtime();
   leaveNetworkedAudit();
+  stopAuditEntriesPoll();
   stopVenueZonesRealtime();
   // v1.45: also tear down carried-items realtime + the 60s catalog
   // poll. Both were leaking past sign-out — the channel kept reacting
