@@ -66,6 +66,30 @@ async function tapFab(page) {
   await page.locator('#calcFab').click();
 }
 
+/* The manual modal slides up (slideUp 0.25s) from translateY(100%). While it
+   animates, its header — including the close "X" — transits up through the
+   whole viewport, crossing the docked FAB's vertical band for a few frames
+   before settling near the top. The overlap audit measures getBoundingClientRect,
+   so reading it mid-animation captures that transient overlap. Locally the
+   frames are fast enough that the audit lands after the slide finishes; in CI
+   the slower frame timing lets the audit read a mid-flight rect → a spurious
+   "BUTTON \"X\"" hit. Wait for the close-X box to stop moving (two identical
+   reads a frame apart) so the audit only ever sees the settled layout. */
+async function waitForStableBox(page, selector) {
+  await expect.poll(async () => page.evaluate(async (sel) => {
+    const read = () => {
+      const el = document.querySelector(sel);
+      return el ? el.getBoundingClientRect() : null;
+    };
+    const a = read();
+    if (!a || a.width === 0 || a.height === 0) return false;
+    // Compare two reads a frame apart: a settled element doesn't move.
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const b = read();
+    return !!b && Math.abs(a.top - b.top) < 0.5 && Math.abs(a.left - b.left) < 0.5;
+  }, selector), { timeout: 7000 }).toBe(true);
+}
+
 test.describe('floating calculator', () => {
   test.beforeEach(async ({ page }) => { await startAuditAs(page, 'manager'); });
 
@@ -85,9 +109,12 @@ test.describe('floating calculator', () => {
     await page.evaluate(() => window.showPage('count'));
     expect(await fabVisible(page)).toBe(true);
 
-    // With the add-item (Manual entry) modal open.
+    // With the add-item (Manual entry) modal open. Let its slide-up settle
+    // first — the close-X box transits through the FAB band mid-animation,
+    // and a rect read taken then is a false overlap (see waitForStableBox).
     await page.getByRole('button', { name: 'Manual' }).click();
     await page.locator('#manualModal').waitFor({ state: 'visible' });
+    await waitForStableBox(page, '#manualModal .close-x');
     const audit = await page.evaluate(overlapAudit);
     expect(audit.hits, 'manual modal overlaps: ' + JSON.stringify(audit.hits)).toEqual([]);
     expect(audit.hitTestOk).toBe(true);
