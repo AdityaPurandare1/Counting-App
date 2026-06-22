@@ -124,6 +124,24 @@ async function waitForCatalog(page) {
   ).toBeGreaterThan(0);
 }
 
+/* The app shows a transient "kΩunt v<version>" startup toast via a 800ms
+   setTimeout after login. showToast() clears ALL existing .toast nodes before
+   adding its own, so if that delayed version toast fires AFTER a test triggers
+   an assertion toast (e.g. "No items counted"), it silently clobbers the toast
+   the test is asserting on — a timing flake that depends on how fast login +
+   the test's first action run. Drain it before handing control to the test:
+   wait for the version toast to appear and self-remove (its own 2500ms timer)
+   so it can't overwrite a later assertion toast. */
+async function settleStartupToast(page) {
+  const versionToast = page.locator('.toast', { hasText: /^kΩunt v/ });
+  // The toast is scheduled at +800ms after login; wait for it to actually fire
+  // (so no pending setTimeout can clobber a later assertion toast), then remove
+  // it immediately rather than waiting out its 2500ms self-timer. If it already
+  // came and went, the appear-wait times out fast and there's nothing to clear.
+  const appeared = await versionToast.waitFor({ state: 'visible', timeout: 2000 }).then(() => true).catch(() => false);
+  if (appeared) await versionToast.evaluate((el) => el.remove()).catch(() => {});
+}
+
 async function selectVenueAndStart(page) {
   await page.getByText('Delilah LA').first().click();
   await page.locator('#preAuditScreen').waitFor({ state: 'visible' });
@@ -136,6 +154,9 @@ async function selectVenueAndStart(page) {
   await page.locator('#auditCodeModal').waitFor({ state: 'hidden' }).catch(() => {});
   // Don't hand control back to the test until the catalog is matchable.
   await waitForCatalog(page);
+  // Drain the delayed startup version toast so it can't clobber a later
+  // assertion toast (timing flake — see settleStartupToast).
+  await settleStartupToast(page);
 }
 
 async function startAuditAs(page, personaKey) {
@@ -154,6 +175,7 @@ async function joinAuditAs(page, personaKey, code) {
   await page.getByRole('button', { name: /^Join$/ }).click();
   await page.locator('#activeAuditContent').waitFor({ state: 'visible' });
   await waitForCatalog(page);
+  await settleStartupToast(page);
 }
 
 /* Add an item via the Manual entry modal. An exact catalog name auto-links to
@@ -213,6 +235,6 @@ async function restInsert(page, table, body, asEmail) {
 
 module.exports = {
   test, expect: base.expect, PERSONAS, M,
-  loginAs, selectVenueAndStart, startAuditAs, joinAuditAs, waitForCatalog, addManual, switchZone, counted,
+  loginAs, selectVenueAndStart, startAuditAs, joinAuditAs, waitForCatalog, settleStartupToast, addManual, switchZone, counted,
   card, tapPlus, tapMinus, qtyOf, restInsert,
 };

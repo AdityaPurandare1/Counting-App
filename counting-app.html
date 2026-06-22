@@ -3063,7 +3063,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.83';
+const APP_VERSION = '1.84';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -13052,7 +13052,7 @@ function closeCount1AndFinalize() {
   if (allItems.length === 0) { showToast('No items counted yet. Count some items first.', 'error'); return; }
 
   showConfirm('Finalize from Count 1? This SKIPS Count 2, treats the Count-1 counts as final, and generates the variance report. This cannot be undone in the app.', async () => {
-    if (_finalizingFromCount1) return;
+    if (_finalizingFromCount1 || _closingCount1) return;
     if (!appState.audit || appState.audit.status === 'submitted') { showToast('Audit already finalized', 'error'); return; }
     _finalizingFromCount1 = true;
     try {
@@ -13095,15 +13095,23 @@ function closeCount1AndFinalize() {
         }
       }
 
-      appState.auditHistory.push({ ...appState.audit, venueName: appState.currentVenue?.name });
-      const badge = document.getElementById('headerAuditBadge');
-      if (badge) { badge.className = 'audit-badge submitted'; badge.textContent = 'Submitted'; }
-      logActivity('Count 1 finalized by admin (Count 2 skipped). Final report generated.');
-      saveState();
-      loadHistoricAuditsFromSupabase().catch(function () {});
-      showToast('Audit finalized from Count 1 — final report ready.', 'success');
-      showPage('variance');
-      renderVariancePage();
+      // Re-check audit identity: a user can start a NEW audit during the
+      // `await metaSync` / `await compute_avt_for_audit` above. Without this
+      // guard the NEW audit's state gets pushed to history + stamped under the
+      // old finalize. Mirrors finalizeCount2's FIX 2 and closeCount1's FIX 4.
+      if (appState.audit && appState.audit.supabaseId === auditSupabaseId) {
+        appState.auditHistory.push({ ...appState.audit, venueName: appState.currentVenue?.name });
+        const badge = document.getElementById('headerAuditBadge');
+        if (badge) { badge.className = 'audit-badge submitted'; badge.textContent = 'Submitted'; }
+        logActivity('Count 1 finalized by admin (Count 2 skipped). Final report generated.');
+        saveState();
+        loadHistoricAuditsFromSupabase().catch(function () {});
+        showToast('Audit finalized from Count 1 — final report ready.', 'success');
+        showPage('variance');
+        renderVariancePage();
+      } else {
+        console.log('[finalize] audit changed during compute — skipping history/nav');
+      }
     } finally {
       _finalizingFromCount1 = false;
     }
