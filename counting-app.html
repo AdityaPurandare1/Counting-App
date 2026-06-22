@@ -983,8 +983,12 @@ html, body {
 }
 
 .scan-frame {
-  width: 280px;
-  height: 160px;
+  /* Larger centered scan region (v1.83): a wider/taller window lets a barcode
+     held farther back still land inside the frame, extending the effective
+     range. Capped with vw/vh so it stays centered and never overflows a small
+     phone screen. */
+  width: min(340px, 86vw);
+  height: min(210px, 40vh);
   border: none;
   border-radius: 14px;
   position: relative;
@@ -2072,6 +2076,34 @@ html, body {
 .calc-fab svg { width: 22px; height: 22px; }
 .calc-fab.dragging { transition: none; opacity: 0.92; }
 
+/* ---------- BACK-TO-TOP FAB (counted-item list) ----------
+   Bottom-LEFT dock so it never collides with the right-edge calculator FAB,
+   and raised above the bottom nav (~64px tall + safe area) so the nav tabs
+   stay tappable. Fades in only after the list is scrolled past a threshold. */
+.back-to-top {
+  position: fixed;
+  left: 16px;
+  bottom: calc(78px + var(--safe-bottom));
+  width: 44px;
+  height: 44px;
+  z-index: 99;               /* below the calc FAB (10000), above page content */
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: var(--shadow-lg);
+  -webkit-tap-highlight-color: transparent;
+  opacity: 1;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.back-to-top.hide { display: none; }
+.back-to-top svg { width: 20px; height: 20px; }
+
 .calc-fab-panel {
   position: fixed;
   z-index: 10001;
@@ -2266,6 +2298,17 @@ html, body {
            inline-editable counted-item list inside #guidedContent. -->
       <div id="guidedContent"></div>
     </div><!-- end activeAuditContent -->
+
+    <!-- Back-to-top FAB (v1.83): appears once the counted list is scrolled
+         down. Docked bottom-LEFT so it clears the right-edge calculator FAB,
+         and lifted above the bottom nav so it never overlaps the nav tabs. -->
+    <button id="backToTopBtn" class="back-to-top hide" type="button"
+            onclick="scrollCountToTop()" aria-label="Back to top">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 19V5M5 12l7-7 7 7"/>
+      </svg>
+    </button>
   </div>
 
   <!-- ========== CALCULATOR PAGE ========== -->
@@ -2350,6 +2393,9 @@ html, body {
     <!-- Action buttons (change based on audit phase) -->
     <div id="varianceActions" style="margin-top:16px">
       <button class="submit-btn" id="closeCount1Btn" onclick="closeCount1()">Close Count 1 and generate recount list</button>
+      <!-- Corporate-only single-pass close (v1.83): skip the recount round
+           entirely — close Count 1, compute variance, and submit as final. -->
+      <button class="submit-btn hide" id="closeCount1FinalizeBtn" onclick="closeCount1AndFinalize()">Close Count 1 &amp; Finalize</button>
       <button class="submit-btn hide" id="closeCount2Btn" onclick="closeCount2()">Close Count 2 and generate final report</button>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="submit-btn secondary" style="flex:1" id="exportCount1Btn" onclick="exportCountCSV(1)">Export Count 1 CSV</button>
@@ -2912,6 +2958,14 @@ html, body {
         <button class="partial-btn" onclick="setPartial(0.75)" type="button">75%</button>
         <button class="partial-btn active" onclick="setPartial(1)" type="button">Full</button>
       </div>
+
+      <!-- Case-quantity helpers: ADD to the current qty (e.g. tapping +12
+           twice = +24). Same row style as the % partials above. -->
+      <div id="guidedCaseBtns" class="gh-partials">
+        <button class="partial-btn" onclick="addGuidedQty(6)" type="button">+6</button>
+        <button class="partial-btn" onclick="addGuidedQty(12)" type="button">+12</button>
+        <button class="partial-btn" onclick="addGuidedQty(24)" type="button">+24</button>
+      </div>
     </div>
     <div class="form-group">
       <label>Issue (select if applicable)</label>
@@ -3009,7 +3063,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.82';
+const APP_VERSION = '1.83';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7478,6 +7532,11 @@ function showPage(page) {
   // itself (redundant there) and pre-login. See FLOATING CALCULATOR section.
   _calcFabPage = page;
   updateCalcFabVisibility();
+
+  // Back-to-top FAB only belongs to the count page; re-evaluate (and hide it
+  // on every other page) on each navigation. Defined later in the file but
+  // hoisted by `function` declaration, so it's safe to call here.
+  try { updateBackToTopVisibility(); } catch (e) {}
 }
 
 /* ================================================================
@@ -8446,6 +8505,15 @@ function updateHeaderCount() {
 let countView = 'zone';
 const allCountExpanded = new Set();
 
+/* Manual-search "keep list open" state (Feature, v1.83). The search results
+   list used to clear after picking an item, forcing a re-search for every
+   variant of a brand. We now remember the active query + the master id of the
+   item just counted so a re-render of the count view can restore the input
+   text, re-run the search, and briefly highlight the row that was added.
+   Cleared only when the user empties the input or leaves the search. */
+let guidedSearchQuery = '';
+let guidedSearchJustAddedId = null;
+
 function setCountView(v) {
   countView = (v === 'all') ? 'all' : (v === 'list') ? 'list' : 'zone';
   renderGuidedMode();
@@ -8766,12 +8834,14 @@ function renderGuidedMode() {
   if (countView === 'all') {
     html += renderAllCountList();
     document.getElementById('guidedContent').innerHTML = html;
+    restoreGuidedSearch();
     return;
   }
 
   if (countView === 'list') {
     html += renderListTab();
     document.getElementById('guidedContent').innerHTML = html;
+    restoreGuidedSearch();
     return;
   }
 
@@ -8874,12 +8944,30 @@ function renderGuidedMode() {
   }
 
   document.getElementById('guidedContent').innerHTML = html;
+  restoreGuidedSearch();
+}
+
+/* Keep the manual-search list open across re-renders (Feature, v1.83). After
+   a pick, renderGuidedMode rebuilds the search input (empty) + an empty
+   results div; restore the remembered query and synchronously re-run the
+   search so the variant list stays visible and the just-added row highlights.
+   No-op when there's no active query. */
+function restoreGuidedSearch() {
+  if (!guidedSearchQuery || !guidedSearchQuery.trim()) return;
+  const input = document.getElementById('guidedSearchInput');
+  if (!input) return;
+  input.value = guidedSearchQuery;
+  doGuidedSearch(guidedSearchQuery);
 }
 
 /* Guided mode search — searches item master on each keystroke (debounced) */
 let guidedSearchTimeout = null;
 
 function onGuidedSearch(value) {
+  // Remember the live query so a count-view re-render (after a pick) can keep
+  // the results list open instead of clearing it. Emptying the input clears it.
+  guidedSearchQuery = value || '';
+  if (!String(value).trim()) guidedSearchJustAddedId = null;
   if (guidedSearchTimeout) clearTimeout(guidedSearchTimeout);
   guidedSearchTimeout = setTimeout(() => doGuidedSearch(value), 150);
 }
@@ -8887,9 +8975,13 @@ function onGuidedSearch(value) {
 function doGuidedSearch(value) {
   const query = value.toLowerCase().trim();
   const resultsEl = document.getElementById('guidedSearchResults');
+  if (!resultsEl) return;
+
+  guidedSearchQuery = value || '';
 
   if (query.length < 1) {
     resultsEl.innerHTML = '';
+    guidedSearchJustAddedId = null;
     return;
   }
 
@@ -8915,7 +9007,12 @@ function doGuidedSearch(value) {
     lastCarried = carried;
     const isCounted = countedIds.has(item.id);
     const entry = isCounted ? findCountEntry(item.id) : null;
-    return divider + '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
+    // Feature (v1.83): briefly highlight the row that was just counted so the
+    // user gets confirmation without the list collapsing. A checkmark + tinted
+    // border; cleared on the next keystroke or pick.
+    const justAdded = guidedSearchJustAddedId && item.id === guidedSearchJustAddedId;
+    const addedStyle = justAdded ? 'border:1px solid var(--success);box-shadow:0 0 0 1px var(--success) inset;' : '';
+    return divider + '<div class="c-item ' + (isCounted ? 'counted' : '') + ' fade-in" onclick="openGuidedEntry(\'' + item.id + '\')" style="cursor:pointer;' + addedStyle + (isLocked ? 'opacity:0.4;pointer-events:none' : '') + '">' +
       '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
       '<div class="c-info">' +
         '<div class="c-name">' + esc(item.name) + '</div>' +
@@ -8925,7 +9022,9 @@ function doGuidedSearch(value) {
           (isCounted ? '<span class="method-badge guided">counted: ' + formatQty(entry.qty) + '</span>' : '') +
         '</div>' +
       '</div>' +
-      '<div style="color:var(--text-dim)">></div>' +
+      (justAdded
+        ? '<div style="color:var(--success);font-size:18px;font-weight:700">✓</div>'
+        : '<div style="color:var(--text-dim)">></div>') +
     '</div>';
   }).join('');
 }
@@ -9017,6 +9116,19 @@ function adjustModalQty(inputId, delta) {
   const current = clampQty(input.value);
   const base = Number.isFinite(current) ? current : 1;
   const next = clampQty(Math.max(0, base + delta));
+  input.value = String(Number.isFinite(next) ? next : 0);
+}
+
+/* Case-quantity helpers (+6 / +12 / +24). ADDITIVE — they add the given
+   amount to the current #guidedQty value via the same clamp/normalize path
+   adjustGuidedQty uses, so tapping +12 twice yields +24. No .focus() so the
+   mobile keyboard doesn't pop on every tap. */
+function addGuidedQty(amount) {
+  const input = document.getElementById('guidedQty');
+  if (!input) return;
+  const current = clampQty(input.value);
+  const base = Number.isFinite(current) ? current : 0;
+  const next = clampQty(Math.max(0, base + amount));
   input.value = String(Number.isFinite(next) ? next : 0);
 }
 
@@ -9216,6 +9328,20 @@ function submitGuidedEntry() {
     // which fires its own sync. The merge_key insert won't collide because
     // any same-item rows in OTHER zones use a different key (zone differs).
     addCountEntry(item.name, item.category, qty, 'guided', item.sku, issueNotes, issue, null, null, item.id);
+  }
+
+  // Feature (v1.83): if the user got here from the manual-search list, keep
+  // that list open and flag the just-counted item so renderGuidedMode can
+  // highlight its row. The highlight self-clears after a moment so a later
+  // pick of the same row doesn't stay green. No effect when not searching.
+  if (guidedSearchQuery && guidedSearchQuery.trim()) {
+    guidedSearchJustAddedId = item.id;
+    setTimeout(function () {
+      if (guidedSearchJustAddedId === item.id) {
+        guidedSearchJustAddedId = null;
+        try { renderGuidedMode(); } catch (e) {}
+      }
+    }, 2500);
   }
 
   closeGuidedEntry();
@@ -10022,6 +10148,12 @@ let lastScanTime = 0;
 const recentlyScanned = new Map();
 let nativeBarcodeStream = null;
 let nativeScanInterval = null;
+// Watchdog re-entrancy guard (v1.83). A single detect() can run longer than
+// the scan interval on a slow device; without this flag the intervals stack
+// up, each awaiting the previous, and the UI freezes on "hold steady". The
+// finally block ALWAYS clears it, so a thrown/rejected detect never wedges
+// the loop — the next tick simply tries again.
+let _nativeDetecting = false;
 
 // Format-aware confirmation thresholds. The brute-force 4-frame check used
 // to filter false positives across the board; that was slow because most
@@ -10232,8 +10364,13 @@ function openBarcodeScanner() {
 /* Native BarcodeDetector — uses phone's built-in barcode engine */
 async function openNativeBarcodeScanner() {
   try {
+    // Higher-res stream (v1.83): a sharper frame gives the detector more
+    // pixels per bar, extending the working range so a case barcode held
+    // farther back still locks. `ideal` (not `exact`) so a device that can't
+    // do 1080p degrades gracefully instead of throwing. The test env stubs
+    // getUserMedia, so this never actually negotiates there.
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
     });
     // Race guard: getUserMedia is async. If the scanner was closed
     // between modal-open and the stream resolving (e.g. iOS Safari
@@ -10292,8 +10429,17 @@ async function openNativeBarcodeScanner() {
     } catch (e) {}
     const detector = new BarcodeDetector({ formats: useFormats });
 
+    // Higher detection frequency (v1.83): poll every 60ms (was 100ms) so a
+    // barcode locks faster. The _nativeDetecting watchdog below makes this
+    // safe even when a single detect() outlasts the interval.
+    _nativeDetecting = false;
     nativeScanInterval = setInterval(async () => {
       if (!barcodeActive || video.readyState < 2) return;
+      // Watchdog: never let two detect() passes overlap. If the previous one
+      // is still running (slow device / large frame), skip this tick rather
+      // than queue another await behind it.
+      if (_nativeDetecting) return;
+      _nativeDetecting = true;
 
       try {
         const barcodes = await detector.detect(video);
@@ -10325,8 +10471,14 @@ async function openNativeBarcodeScanner() {
             updateScanUI(0, null, scanCandidateRequired);
           }
         }
-      } catch (e) {}
-    }, 100);
+      } catch (e) {
+        // Swallow per-frame detect errors (a transient frame the engine can't
+        // decode throws on some devices). The finally clears the flag so the
+        // loop self-heals on the next tick — it must never freeze here.
+      } finally {
+        _nativeDetecting = false;
+      }
+    }, 60);
 
   } catch (error) {
     document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
@@ -10409,8 +10561,10 @@ function openQuaggaBarcodeScanner() {
       target: document.getElementById('barcodeViewfinder'),
       constraints: {
         facingMode: 'environment',
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        // Higher-res stream (v1.83) — more pixels per bar = longer working
+        // range. ideal (not exact) degrades gracefully on weaker cameras.
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
       },
     },
     decoder: {
@@ -10419,7 +10573,15 @@ function openQuaggaBarcodeScanner() {
       readers: ['ean_reader', 'ean_8_reader', 'upc_reader', 'upc_e_reader', 'code_128_reader', 'code_39_reader', 'i2of5_reader', 'code_93_reader', 'codabar_reader'],
     },
     locate: true,
-    frequency: 10,
+    // Detection tuning (v1.83): poll faster (20fps), use a medium patch so
+    // the locator finds the barcode from farther away, and turn OFF halfSample
+    // so the full-res frame is decoded (sharper bars at range) now that we
+    // request a 1080p stream above.
+    frequency: 20,
+    locator: {
+      patchSize: 'medium',
+      halfSample: false,
+    },
   }, function (err) {
     if (err) {
       document.getElementById('barcodeStatus').textContent = 'Camera failed. Use photo or manual.';
@@ -10459,6 +10621,7 @@ function closeBarcodeScanner() {
 
   // Stop native scanner
   if (nativeScanInterval) { clearInterval(nativeScanInterval); nativeScanInterval = null; }
+  _nativeDetecting = false; // clear the watchdog so the next session starts clean
   if (nativeBarcodeStream) {
     nativeBarcodeStream.getTracks().forEach(t => t.stop());
     nativeBarcodeStream = null;
@@ -11830,6 +11993,33 @@ function restoreCalcFabPos() {
 /* Drag plumbing — pointer events + setPointerCapture so it works for
    touch, mouse and pen. A <8px move is a tap (opens the panel); anything
    bigger is a drag and never opens it. */
+/* ---------- BACK-TO-TOP (counted-item list) ----------
+   The count page (#page-count) is its own scroll container (overflow-y:auto),
+   so we listen to ITS scroll, not the window's. The button shows past ~400px
+   and is hidden otherwise; tapping it smooth-scrolls the list back to the top. */
+const BACK_TO_TOP_THRESHOLD = 400;
+
+function scrollCountToTop() {
+  const page = document.getElementById('page-count');
+  if (!page) return;
+  try { page.scrollTo({ top: 0, behavior: 'smooth' }); }
+  catch (e) { page.scrollTop = 0; } // older WebViews: no smooth option
+}
+
+function updateBackToTopVisibility() {
+  const page = document.getElementById('page-count');
+  const btn = document.getElementById('backToTopBtn');
+  if (!page || !btn) return;
+  const show = !page.classList.contains('hide') && page.scrollTop > BACK_TO_TOP_THRESHOLD;
+  btn.classList.toggle('hide', !show);
+}
+
+(function initBackToTop() {
+  const page = document.getElementById('page-count');
+  if (!page) return;
+  page.addEventListener('scroll', updateBackToTopVisibility, { passive: true });
+})();
+
 (function initCalcFab() {
   const fab = document.getElementById('calcFab');
   const panel = document.getElementById('calcFabPanel');
@@ -12475,6 +12665,8 @@ function updateVarianceActions() {
   const c2Btn = document.getElementById('closeCount2Btn');
   const e1Btn = document.getElementById('exportCount1Btn');
   const e2Btn = document.getElementById('exportCount2Btn');
+  // Admin(corporate)-only "Close Count 1 & Finalize" (skip Count 2).
+  const fBtn  = document.getElementById('closeCount1FinalizeBtn');
 
   // Role gates only protect SHARED audits (same pattern as endAuditEarly):
   // a counter running a personal solo/local audit closes their own counts.
@@ -12488,8 +12680,11 @@ function updateVarianceActions() {
     c2Btn.classList.add('hide');
     e1Btn.classList.remove('hide');
     e2Btn.classList.add('hide');
+    // Finalize-from-Count-1 is CORPORATE ONLY (not managers).
+    if (fBtn) fBtn.classList.toggle('hide', role !== 'corporate');
   } else if (phase === 'review' || phase === 'count2') {
     c1Btn.classList.add('hide');
+    if (fBtn) fBtn.classList.add('hide');
     // Recount close is manager+corporate only. Counters see their recount
     // entries persist but the close button stays hidden — they just keep
     // recording until a manager closes the audit.
@@ -12499,6 +12694,7 @@ function updateVarianceActions() {
   } else if (phase === 'final') {
     c1Btn.classList.add('hide');
     c2Btn.classList.add('hide');
+    if (fBtn) fBtn.classList.add('hide');
     e1Btn.classList.remove('hide');
     e2Btn.classList.remove('hide');
   }
@@ -12834,6 +13030,84 @@ function generateRecountFromAvt() {
 
   flagged.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity));
   return flagged;
+}
+
+let _finalizingFromCount1 = false;
+/* Admin(corporate)-ONLY: close Count 1 and finalize the audit straight from
+   Count 1 — skips Count 2 entirely, treats the Count-1 counts as the final
+   actuals, computes the variance, and submits the audit. Distinct from
+   closeCount1() (manager flow → recount list). Mirrors finalizeCount2()'s
+   submit/stamp + compute, with closeCount1()'s compute call. */
+function closeCount1AndFinalize() {
+  if (!appState.audit) { showToast('No active audit', 'error'); return; }
+  if (_finalizingFromCount1 || _closingCount1) return;
+  // ADMIN ONLY — corporate role. Button is also role-gated in
+  // updateVarianceActions; this is defense-in-depth for a stale tab.
+  const role = appState.user && appState.user.role;
+  if (role !== 'corporate') { showToast('Only an admin can finalize from Count 1', 'error'); return; }
+  if ((appState.audit.countPhase || 'count1') === 'final' || appState.audit.status === 'submitted') {
+    showToast('Audit already finalized', 'error'); return;
+  }
+  const allItems = getAllCountedItems();
+  if (allItems.length === 0) { showToast('No items counted yet. Count some items first.', 'error'); return; }
+
+  showConfirm('Finalize from Count 1? This SKIPS Count 2, treats the Count-1 counts as final, and generates the variance report. This cannot be undone in the app.', async () => {
+    if (_finalizingFromCount1) return;
+    if (!appState.audit || appState.audit.status === 'submitted') { showToast('Audit already finalized', 'error'); return; }
+    _finalizingFromCount1 = true;
+    try {
+      const nowIso = new Date().toISOString();
+      appState.audit.count1Data = appState.audit.count1Data || JSON.parse(JSON.stringify(appState.audit.counts));
+      if (!appState.audit.count1ClosedAt) appState.audit.count1ClosedAt = nowIso;
+      // Count 1 is the final count — window ends at the count moment, not "now".
+      appState.audit.completedAt = appState.audit.count1ClosedAt;
+      appState.audit.countPhase = 'final';
+      appState.audit.status = 'submitted';
+      const auditSupabaseId = appState.audit.supabaseId;
+
+      // Stamp submitted/final + the close timestamps. AWAIT for networked audits
+      // so compute_avt_for_audit reads count1_closed_at/completed_at.
+      const metaSync = syncAuditMetaToSupabase({
+        count_phase: 'final',
+        count1_closed_at: appState.audit.count1ClosedAt,
+        completed_at: appState.audit.completedAt,
+        status: 'submitted',
+      });
+      if (auditSupabaseId) { try { await metaSync; } catch (e) {} } else { metaSync.catch(() => {}); }
+
+      // Compute the final variance from Count 1 (same RPC closeCount1 uses).
+      if (auditSupabaseId && navigator.onLine) {
+        try {
+          _avtSelfComputedAuditId = auditSupabaseId;
+          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+          const { error } = await supabaseRest.rpc('compute_avt_for_audit', { p_audit_id: auditSupabaseId });
+          if (error) {
+            _avtSelfComputedAuditId = null;
+            enqueueComputeAvt(auditSupabaseId);
+            showToast('Audit finalized, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
+          } else if (appState.audit && appState.audit.supabaseId === auditSupabaseId) {
+            await loadAvtForAudit(auditSupabaseId);
+          }
+        } catch (e) {
+          _avtSelfComputedAuditId = null;
+          enqueueComputeAvt(auditSupabaseId);
+          showToast('Audit finalized, but variance computation failed — it will retry.', 'warning');
+        }
+      }
+
+      appState.auditHistory.push({ ...appState.audit, venueName: appState.currentVenue?.name });
+      const badge = document.getElementById('headerAuditBadge');
+      if (badge) { badge.className = 'audit-badge submitted'; badge.textContent = 'Submitted'; }
+      logActivity('Count 1 finalized by admin (Count 2 skipped). Final report generated.');
+      saveState();
+      loadHistoricAuditsFromSupabase().catch(function () {});
+      showToast('Audit finalized from Count 1 — final report ready.', 'success');
+      showPage('variance');
+      renderVariancePage();
+    } finally {
+      _finalizingFromCount1 = false;
+    }
+  });
 }
 
 /* ================================================================
