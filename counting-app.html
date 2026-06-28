@@ -3063,7 +3063,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.84';
+const APP_VERSION = '1.85';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7879,9 +7879,27 @@ async function reconcileLocalAuditWithServer(venueId) {
     }
     // Server still says active/submitted — sync the latest status + phase
     // so the lock-screen logic in renderCountPage reflects truth.
+    const prevPhase = appState.audit.countPhase;
     appState.audit.status = row.status;
     appState.audit.countPhase = row.count_phase;
     saveState();
+
+    // If the audit advanced past Count 1 while this phone held a stale local
+    // cache — e.g. Count 1 was closed from the desktop, or the recount list was
+    // (re)generated server-side — the realtime phase/recount events fired while
+    // we were disconnected, so the local recounts dict is still empty. The
+    // fresh-join path (joinAuditByCode) pulls recounts at line ~5800, but the
+    // reconcile path did not, leaving the recount page blank even though the
+    // rows exist. Pull them here too. refreshRecountsFromSupabase re-renders
+    // the recount page if it's the current view.
+    if (row.count_phase && row.count_phase !== 'count1') {
+      refreshRecountsFromSupabase().catch(function () {});
+      // The realtime channel may not have survived the stale gap; re-subscribe
+      // so subsequent Count-2 edits from other counters propagate live.
+      if (prevPhase === 'count1' || prevPhase == null) {
+        try { subscribeToAuditRealtime(appState.audit.supabaseId); } catch (e) {}
+      }
+    }
   } catch (e) {
     console.warn('[audit] reconcile threw, keeping local:', e);
   }
