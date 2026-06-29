@@ -10,6 +10,9 @@
 <link rel="manifest" href="manifest.json">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+<!-- Modern barcode engine for browsers without native BarcodeDetector (iPhones/iOS
+     Safari). Quagga above is kept only as a last-resort fallback. -->
+<script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
@@ -3063,7 +3066,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.88';
+const APP_VERSION = '1.89';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10361,6 +10364,79 @@ function onBarcodeDetected(result) {
   }, 80); // tiny delay so user sees the green "locked" state
 }
 
+/* ===== ZXing fallback (modern engine for non-native browsers) =====
+   iPhones/iOS Safari have no native BarcodeDetector, so historically they used
+   QuaggaJS — which is unreliable and often won't read even a perfect barcode.
+   ZXing is a modern decoder that works well on iOS. We use it for the non-native
+   path; if it fails to load or init, we fall back to Quagga so behaviour is
+   never worse than before. */
+let _zxingReader = null;
+let _zxingControls = null;
+function zxingFormatToString(fmt) {
+  // @zxing BarcodeFormat enum values → the lowercase names validateBarcode expects.
+  const m = { 7: 'ean_13', 6: 'ean_8', 14: 'upc_a', 15: 'upc_e', 4: 'code_128', 2: 'code_39', 3: 'code_93', 1: 'codabar', 8: 'itf', 11: 'qr_code' };
+  return m[fmt] || 'unknown';
+}
+async function openZXingBarcodeScanner() {
+  try {
+    _zxingReader = new ZXingBrowser.BrowserMultiFormatReader(undefined, { delayBetweenScanAttempts: 80, delayBetweenScanSuccess: 250 });
+    const video = document.createElement('video');
+    video.setAttribute('playsinline', '');
+    video.setAttribute('autoplay', '');
+    video.style.cssText = 'width:100%;height:100%;object-fit:cover';
+    const viewfinder = document.getElementById('barcodeViewfinder');
+    viewfinder.innerHTML = '';
+    viewfinder.appendChild(video);
+    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
+
+    _zxingControls = await _zxingReader.decodeFromConstraints(
+      { video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } } },
+      video,
+      function (result) {
+        if (!barcodeActive || !result) return;
+        const code = (typeof result.getText === 'function') ? result.getText() : (result.text || '');
+        if (!code) return;
+        const format = zxingFormatToString(typeof result.getBarcodeFormat === 'function' ? result.getBarcodeFormat() : -1);
+        if (processDetection(code, format)) {
+          if (instantScanCount(code)) {
+            resetScanConfirmation();
+          } else {
+            barcodeActive = false;
+            if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
+            setTimeout(function () { closeBarcodeScanner(); handleBarcodeResult(code); }, 80);
+          }
+        }
+      }
+    );
+
+    // Bind the flashlight to ZXing's stream once the track is live, and nudge
+    // continuous autofocus (helps the iOS path lock at varied distances).
+    if (_quaggaFlashBindTimer) { clearTimeout(_quaggaFlashBindTimer); _quaggaFlashBindTimer = null; }
+    _quaggaFlashBindTimer = setTimeout(function () {
+      _quaggaFlashBindTimer = null;
+      if (!barcodeActive) return;
+      var stream = video.srcObject;
+      var tracks = stream && stream.getVideoTracks ? stream.getVideoTracks() : [];
+      var t = tracks.length > 0 ? tracks[0] : null;
+      bindFlashTrack(t);
+      if (t && t.applyConstraints) { try { t.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {} }
+    }, 400);
+  } catch (error) {
+    // ZXing failed to init — fall back to the old engine so we're never worse off.
+    try { if (_zxingControls && _zxingControls.stop) _zxingControls.stop(); } catch (e) {}
+    _zxingControls = null; _zxingReader = null;
+    openQuaggaBarcodeScanner();
+  }
+}
+// Pick the best available non-native engine: ZXing if loaded, else Quagga.
+function openFallbackScanner() {
+  if (typeof ZXingBrowser !== 'undefined' && ZXingBrowser && ZXingBrowser.BrowserMultiFormatReader) {
+    openZXingBarcodeScanner();
+  } else {
+    openQuaggaBarcodeScanner();
+  }
+}
+
 function openBarcodeScanner() {
   if (isAuditLocked()) return;
 
@@ -10375,7 +10451,7 @@ function openBarcodeScanner() {
   if (hasNativeBarcode) {
     openNativeBarcodeScanner();
   } else {
-    openQuaggaBarcodeScanner();
+    openFallbackScanner();
   }
 }
 
@@ -10500,7 +10576,7 @@ async function openNativeBarcodeScanner() {
 
   } catch (error) {
     document.getElementById('barcodeStatus').textContent = 'Camera failed. Trying fallback...';
-    openQuaggaBarcodeScanner();
+    openFallbackScanner();
   }
 }
 
@@ -10644,6 +10720,12 @@ function closeBarcodeScanner() {
     nativeBarcodeStream.getTracks().forEach(t => t.stop());
     nativeBarcodeStream = null;
   }
+
+  // Stop ZXing (modern iOS/fallback engine)
+  try { if (_zxingControls && typeof _zxingControls.stop === 'function') _zxingControls.stop(); } catch (e) {}
+  _zxingControls = null;
+  try { if (_zxingReader && typeof _zxingReader.reset === 'function') _zxingReader.reset(); } catch (e) {}
+  _zxingReader = null;
 
   // Stop QuaggaJS
   try { Quagga.stop(); } catch (e) {}
