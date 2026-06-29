@@ -3063,7 +3063,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.85';
+const APP_VERSION = '1.86';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -13328,8 +13328,11 @@ function renderRecountPage() {
       '</div>' +
       '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">' +
         (rec.category ? '<span>' + esc(rec.category) + '</span>' : '') +
-        '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' +
-        '<span><strong style="color:var(--text)">Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
+        // Only show a variance figure when one actually exists. Blind full-list
+        // recounts carry no per-row variance, and a literal "$0.00" misreads as
+        // "no difference" — hide it rather than imply that.
+        (rec.varianceValue ? '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' : '') +
+        '<span><strong style="color:var(--text)">Counted in Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
         (rec.recountQty != null ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '') +
         // v1.41: each row IS one zone, so there's no "+N more zones" hint
         // on this row. Items that lived in multiple zones now appear as
@@ -13388,7 +13391,7 @@ function openRecountEntry(key) {
       : '<br><span style="color:var(--warning);font-size:11px">\u26a0 This item has no zone \u2014 flag for admin</span>';
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
-      ' \u00b7 Variance $' + rec.varianceValue.toFixed(2) +
+      (rec.varianceValue ? ' \u00b7 Variance $' + rec.varianceValue.toFixed(2) : '') +
       zoneLine +
       (rec.category ? ' \u00b7 ' + esc(rec.category) : '') +
       '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>' +
@@ -13397,11 +13400,14 @@ function openRecountEntry(key) {
   const dupe = document.getElementById('guidedDupeWarning');
   if (dupe) dupe.innerHTML = '';
 
-  // Pre-fill recount qty with whatever's stored — if nothing yet, default to
-  // the Count 1 number so a "Verified" row only needs one tap on Confirm.
+  // Blind recount: start the field BLANK so the counter enters what they
+  // physically recount, rather than pre-filling the Count-1 number. The old
+  // pre-fill read as "their" count and caused confusion + fear of erasing
+  // another zone's number (the Count-1 value, e.g. an aggregate, looked like
+  // it belonged to the current zone). Count 1 is still shown in the hero above
+  // for reference. A prior recount value (already entered) is still restored.
   const qtyInput = document.getElementById('guidedQty');
   if (rec.recountQty != null) qtyInput.value = rec.recountQty;
-  else if (rec.count1Qty != null) qtyInput.value = rec.count1Qty;
   else qtyInput.value = '';
 
   // Show the recount-only required fields and pre-fill any prior values.
