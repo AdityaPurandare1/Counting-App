@@ -3094,7 +3094,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.95';
+const APP_VERSION = '1.96';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -5780,18 +5780,22 @@ async function joinNetworkedAudit(rawCode) {
 
   appState.currentZone = (matchingVenue.zones && matchingVenue.zones[0]) || null;
 
-  // Join as a member — duplicate on reconnect is fine, 23505 swallowed
-  try {
-    const resp = await supabaseRest.insert('kount_members', {
-      audit_id: audit.id,
-      user_email: appState.user.email,
-      user_name: appState.user.name,
-      role: appState.user.role,
-    });
-    if (resp.error && !/duplicate key|23505/i.test(resp.error.message || '')) {
-      console.warn('[audit] join kount_members failed:', resp.error);
-    }
-  } catch (e) { console.warn('[audit] join threw:', e); }
+  // Join as a member — duplicate on reconnect is fine, 23505 swallowed.
+  // venue_manager joins silently: it's a read-only observer and must not
+  // appear in the audit's member roster.
+  if (appState.user.role !== 'venue_manager') {
+    try {
+      const resp = await supabaseRest.insert('kount_members', {
+        audit_id: audit.id,
+        user_email: appState.user.email,
+        user_name: appState.user.name,
+        role: appState.user.role,
+      });
+      if (resp.error && !/duplicate key|23505/i.test(resp.error.message || '')) {
+        console.warn('[audit] join kount_members failed:', resp.error);
+      }
+    } catch (e) { console.warn('[audit] join threw:', e); }
+  }
 
   // Pull the existing entries so the counter starts in sync
   // A failed pre-fetch (null) just starts empty; the reconcile poll converges.
@@ -6217,6 +6221,14 @@ function escapeIlikeValue(value) {
 /* Mirror a local entry to Supabase. Tries INSERT; on unique-violation
    it falls back to UPDATE against the existing row with a qty merge. */
 async function syncEntryToSupabase(entry, zone, opts) {
+  // venue_manager is a read-only "Venue Management" role — counting is
+  // disabled. Refuse before any write, returning the {data,error} shape
+  // callers expect so they don't crash on a null.
+  const role = appState.user && appState.user.role;
+  if (role === 'venue_manager') {
+    showToast('View-only access — counting is disabled', 'error');
+    return { data: null, error: { message: 'venue_manager-readonly' } };
+  }
   if (!appState.audit || !appState.audit.supabaseId) return null;
   const auditId = appState.audit.supabaseId;
   const isRecount = !!(opts && opts.isRecount);
@@ -7228,6 +7240,17 @@ function isAuditLocked() {
   }
   
   return false;
+}
+
+/* venue_manager ("Venue Management") is a read-only role: it can VIEW the
+   counted list but every count affordance (+/-, scan, manual/photo add,
+   qty edit, save) is suppressed. Single source of truth for the read-only
+   ROLE check — the list renderers OR this into their own `isLocked` flag
+   alongside the audit-status lock, so this predicate stays role-only and
+   does not also encode "locked" (that's the renderers' submitted-audit
+   part). Pure predicate — no toast. */
+function isCountReadOnly() {
+  return !!(appState.user && appState.user.role === 'venue_manager');
 }
 
 /* ================================================================
@@ -8642,7 +8665,9 @@ function renderReferenceRow(item, isLocked) {
    master, tap to start counting in the current zone. */
 function renderListTab() {
   const items = getCarriedMasterItems();
-  const isLocked = appState.audit && appState.audit.status === 'submitted';
+  // venue_manager sees the read-only carried list (no add affordances).
+  const isLocked = (appState.audit && appState.audit.status === 'submitted')
+    || isCountReadOnly();
   if (items.length === 0) {
     return '<div class="empty-state">' +
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
@@ -8708,7 +8733,7 @@ function renderAllCountList() {
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
       '<p>Nothing counted yet across any zone.</p></div>';
   }
-  const isLocked = appState.audit.status === 'submitted';
+  const isLocked = appState.audit.status === 'submitted' || isCountReadOnly();
   let h = controls + '<div class="list-header"><h3>All zones \u2014 totals</h3><span class="total">' + groups.length + ' item' + (groups.length === 1 ? '' : 's') + '</span></div>';
   h += groups.map(function (g) {
     const expanded = allCountExpanded.has(g.key);
@@ -8777,6 +8802,7 @@ function renderAllCountList() {
 /* Adjust an entry from the All Count view, where the entry may live in a zone
    other than the current one. Find its zone, then delegate to adjustQuantity. */
 function adjustEntryById(entryId, delta) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   for (const [zone, items] of Object.entries(appState.audit.counts)) {
     if (items.some(function (i) { return i.id === entryId; })) { adjustQuantity(entryId, delta, zone); return; }
   }
@@ -8840,6 +8866,7 @@ function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
 }
 
 function applyQtyEdit(entryId, zone, raw, currentQty) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   const trimmed = String(raw == null ? '' : raw).trim();
   if (!trimmed) return; // empty → cancel
   let newQty;
@@ -8873,7 +8900,11 @@ function renderGuidedMode() {
   if (activeSearch && document.activeElement === activeSearch) return;
 
   const countedIds = getCountedItemIds();
-  const isLocked = appState.audit.status === 'submitted';
+  // venue_manager ("Venue Management") is read-only: reuse the locked render
+  // path so the counted list stays visible but every count affordance
+  // (+/-, qty edit, move, scan/photo/manual add, tap-to-count) is suppressed.
+  const isViewer = isCountReadOnly();
+  const isLocked = appState.audit.status === 'submitted' || isViewer;
   const totalItems = itemMaster.length;
   const countedCount = countedIds.size;
 
@@ -8896,18 +8927,20 @@ function renderGuidedMode() {
     '<button class="mode-btn ' + (countView === 'list' ? 'active' : '') + '" onclick="setCountView(\'list\')">List</button>' +
   '</div>';
 
-  // Scan buttons for quick entry
-  html += '<div class="scan-actions" style="margin-bottom:12px">' +
-    '<button class="scan-btn barcode ' + (isLocked ? 'locked' : '') + '" onclick="openBarcodeScanner()">' +
-      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><rect x="1" y="3" width="2" height="12"/><rect x="5" y="3" width="1" height="12"/><rect x="8" y="3" width="2" height="12"/><rect x="12" y="3" width="1" height="12"/><rect x="15" y="3" width="2" height="12"/></svg></span>' +
-      'Barcode</button>' +
-    '<button class="scan-btn photo ' + (isLocked ? 'locked' : '') + '" onclick="openPhotoCapture()">' +
-      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="14" height="10" rx="2"/><circle cx="9" cy="10" r="2.5"/><path d="M6 5l1-2h4l1 2"/></svg></span>' +
-      'Photo</button>' +
-    '<button class="scan-btn manual ' + (isLocked ? 'locked' : '') + '" onclick="openManualEntry()">' +
-      '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3l2 2-8 8H4v-3z"/></svg></span>' +
-      'Manual</button>' +
-  '</div>';
+  // Scan buttons for quick entry — hidden entirely for the read-only viewer.
+  if (!isViewer) {
+    html += '<div class="scan-actions" style="margin-bottom:12px">' +
+      '<button class="scan-btn barcode ' + (isLocked ? 'locked' : '') + '" onclick="openBarcodeScanner()">' +
+        '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="currentColor"><rect x="1" y="3" width="2" height="12"/><rect x="5" y="3" width="1" height="12"/><rect x="8" y="3" width="2" height="12"/><rect x="12" y="3" width="1" height="12"/><rect x="15" y="3" width="2" height="12"/></svg></span>' +
+        'Barcode</button>' +
+      '<button class="scan-btn photo ' + (isLocked ? 'locked' : '') + '" onclick="openPhotoCapture()">' +
+        '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="5" width="14" height="10" rx="2"/><circle cx="9" cy="10" r="2.5"/><path d="M6 5l1-2h4l1 2"/></svg></span>' +
+        'Photo</button>' +
+      '<button class="scan-btn manual ' + (isLocked ? 'locked' : '') + '" onclick="openManualEntry()">' +
+        '<span class="scan-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3l2 2-8 8H4v-3z"/></svg></span>' +
+        'Manual</button>' +
+    '</div>';
+  }
 
   // "All Count" → every zone's totals; "List" → carried reference list;
   // "This Zone" → current zone inline list.
@@ -9172,6 +9205,7 @@ function openGuidedEntry(masterId) {
 }
 
 function adjustGuidedQty(delta) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   const input = document.getElementById('guidedQty');
   // Read the current value via clampQty so a stray 3-decimal entry the
   // user typed gets normalized into the increment math, then re-display
@@ -9192,6 +9226,7 @@ function adjustGuidedQty(delta) {
    No .focus() here - popping the keyboard on every stepper tap defeats
    the point of having buttons. */
 function adjustModalQty(inputId, delta) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   const input = document.getElementById(inputId);
   if (!input) return;
   const current = clampQty(input.value);
@@ -9205,6 +9240,7 @@ function adjustModalQty(inputId, delta) {
    adjustGuidedQty uses, so tapping +12 twice yields +24. No .focus() so the
    mobile keyboard doesn't pop on every tap. */
 function addGuidedQty(amount) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   const input = document.getElementById('guidedQty');
   if (!input) return;
   const current = clampQty(input.value);
@@ -9232,6 +9268,12 @@ function selectGuidedIssue(element) {
 }
 
 function submitGuidedEntry() {
+  // venue_manager is read-only: refuse both the recount branch and the
+  // normal-entry branch before any state mutation or write.
+  if (appState.user?.role === 'venue_manager') {
+    showToast('View-only access — counting is disabled', 'error');
+    return;
+  }
   const modal = document.getElementById('guidedEntryModal');
 
   // Handle recount mode
@@ -9851,6 +9893,7 @@ function renderDupeWarning(masterId, sku, opts) {
 }
 
 function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role — no local state mutation
   if (isAuditLocked()) return;
   if (!appState.audit) return;
   if (!appState.currentZone) {
@@ -10017,6 +10060,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
    Keeps addCountEntry untouched — the data model already supports
    same-item-in-multiple-zones natively. */
 function addCountEntryToZone(zone, name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role — no local state mutation
   if (!zone || zone === appState.currentZone) return;
   const parsedQty = clampQty(qty);
   if (!Number.isFinite(parsedQty) || parsedQty <= 0) return;
@@ -10116,6 +10160,7 @@ function clearExtraLocations(containerId) {
    FIX #1: Lock check
    ================================================================ */
 function adjustQuantity(itemId, delta, zoneOverride) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   // zoneOverride lets the All Count breakdown edit an entry in any zone.
@@ -11033,6 +11078,7 @@ function resolveInstantScan(code) {
    with non-blocking feedback. Returns true if it consumed the scan (known),
    false if the caller should fall through to the modal flow (unknown). */
 function instantScanCount(code) {
+  if (appState.user?.role === 'venue_manager') return false; // read-only role
   const resolved = resolveInstantScan(code);
   if (!resolved) return false;
 
@@ -11265,6 +11311,7 @@ function closeBarcodeEntry(event) {
 }
 
 function submitBarcodeEntry() {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return;
 
   const name = document.getElementById('barcodeName').value.trim();
@@ -11739,6 +11786,7 @@ function closePhotoReview(event) {
 }
 
 async function submitPhotoEntry() {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   const name = document.getElementById('photoName').value.trim();
@@ -12008,6 +12056,7 @@ function copyLastUpcError() {
 }
 
 function submitManualEntry() {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   const name = document.getElementById('manualName').value.trim();
@@ -13787,6 +13836,13 @@ function submitRecount() {
 let _finalizingCount2 = false;
 
 function finalizeCount2() {
+  // venue_manager is read-only — never finalizes an audit. Defense-in-depth:
+  // the recount/close flow is already role-gated, but a stale path must fail
+  // cleanly rather than mutate audit state.
+  if (appState.user?.role === 'venue_manager') {
+    showToast('View-only access — counting is disabled', 'error');
+    return;
+  }
   // Guard against double-fire (auto-close timer + manual button)
   if (_finalizingCount2) return;
   if (!appState.audit || appState.audit.status === 'submitted') return;
@@ -14068,7 +14124,9 @@ function renderIssuesPage() {
     return;
   }
 
-  var isAdmin = appState.user && (appState.user.role === 'corporate' || appState.user.role === 'manager');
+  // venue_manager can flag/resolve issues on both apps, so it shares the
+  // Resolve affordance with corporate/manager here.
+  var isAdmin = appState.user && (appState.user.role === 'corporate' || appState.user.role === 'manager' || appState.user.role === 'venue_manager');
 
   document.getElementById('issuesList').innerHTML = filtered.map(function(issue, originalIdx) {
     var idx = issueLog.indexOf(issue);
@@ -14903,6 +14961,12 @@ function exportCSV() {
 
 function submitAudit() {
   if (!appState.audit) return;
+
+  // venue_manager is read-only — never finalizes/submits an audit.
+  if (appState.user?.role === 'venue_manager') {
+    showToast('View-only access — counting is disabled', 'error');
+    return;
+  }
 
   if (appState.audit.status === 'submitted') {
     showToast('Audit already submitted', 'error');
