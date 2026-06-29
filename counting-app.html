@@ -2622,6 +2622,14 @@ html, body {
     <div id="barcodeViewfinder"></div>
     <div class="scan-overlay"><div class="scan-frame" id="scanFrame"><div class="scan-progress" id="scanProgress"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div></div>
     <div class="scan-status" id="barcodeStatus">Point camera at barcode</div>
+    <!-- Zoom control: shown only when the active camera track reports a zoom
+         capability. Lets counters zoom in to read distant / small case barcodes
+         without walking up to the shelf. -->
+    <div id="barcodeZoomWrap" class="hide" style="position:absolute;bottom:64px;left:0;right:0;display:flex;align-items:center;gap:12px;justify-content:center;padding:0 24px;z-index:5">
+      <button type="button" id="barcodeZoomOut" onclick="nudgeBarcodeZoom(-1)" aria-label="Zoom out" style="width:42px;height:42px;border-radius:50%;border:none;background:rgba(0,0,0,0.55);color:#fff;font-size:24px;font-weight:700;line-height:1">−</button>
+      <input type="range" id="barcodeZoom" min="1" max="5" step="0.1" value="1" oninput="applyBarcodeZoom(this.value)" aria-label="Camera zoom" style="flex:1;max-width:240px;accent-color:#caa45a">
+      <button type="button" id="barcodeZoomIn" onclick="nudgeBarcodeZoom(1)" aria-label="Zoom in" style="width:42px;height:42px;border-radius:50%;border:none;background:rgba(0,0,0,0.55);color:#fff;font-size:24px;font-weight:700;line-height:1">+</button>
+    </div>
   </div>
 </div>
 
@@ -3063,7 +3071,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.86';
+const APP_VERSION = '1.87';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10183,7 +10191,7 @@ let _nativeDetecting = false;
 // this window elapses (a lingering bottle won't double-count). A different
 // barcode is unaffected and counts immediately.
 const SCAN_COOLDOWN_MS = 2500;
-const FRAMES_HIGH_CONF = 2;  // length + GTIN checksum verified
+const FRAMES_HIGH_CONF = 1;  // GTIN checksum verified — lock on first read (checksum already rules out misreads); instant scan
 const FRAMES_MED_CONF  = 3;  // length + digit-shape OK, no checksum
 const FRAMES_LOW_CONF  = 4;  // free-text formats, fall back to brute force
 let scanCandidateCode = '';
@@ -10361,6 +10369,52 @@ function onBarcodeDetected(result) {
   }, 80); // tiny delay so user sees the green "locked" state
 }
 
+/* ===== Camera zoom (distance scanning) =====
+   Many phone rear cameras expose an optical/digital zoom via the
+   MediaStreamTrack `zoom` capability. We surface a slider only when the live
+   track reports it (iOS Safari often doesn't, so the control stays hidden
+   there). Zooming in makes a distant / small case barcode fill more of the
+   frame, so the detector can resolve the bars without the bottle being held
+   right up to the lens. */
+let _barcodeZoomTrack = null;
+function setupBarcodeZoom(track) {
+  _barcodeZoomTrack = null;
+  const wrap = document.getElementById('barcodeZoomWrap');
+  if (wrap) wrap.classList.add('hide');
+  try {
+    if (!track || typeof track.getCapabilities !== 'function') return;
+    const caps = track.getCapabilities();
+    const z = caps && caps.zoom;
+    // Need a real range — some devices report zoom but min===max (no-op).
+    if (!z || typeof z.max !== 'number' || z.max <= (z.min || 1)) return;
+    _barcodeZoomTrack = track;
+    const slider = document.getElementById('barcodeZoom');
+    if (slider) {
+      slider.min = z.min || 1;
+      slider.max = z.max;
+      slider.step = z.step || 0.1;
+      const cur = (track.getSettings && track.getSettings().zoom) || z.min || 1;
+      slider.value = cur;
+    }
+    if (wrap) wrap.classList.remove('hide');
+  } catch (e) { /* capability probe failed — leave zoom hidden */ }
+}
+function applyBarcodeZoom(val) {
+  if (!_barcodeZoomTrack) return;
+  try { _barcodeZoomTrack.applyConstraints({ advanced: [{ zoom: Number(val) }] }); } catch (e) {}
+}
+// Buttons jump in coarser steps than the slider's fine drag.
+function nudgeBarcodeZoom(dir) {
+  const slider = document.getElementById('barcodeZoom');
+  if (!slider) return;
+  const min = Number(slider.min) || 1, max = Number(slider.max) || 5;
+  const jump = Math.max((Number(slider.step) || 0.1) * 5, (max - min) / 10);
+  let v = (Number(slider.value) || 1) + jump * dir;
+  v = Math.max(min, Math.min(max, v));
+  slider.value = v;
+  applyBarcodeZoom(v);
+}
+
 function openBarcodeScanner() {
   if (isAuditLocked()) return;
 
@@ -10419,6 +10473,7 @@ async function openNativeBarcodeScanner() {
     var nativeTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
     var primaryTrack = nativeTracks.length > 0 ? nativeTracks[0] : null;
     bindFlashTrack(primaryTrack);
+    setupBarcodeZoom(primaryTrack);
 
     // Nudge the camera into continuous autofocus + auto-exposure where the
     // device allows it. Helps the "sometimes quick, sometimes slow to lock"
@@ -10636,6 +10691,11 @@ function closeBarcodeScanner() {
 
   // Drop the flash binding before tracks are stopped so the button hides cleanly
   unbindFlashTrack();
+
+  // Reset zoom binding + hide the control so the next session re-probes the
+  // fresh track's capabilities.
+  _barcodeZoomTrack = null;
+  { const zw = document.getElementById('barcodeZoomWrap'); if (zw) zw.classList.add('hide'); }
 
   // Stop native scanner
   if (nativeScanInterval) { clearInterval(nativeScanInterval); nativeScanInterval = null; }
