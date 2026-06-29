@@ -1,7 +1,7 @@
 // 'hwood-count-' prefix is a legacy internal identifier kept deliberately —
 // renaming it would orphan existing caches on devices. Bump the version
 // digits only, in lockstep with APP_VERSION in counting-app.html.
-const CACHE_NAME = 'hwood-count-v1.94';
+const CACHE_NAME = 'hwood-count-v1.95';
 
 // Allowlist: only same-origin static assets are cached. Anything dynamic
 // (Supabase REST, Edge Functions, auth, third-party CDNs) passes through

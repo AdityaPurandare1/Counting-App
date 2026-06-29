@@ -3094,7 +3094,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.94';
+const APP_VERSION = '1.95';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8553,6 +8553,18 @@ function updateHeaderCount() {
    list (one row per carried master, tap to start counting). */
 let countView = 'zone';
 const allCountExpanded = new Set();
+// All Count view search + sort. Search filters live via the DOM (no re-render,
+// so the input keeps focus); sort triggers a re-render.
+let allCountSearch = '';
+let allCountSort = 'name'; // 'name' (A→Z) | 'name-desc' (Z→A) | 'qty' (high→low)
+function setAllCountSort(v) { allCountSort = v || 'name'; renderGuidedMode(); }
+function filterAllCountLive(v) {
+  allCountSearch = v || '';
+  const q = allCountSearch.trim().toLowerCase();
+  document.querySelectorAll('#guidedContent .c-item[data-search]').forEach(function (el) {
+    el.style.display = (!q || (el.getAttribute('data-search') || '').includes(q)) ? '' : 'none';
+  });
+}
 
 /* Manual-search "keep list open" state (Feature, v1.83). The search results
    list used to clear after picking an item, forcing a re-search for every
@@ -8672,16 +8684,35 @@ function getAllCountAggregated() {
 
 function renderAllCountList() {
   const groups = getAllCountAggregated();
+  // Sort per the chosen field (search is applied live via the DOM after render,
+  // so the input keeps focus while typing). getAllCountAggregated returns A\u2192Z.
+  if (allCountSort === 'name-desc') groups.sort(function (a, b) { return String(b.name).localeCompare(String(a.name)); });
+  else if (allCountSort === 'qty') groups.sort(function (a, b) { return (b.total || 0) - (a.total || 0); });
+
+  // Search + sort controls (shown whenever there are counted items).
+  const controls = groups.length === 0 ? '' :
+    '<div style="display:flex;gap:8px;margin-bottom:10px">' +
+      '<input id="allCountSearch" type="search" inputmode="search" placeholder="Search counted items\u2026" value="' + esc(allCountSearch) + '" ' +
+        'oninput="filterAllCountLive(this.value)" autocomplete="off" ' +
+        'style="flex:1;min-width:0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:14px">' +
+      '<select onchange="setAllCountSort(this.value)" aria-label="Sort" ' +
+        'style="padding:10px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:13px">' +
+        '<option value="name"' + (allCountSort === 'name' ? ' selected' : '') + '>A \u2192 Z</option>' +
+        '<option value="name-desc"' + (allCountSort === 'name-desc' ? ' selected' : '') + '>Z \u2192 A</option>' +
+        '<option value="qty"' + (allCountSort === 'qty' ? ' selected' : '') + '>Qty \u2193</option>' +
+      '</select>' +
+    '</div>';
+
   if (groups.length === 0) {
     return '<div class="empty-state">' +
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
       '<p>Nothing counted yet across any zone.</p></div>';
   }
   const isLocked = appState.audit.status === 'submitted';
-  let h = '<div class="list-header"><h3>All zones \u2014 totals</h3><span class="total">' + groups.length + ' item' + (groups.length === 1 ? '' : 's') + '</span></div>';
+  let h = controls + '<div class="list-header"><h3>All zones \u2014 totals</h3><span class="total">' + groups.length + ' item' + (groups.length === 1 ? '' : 's') + '</span></div>';
   h += groups.map(function (g) {
     const expanded = allCountExpanded.has(g.key);
-    let row = '<div class="c-item fade-in" style="flex-direction:column;align-items:stretch;gap:10px">';
+    let row = '<div class="c-item fade-in" data-search="' + esc(String(g.name || '').toLowerCase()) + '" style="flex-direction:column;align-items:stretch;gap:10px">';
     row += '<div style="display:flex;align-items:center;gap:12px;cursor:pointer" onclick="toggleAllCountRow(\'' + encodeURIComponent(g.key) + '\')">' +
         '<div class="c-thumb" style="color:' + getCategoryColor(g.category) + '">' + getCategoryLabel(g.category) + '</div>' +
         '<div class="c-info"><div class="c-name">' + esc(g.name) + '</div>' +
@@ -8883,6 +8914,7 @@ function renderGuidedMode() {
   if (countView === 'all') {
     html += renderAllCountList();
     document.getElementById('guidedContent').innerHTML = html;
+    if (allCountSearch) filterAllCountLive(allCountSearch); // keep search hiding after a re-render
     restoreGuidedSearch();
     return;
   }
@@ -12282,23 +12314,39 @@ const BACK_TO_TOP_THRESHOLD = 400;
 
 function scrollCountToTop() {
   const page = document.getElementById('page-count');
-  if (!page) return;
-  try { page.scrollTo({ top: 0, behavior: 'smooth' }); }
-  catch (e) { page.scrollTop = 0; } // older WebViews: no smooth option
+  // Scroll BOTH the page container and the window — whichever is the actual
+  // scroller on this device responds; the other is a harmless no-op.
+  try {
+    if (page) page.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } catch (e) {
+    if (page) page.scrollTop = 0;
+    window.scrollTo(0, 0);
+  }
 }
 
 function updateBackToTopVisibility() {
   const page = document.getElementById('page-count');
   const btn = document.getElementById('backToTopBtn');
   if (!page || !btn) return;
-  const show = !page.classList.contains('hide') && page.scrollTop > BACK_TO_TOP_THRESHOLD;
+  // The count page is usually its own scroll container (overflow-y:auto), but
+  // on some devices/layouts the WINDOW scrolls instead — so the previous
+  // `page.scrollTop`-only check stayed 0 and the button never appeared. Take
+  // the max of both scroll sources so it reliably shows once scrolled down.
+  const sc = Math.max(
+    page.scrollTop || 0,
+    window.scrollY || 0,
+    (document.documentElement && document.documentElement.scrollTop) || 0
+  );
+  const show = !page.classList.contains('hide') && sc > BACK_TO_TOP_THRESHOLD;
   btn.classList.toggle('hide', !show);
 }
 
 (function initBackToTop() {
   const page = document.getElementById('page-count');
-  if (!page) return;
-  page.addEventListener('scroll', updateBackToTopVisibility, { passive: true });
+  if (page) page.addEventListener('scroll', updateBackToTopVisibility, { passive: true });
+  // Also listen on the window in case it (not #page-count) is the real scroller.
+  window.addEventListener('scroll', updateBackToTopVisibility, { passive: true });
 })();
 
 (function initCalcFab() {
