@@ -976,6 +976,15 @@ html, body {
   object-fit: cover;
 }
 
+/* html5-qrcode (the iOS engine) injects its OWN video + scan box into
+   #barcodeViewfinder. Force that subtree full-bleed and hide the app's separate
+   scan-overlay, so the two UIs don't collide (symptom: video letterboxed at the
+   top, app overlay + progress dots stranded in a black band below). */
+#barcodeViewfinder.h5q-active { position: absolute; inset: 0; }
+#barcodeViewfinder.h5q-active > div { width: 100% !important; height: 100% !important; border: 0 !important; }
+#barcodeViewfinder.h5q-active video { width: 100% !important; height: 100% !important; object-fit: cover !important; }
+#barcodeViewfinder.h5q-active ~ .scan-overlay { display: none !important; }
+
 .scan-overlay {
   position: absolute;
   inset: 0;
@@ -3066,7 +3075,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.91';
+const APP_VERSION = '1.92';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10377,6 +10386,7 @@ function openHtml5BarcodeScanner() {
   try {
     const viewfinder = document.getElementById('barcodeViewfinder');
     viewfinder.innerHTML = '';
+    viewfinder.classList.add('h5q-active'); // full-bleed video + hide the app's scan-overlay
     document.getElementById('barcodeStatus').textContent = 'Starting scanner…';
     const F = (typeof Html5QrcodeSupportedFormats !== 'undefined') ? Html5QrcodeSupportedFormats : null;
     const formats = F ? [F.UPC_A, F.UPC_E, F.EAN_13, F.EAN_8, F.CODE_128, F.CODE_39, F.CODE_93, F.CODABAR, F.ITF, F.QR_CODE] : undefined;
@@ -10711,6 +10721,10 @@ function closeBarcodeScanner() {
     nativeBarcodeStream.getTracks().forEach(t => t.stop());
     nativeBarcodeStream = null;
   }
+
+  // Remove the html5-qrcode full-bleed class so the next session (which may use
+  // a different engine) starts with the app's normal overlay restored.
+  { const _vf = document.getElementById('barcodeViewfinder'); if (_vf) _vf.classList.remove('h5q-active'); }
 
   // Stop html5-qrcode (iOS engine). stop() is async + releases the camera;
   // clear() removes its injected DOM. Null the ref synchronously so a fast
