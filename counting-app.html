@@ -3094,7 +3094,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.93';
+const APP_VERSION = '1.94';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10486,8 +10486,13 @@ async function openZxingWasmScanner() {
         // region than the full frame (faster + fewer false reads).
         const vw = video.videoWidth, vh = video.videoHeight;
         if (vw && vh) {
-          const cw = Math.round(vw * 0.86);
-          const ch = Math.round(vh * 0.40);
+          // Digital pinch-zoom: tighten the centered crop by _scanZoom so the
+          // decoder sees a magnified center (matches the CSS-scaled preview).
+          // Skip when real camera zoom is active (the frame is already zoomed —
+          // dividing again would double it).
+          const z = _scanZoomNative ? 1 : Math.max(1, Math.min(SCAN_ZOOM_MAX, _scanZoom));
+          const cw = Math.round(vw * 0.86 / z);
+          const ch = Math.round(vh * 0.40 / z);
           const cx = Math.round((vw - cw) / 2);
           const cy = Math.round((vh - ch) / 2);
           if (_zxingCanvas.width !== cw) _zxingCanvas.width = cw;
@@ -10536,6 +10541,67 @@ async function openZxingWasmScanner() {
   }
 }
 
+/* ===== Pinch-to-zoom (both platforms) =====
+   Android: real camera zoom via the track's `zoom` capability — zooms BOTH the
+   preview and what the decoder sees. iPhone/iOS: Safari doesn't expose camera
+   zoom, so we do DIGITAL zoom — CSS-scale the preview video AND tighten the
+   zxing decode crop band by the same factor (the iOS loop reads `_scanZoom`).
+   Additive: default _scanZoom=1 == prior behaviour, so a gesture glitch can
+   never break core scanning. */
+let _scanZoom = 1;
+let _scanZoomNative = false;   // true when real camera-track zoom is in effect
+let _scanZoomTrack = null;
+let _scanZoomCaps = null;
+let _pinchStartDist = 0;
+let _pinchStartZoom = 1;
+let _pinchBound = false;
+const SCAN_ZOOM_MAX = 5;
+
+function applyScanZoom() {
+  const z = Math.max(1, Math.min(SCAN_ZOOM_MAX, _scanZoom));
+  _scanZoom = z;
+  const zc = _scanZoomCaps && _scanZoomCaps.zoom;
+  if (_scanZoomTrack && zc && typeof zc.max === 'number' && zc.max > (zc.min || 1)) {
+    // Real camera zoom (Android): maps 1..MAX onto the track's [min,max] range.
+    const lo = zc.min || 1;
+    const target = lo + ((z - 1) / (SCAN_ZOOM_MAX - 1)) * (zc.max - lo);
+    try { _scanZoomTrack.applyConstraints({ advanced: [{ zoom: target }] }); _scanZoomNative = true; return; } catch (e) {}
+  }
+  // Digital fallback (iOS): scale the preview; the zxing crop divides by _scanZoom.
+  _scanZoomNative = false;
+  const vid = document.querySelector('#barcodeViewfinder video');
+  if (vid) { vid.style.transformOrigin = 'center center'; vid.style.transform = z > 1 ? ('scale(' + z.toFixed(2) + ')') : ''; }
+}
+
+function resetScanZoom() {
+  _scanZoom = 1; _scanZoomNative = false;
+  const vid = document.querySelector('#barcodeViewfinder video');
+  if (vid) vid.style.transform = '';
+}
+
+function _pinchDist(touches) {
+  const dx = touches[0].clientX - touches[1].clientX;
+  const dy = touches[0].clientY - touches[1].clientY;
+  return Math.hypot(dx, dy);
+}
+function bindPinchZoom() {
+  if (_pinchBound) return;
+  const vf = document.getElementById('barcodeViewfinder');
+  if (!vf) return;
+  vf.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) { _pinchStartDist = _pinchDist(e.touches); _pinchStartZoom = _scanZoom; e.preventDefault(); }
+  }, { passive: false });
+  vf.addEventListener('touchmove', function (e) {
+    if (e.touches.length === 2 && _pinchStartDist > 0) {
+      _scanZoom = _pinchStartZoom * (_pinchDist(e.touches) / _pinchStartDist);
+      applyScanZoom();
+      e.preventDefault();
+    }
+  }, { passive: false });
+  vf.addEventListener('touchend', function (e) { if (e.touches.length < 2) _pinchStartDist = 0; });
+  _pinchBound = true;
+}
+
 function openBarcodeScanner() {
   if (isAuditLocked()) return;
 
@@ -10545,6 +10611,8 @@ function openBarcodeScanner() {
   lastScannedCode = '';
   recentlyScanned.clear();
   resetScanConfirmation();
+  _scanZoom = 1; _scanZoomNative = false; // fresh zoom each session
+  bindPinchZoom();                        // idempotent — binds once
   _calcFabSetCamera(true); // hide floating calculator while camera is live
 
   // iPhones → zxing-wasm (reliable on iOS). Android → fast native engine.
@@ -10706,6 +10774,9 @@ function _setFlashButtonState(visible, on) {
 
 async function bindFlashTrack(track) {
   _activeFlashTrack = track || null;
+  // Also drive pinch-zoom off this track (all engine paths funnel through here).
+  _scanZoomTrack = track || null;
+  _scanZoomCaps = null;
   _flashOn = false;
   if (!track || typeof track.getCapabilities !== 'function') {
     _setFlashButtonState(false, false);
@@ -10713,6 +10784,7 @@ async function bindFlashTrack(track) {
   }
   let caps = {};
   try { caps = track.getCapabilities() || {}; } catch (e) { caps = {}; }
+  _scanZoomCaps = caps;
   _setFlashButtonState(!!caps.torch, false);
 }
 
@@ -10808,6 +10880,7 @@ function openQuaggaBarcodeScanner() {
 
 function closeBarcodeScanner() {
   barcodeActive = false;
+  resetScanZoom(); // clear any pinch zoom (CSS transform + factor) for next session
 
   // Cancel any in-flight Quagga flash-bind poll so a stale timer doesn't
   // grab a now-detached <video> after the scanner has been torn down.
