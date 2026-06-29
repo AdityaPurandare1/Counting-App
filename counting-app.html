@@ -11,8 +11,36 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
 <!-- Reliable decoder for iPhones/iOS (no usable native BarcodeDetector there;
-     Quagga above is unreliable on iOS). Self-contained UMD; ZXing-wasm engine. -->
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+     Quagga above is unreliable on iOS). zxing-wasm reader, pinned + wasm served
+     from the same CDN version. Exposes readBarcodes + zxingReady once ready. -->
+<script type="module">
+  try {
+    const { readBarcodes, prepareZXingModule } = await import('https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.4/dist/es/reader/index.js');
+    // Pin the .wasm to the exact same version so we never fetch a mismatched
+    // binary. locateFile is the Emscripten hook zxing-wasm uses to resolve it.
+    prepareZXingModule({
+      overrides: {
+        locateFile: (path, prefix) => {
+          if (path.endsWith('.wasm')) {
+            return 'https://cdn.jsdelivr.net/npm/zxing-wasm@2.2.4/dist/reader/' + path;
+          }
+          return prefix + path;
+        }
+      }
+    });
+    window.__zxingReadBarcodes = readBarcodes;
+    window.zxingReady = true;
+    // Warm the wasm once (off a tiny blank frame) so the first real scan isn't
+    // stalled compiling the module. Best-effort; failure doesn't unset ready.
+    try {
+      const warm = new ImageData(2, 2);
+      readBarcodes(warm, { tryHarder: false, formats: [] }).catch(() => {});
+    } catch (e) {}
+  } catch (e) {
+    // Leave window.zxingReady falsy → dispatcher falls through to Quagga on iOS.
+    console.warn('[zxing-wasm] load failed:', e);
+  }
+</script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 
@@ -975,15 +1003,6 @@ html, body {
   height: 100%;
   object-fit: cover;
 }
-
-/* html5-qrcode (the iOS engine) injects its OWN video + scan box into
-   #barcodeViewfinder. Force that subtree full-bleed and hide the app's separate
-   scan-overlay, so the two UIs don't collide (symptom: video letterboxed at the
-   top, app overlay + progress dots stranded in a black band below). */
-#barcodeViewfinder.h5q-active { position: absolute; inset: 0; }
-#barcodeViewfinder.h5q-active > div { width: 100% !important; height: 100% !important; border: 0 !important; }
-#barcodeViewfinder.h5q-active video { width: 100% !important; height: 100% !important; object-fit: cover !important; }
-#barcodeViewfinder.h5q-active ~ .scan-overlay { display: none !important; }
 
 .scan-overlay {
   position: absolute;
@@ -3075,7 +3094,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.92';
+const APP_VERSION = '1.93';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10185,6 +10204,15 @@ let nativeScanInterval = null;
 // the loop — the next tick simply tries again.
 let _nativeDetecting = false;
 
+// zxing-wasm (iOS) path state. Mirrors the native vars: a live stream, the
+// decode-loop interval, a re-entrancy watchdog, and a reused canvas/context so
+// each frame doesn't reallocate. Cleared in closeBarcodeScanner.
+let zxingScanStream = null;
+let zxingScanInterval = null;
+let _zxingDecoding = false;
+let _zxingCanvas = null;
+let _zxingCtx = null;
+
 // Format-aware confirmation thresholds. The brute-force 4-frame check used
 // to filter false positives across the board; that was slow because most
 // retail items use GTIN-family barcodes (UPC-A / EAN-13 / EAN-8) whose
@@ -10373,62 +10401,138 @@ function onBarcodeDetected(result) {
   }, 80); // tiny delay so user sees the green "locked" state
 }
 
-/* ===== html5-qrcode engine (iPhone / iOS path) =====
+/* ===== zxing-wasm engine (iPhone / iOS path) =====
    iPhones have no usable native barcode engine and QuaggaJS is unreliable on
-   iOS, so iPhones go through html5-qrcode (self-contained, ZXing-wasm under the
-   hood). The status line surfaces which engine is running + any start error so
-   field issues are diagnosable without a console. Falls back to Quagga if
-   html5-qrcode can't load/start, so it's never worse than before. */
+   iOS, so iPhones go through zxing-wasm. We drive the camera ourselves with
+   getUserMedia (same as the native path) and feed cropped frames to
+   readBarcodes(), so the UI is identical to Android (gold scan-frame overlay).
+   The status line surfaces the engine + any error so field issues are
+   diagnosable without a console. Falls back to Quagga on any failure. */
 const _isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent || '')
   || ((navigator.platform === 'MacIntel') && navigator.maxTouchPoints > 1);
-let _html5Qr = null;
-function openHtml5BarcodeScanner() {
+async function openZxingWasmScanner() {
   try {
+    // Same high-res stream as the native path — more pixels per bar extends the
+    // working range. `ideal` degrades gracefully on devices that can't do 1080p.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    // Race guard (verbatim from native): the scanner may have been closed while
+    // getUserMedia was resolving (iOS permission prompt → visibilitychange →
+    // close handler). Stop the tracks now or we'd leak a live camera.
+    if (!barcodeActive) {
+      stream.getTracks().forEach(t => t.stop());
+      return;
+    }
+    zxingScanStream = stream;
+
+    const video = document.createElement('video');
+    video.srcObject = stream;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('autoplay', '');
+    video.setAttribute('muted', ''); // iOS rejects play() on an unmuted autoplay video
+    video.muted = true;
+    video.style.cssText = 'width:100%;height:100%;object-fit:cover';
     const viewfinder = document.getElementById('barcodeViewfinder');
     viewfinder.innerHTML = '';
-    viewfinder.classList.add('h5q-active'); // full-bleed video + hide the app's scan-overlay
-    document.getElementById('barcodeStatus').textContent = 'Starting scanner…';
-    const F = (typeof Html5QrcodeSupportedFormats !== 'undefined') ? Html5QrcodeSupportedFormats : null;
-    const formats = F ? [F.UPC_A, F.UPC_E, F.EAN_13, F.EAN_8, F.CODE_128, F.CODE_39, F.CODE_93, F.CODABAR, F.ITF, F.QR_CODE] : undefined;
-    _html5Qr = new Html5Qrcode('barcodeViewfinder', { formatsToSupport: formats, verbose: false });
-    _html5Qr.start(
-      { facingMode: 'environment' },
-      { fps: 12 },  // no qrbox → decode the full frame (better for wide 1D barcodes)
-      function (decodedText, decodedResult) {
-        if (!barcodeActive || !decodedText) return;
-        let format = 'unknown';
-        try { format = decodedResult.result.format.formatName.toLowerCase(); } catch (e) {}
-        if (processDetection(decodedText, format)) {
-          if (instantScanCount(decodedText)) {
-            resetScanConfirmation();
+    viewfinder.appendChild(video);
+    await video.play();
+
+    document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
+
+    // Flash binds to the actual video track from this stream. Guard against
+    // permission-deferred WebViews that hand back a stream with no tracks.
+    var zxingTracks = stream.getVideoTracks ? stream.getVideoTracks() : [];
+    var primaryTrack = zxingTracks.length > 0 ? zxingTracks[0] : null;
+    bindFlashTrack(primaryTrack);
+
+    // Nudge continuous autofocus + auto-exposure where allowed. Best-effort;
+    // most are ignored on iOS Safari, hence the try/catch (same as native).
+    if (primaryTrack && typeof primaryTrack.applyConstraints === 'function') {
+      try {
+        await primaryTrack.applyConstraints({ advanced: [{ focusMode: 'continuous' }, { exposureMode: 'continuous' }] });
+      } catch (e) {}
+    }
+
+    // Allocate the scratch canvas/context ONCE (reused every frame). willRead-
+    // Frequently keeps getImageData on the fast software path.
+    _zxingCanvas = document.createElement('canvas');
+    _zxingCtx = _zxingCanvas.getContext('2d', { willReadFrequently: true });
+
+    // zxing-wasm format names (NOT the BarcodeDetector snake_case spellings).
+    var zxingFormats = ['EAN-13', 'EAN-8', 'UPC-A', 'UPC-E', 'Code128', 'Code39', 'Code93', 'Codabar', 'ITF', 'QRCode'];
+
+    // Map zxing-wasm OUTPUT format spellings → BarcodeDetector/native snake_case
+    // so validateBarcode (which switches on snake_case) can apply the GTIN-
+    // checksum fast lock instead of degrading every scan to the slow low-conf path.
+    const ZXING_FMT_TO_NATIVE = {
+      'EAN-13':'ean_13','EAN-8':'ean_8','UPC-A':'upc_a','UPC-E':'upc_e',
+      'Code128':'code_128','Code39':'code_39','Code93':'code_93',
+      'Codabar':'codabar','ITF':'itf','QRCode':'qr_code'
+    };
+
+    // Decode loop ~110ms. wasm decode is heavier than native detect(), so the
+    // _zxingDecoding watchdog (same pattern as _nativeDetecting) skips a tick
+    // rather than stacking awaits when a pass outlasts the interval.
+    _zxingDecoding = false;
+    zxingScanInterval = setInterval(async () => {
+      if (!barcodeActive || video.readyState < 2) return;
+      if (_zxingDecoding) return;
+      _zxingDecoding = true;
+
+      try {
+        // Centered crop band: ~86% wide, ~40% tall. Matches roughly where the
+        // gold scan-frame sits and gives the decoder a tighter, higher-signal
+        // region than the full frame (faster + fewer false reads).
+        const vw = video.videoWidth, vh = video.videoHeight;
+        if (vw && vh) {
+          const cw = Math.round(vw * 0.86);
+          const ch = Math.round(vh * 0.40);
+          const cx = Math.round((vw - cw) / 2);
+          const cy = Math.round((vh - ch) / 2);
+          if (_zxingCanvas.width !== cw) _zxingCanvas.width = cw;
+          if (_zxingCanvas.height !== ch) _zxingCanvas.height = ch;
+          _zxingCtx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
+          const imageData = _zxingCtx.getImageData(0, 0, cw, ch);
+          const results = await window.__zxingReadBarcodes(imageData, { tryHarder: true, formats: zxingFormats });
+          if (!barcodeActive) return; // closed during the await — drop stale results
+          if (results && results.length > 0) {
+            const code = results[0].text;
+            // Normalize zxing's OUTPUT spelling to native snake_case so the
+            // checksum fast-lock in validateBarcode actually fires.
+            const fmt = ZXING_FMT_TO_NATIVE[results[0].format] || 'unknown';
+            if (processDetection(code, fmt)) {
+              if (instantScanCount(code)) {
+                resetScanConfirmation();
+              } else {
+                barcodeActive = false;
+                if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
+                setTimeout(() => {
+                  closeBarcodeScanner();
+                  handleBarcodeResult(code);
+                }, 80);
+              }
+            }
           } else {
-            barcodeActive = false;
-            if (navigator.vibrate) navigator.vibrate([40, 50, 80]);
-            setTimeout(function () { closeBarcodeScanner(); handleBarcodeResult(decodedText); }, 80);
+            // No barcode in frame — decay the candidate count if we've lost sight
+            const now = Date.now();
+            if (scanCandidateCode && now - scanLastSeenAt > 600) {
+              scanCandidateCode = '';
+              scanCandidateCount = 0;
+              updateScanUI(0, null, scanCandidateRequired);
+            }
           }
         }
-      },
-      function () { /* per-frame "not found" — fires constantly, ignore */ }
-    ).then(function () {
-      document.getElementById('barcodeStatus').textContent = 'Point camera at barcode';
-      // Bind flashlight to html5-qrcode's video track once it's live.
-      setTimeout(function () {
-        if (!barcodeActive) return;
-        var vid = document.querySelector('#barcodeViewfinder video');
-        var stream = vid && vid.srcObject;
-        var tracks = stream && stream.getVideoTracks ? stream.getVideoTracks() : [];
-        bindFlashTrack(tracks.length > 0 ? tracks[0] : null);
-      }, 400);
-    }).catch(function (err) {
-      // Surface the start error on-screen (diagnostic), then fall back to Quagga.
-      document.getElementById('barcodeStatus').textContent = 'Scanner error: ' + ((err && err.message) ? err.message : String(err));
-      _html5Qr = null;
-      setTimeout(openQuaggaBarcodeScanner, 1200);
-    });
-  } catch (e) {
-    document.getElementById('barcodeStatus').textContent = 'Scanner init failed: ' + ((e && e.message) ? e.message : String(e));
-    _html5Qr = null;
-    setTimeout(openQuaggaBarcodeScanner, 1200);
+      } catch (e) {
+        // Swallow per-frame decode errors so the loop self-heals next tick.
+      } finally {
+        _zxingDecoding = false;
+      }
+    }, 110);
+
+  } catch (error) {
+    document.getElementById('barcodeStatus').textContent = 'Scanner error: ' + ((error && error.message) ? error.message : String(error));
+    openQuaggaBarcodeScanner();
   }
 }
 
@@ -10443,14 +10547,12 @@ function openBarcodeScanner() {
   resetScanConfirmation();
   _calcFabSetCamera(true); // hide floating calculator while camera is live
 
-  // iPhones → html5-qrcode (reliable on iOS). Android → fast native engine.
+  // iPhones → zxing-wasm (reliable on iOS). Android → fast native engine.
   // Anything else without native support → Quagga.
-  if (_isIOSDevice && typeof Html5Qrcode !== 'undefined') {
-    openHtml5BarcodeScanner();
+  if (_isIOSDevice && window.zxingReady) {
+    openZxingWasmScanner();
   } else if (hasNativeBarcode) {
     openNativeBarcodeScanner();
-  } else if (typeof Html5Qrcode !== 'undefined') {
-    openHtml5BarcodeScanner();
   } else {
     openQuaggaBarcodeScanner();
   }
@@ -10722,20 +10824,16 @@ function closeBarcodeScanner() {
     nativeBarcodeStream = null;
   }
 
-  // Remove the html5-qrcode full-bleed class so the next session (which may use
-  // a different engine) starts with the app's normal overlay restored.
-  { const _vf = document.getElementById('barcodeViewfinder'); if (_vf) _vf.classList.remove('h5q-active'); }
-
-  // Stop html5-qrcode (iOS engine). stop() is async + releases the camera;
-  // clear() removes its injected DOM. Null the ref synchronously so a fast
-  // re-open can't double-bind.
-  if (_html5Qr) {
-    const _q = _html5Qr; _html5Qr = null;
-    try {
-      const p = _q.stop();
-      if (p && typeof p.then === 'function') p.then(function () { try { _q.clear(); } catch (e) {} }).catch(function () {});
-    } catch (e) {}
+  // Stop zxing-wasm scanner (iOS engine): kill the decode loop, clear the
+  // watchdog, release the camera tracks, and drop the scratch canvas/context.
+  if (zxingScanInterval) { clearInterval(zxingScanInterval); zxingScanInterval = null; }
+  _zxingDecoding = false;
+  if (zxingScanStream) {
+    zxingScanStream.getTracks().forEach(t => t.stop());
+    zxingScanStream = null;
   }
+  _zxingCanvas = null;
+  _zxingCtx = null;
 
   // Stop QuaggaJS
   try { Quagga.stop(); } catch (e) {}
