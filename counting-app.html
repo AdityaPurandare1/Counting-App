@@ -575,7 +575,7 @@ html, body {
 
 .search-bar input {
   width: 100%;
-  padding: 14px 16px 14px 46px;
+  padding: 14px 44px 14px 46px;
   background: var(--surface);
   border: 1.5px solid var(--border);
   border-radius: var(--radius-sm);
@@ -609,6 +609,42 @@ html, body {
 .search-bar .si svg {
   width: 18px;
   height: 18px;
+}
+
+/* Clear (X) button — shows only while the field has text (placeholder hidden). */
+.search-bar .clear-x {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.search-bar input:not(:placeholder-shown) ~ .clear-x {
+  display: flex;
+}
+.search-bar .clear-x svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Confirm button draws the eye once a qty is entered, so the iOS keyboard's
+   "Done ✓" (which only dismisses the keypad) isn't mistaken for saving. */
+@keyframes confirmPulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-dim); }
+  50%      { box-shadow: 0 0 0 6px var(--accent-dim); }
+}
+.submit-btn.needs-confirm {
+  animation: confirmPulse 1.4s ease-in-out infinite;
 }
 
 /* ---------- LIST HEADER ---------- */
@@ -2977,11 +3013,23 @@ html, body {
       <div class="gh-title" id="guidedHeroTitle"></div>
       <div class="gh-meta" id="guidedHeroMeta"></div>
 
+      <!-- Set vs Add mode. Counter feedback (Anna @ Poppy): "I counted 3, now
+           need 7 more — let me just add 7 instead of computing 10 or tapping +
+           seven times." In Add mode the number entered is ADDED to the existing
+           count on Confirm. iOS decimal keypad has no "+" key, so a visible mode
+           toggle beats trying to type "+7". Hidden in recount mode. -->
+      <div id="guidedQtyModeRow" class="gh-partials" style="margin-bottom:10px">
+        <button class="partial-btn active" id="gqmSetBtn" onclick="setGuidedQtyMode('set')" type="button">Set total</button>
+        <button class="partial-btn" id="gqmAddBtn" onclick="setGuidedQtyMode('add')" type="button">Add to count</button>
+      </div>
+
       <div class="gh-stepper">
         <button class="gh-step gh-minus" onclick="adjustGuidedQty(-1)" type="button">−</button>
-        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0" onblur="qtyBlur(this)">
+        <input class="gh-qty" id="guidedQty" type="number" min="0" step="0.01" max="999999" inputmode="decimal" placeholder="0" oninput="onGuidedQtyInput()" onblur="qtyBlur(this)">
         <button class="gh-step gh-plus" onclick="adjustGuidedQty(1)" type="button">+</button>
       </div>
+
+      <div id="guidedAddHint" class="hide" style="font-size:12px;color:var(--text-muted);text-align:center;margin-top:8px"></div>
 
       <div id="guidedPartialBtns" class="gh-partials">
         <button class="partial-btn" onclick="setPartial(0.25)" type="button">25%</button>
@@ -3033,9 +3081,10 @@ html, body {
       <label>Why? <span style="color:var(--danger)">*</span></label>
       <textarea class="form-input" id="recountReasonInput" rows="2" placeholder="e.g. found 4 hidden in back fridge, original count missed them"></textarea>
     </div>
+    <button type="button" id="guidedWrongBarcodeBtn" class="hide" onclick="reportWrongBarcode()" style="width:100%;margin-bottom:8px;background:none;border:1px dashed var(--border);color:var(--text-muted);padding:10px;border-radius:8px;font-size:13px;cursor:pointer">Wrong bottle? Fix this barcode &rarr;</button>
     <div style="display:flex;gap:8px">
       <button class="submit-btn secondary" style="flex:1" onclick="closeGuidedEntry()">Skip</button>
-      <button class="submit-btn" style="flex:1" onclick="submitGuidedEntry()">Confirm</button>
+      <button class="submit-btn" style="flex:1" id="guidedConfirmBtn" onclick="submitGuidedEntry()">Confirm</button>
     </div>
   </div>
 </div>
@@ -3094,7 +3143,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.96';
+const APP_VERSION = '1.97';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8914,6 +8963,7 @@ function renderGuidedMode() {
   html += '<div class="search-bar" style="margin-bottom:12px">' +
     '<span class="si"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="6" r="4"/><path d="M9 9l3.5 3.5"/></svg></span>' +
     '<input type="text" placeholder="Search ' + totalItems + ' items by name, brand, or SKU..." id="guidedSearchInput" oninput="onGuidedSearch(this.value)" autocomplete="off">' +
+    '<button type="button" class="clear-x" id="guidedSearchClear" onclick="clearGuidedSearch()" aria-label="Clear search"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>' +
   '</div>';
 
   // Search results appear here
@@ -9077,6 +9127,12 @@ function restoreGuidedSearch() {
 /* Guided mode search — searches item master on each keystroke (debounced) */
 let guidedSearchTimeout = null;
 
+function clearGuidedSearch() {
+  const input = document.getElementById('guidedSearchInput');
+  if (input) { input.value = ''; input.focus(); }
+  onGuidedSearch('');
+}
+
 function onGuidedSearch(value) {
   // Remember the live query so a count-view re-render (after a pick) can keep
   // the results list open instead of clearing it. Emptying the input clears it.
@@ -9152,11 +9208,19 @@ function findCountEntry(masterId) {
   return null;
 }
 
-function openGuidedEntry(masterId) {
+function openGuidedEntry(masterId, fromScanCode) {
   if (isAuditLocked()) return; // FIX #1
 
   const item = itemMaster.find(i => i.id === masterId);
   if (!item) return;
+
+  // Barcode-remap landing: the counter flagged a wrong scan then tapped the
+  // CORRECT bottle — submit a barcode→right-item correction to the admin queue
+  // before opening the entry so they can still count it.
+  if (pendingRemapCode) {
+    reportBarcodeRemap(pendingRemapCode, item);
+    pendingRemapCode = null;
+  }
 
   appState.guidedCurrentItem = item;
   appState.guidedIssue = 'none';
@@ -9185,6 +9249,24 @@ function openGuidedEntry(masterId) {
   const legacyInfo = document.getElementById('guidedItemInfo');
   if (legacyInfo) legacyInfo.innerHTML = '';
   document.getElementById('guidedQty').value = existing ? existing.qty : '';
+
+  // Set/Add toggle: base is this item's current count in this zone. Always
+  // reopen in 'set' mode and reveal the toggle (it's hidden in recount mode).
+  guidedAddBase = existing ? (Number(existing.qty) || 0) : 0;
+  appState.guidedQtyMode = 'set';
+  scanReopenPending = false; // default; openScanEntry sets it true after this
+  scanEntryCode = fromScanCode || null; // shows the "Wrong bottle?" fix button
+  const _wrongBtn = document.getElementById('guidedWrongBarcodeBtn');
+  if (_wrongBtn) _wrongBtn.classList.toggle('hide', !scanEntryCode);
+  const _modeRow = document.getElementById('guidedQtyModeRow');
+  if (_modeRow) _modeRow.classList.remove('hide');
+  const _setBtn = document.getElementById('gqmSetBtn');
+  const _addBtn = document.getElementById('gqmAddBtn');
+  if (_setBtn) _setBtn.classList.add('active');
+  if (_addBtn) _addBtn.classList.remove('active');
+  const _addHint = document.getElementById('guidedAddHint');
+  if (_addHint) { _addHint.classList.add('hide'); _addHint.textContent = ''; }
+  onGuidedQtyInput(); // sync the Confirm button label/pulse to the prefilled qty
 
   // Cross-zone dupe warning only — current zone is already pre-filled above
   document.getElementById('guidedDupeWarning').innerHTML =
@@ -9215,6 +9297,7 @@ function adjustGuidedQty(delta) {
   const next = clampQty(Math.max(0, base + delta));
   input.value = String(Number.isFinite(next) ? next : 0);
   input.focus();
+  onGuidedQtyInput();
 }
 
 /* adjustModalQty(inputId, delta) - the -/+ steppers on the barcode and
@@ -9247,6 +9330,64 @@ function addGuidedQty(amount) {
   const base = Number.isFinite(current) ? current : 0;
   const next = clampQty(Math.max(0, base + amount));
   input.value = String(Number.isFinite(next) ? next : 0);
+  onGuidedQtyInput();
+}
+
+/* Set vs Add mode for the guided qty field. In 'add' mode the field holds the
+   AMOUNT TO ADD; on Confirm it's added to guidedAddBase (the item's existing
+   count in this zone). guidedAddBase is stamped by openGuidedEntry. */
+let guidedAddBase = 0;
+// True while a guided entry was opened FROM a barcode scan, so a successful
+// Confirm re-opens the scanner for the next bottle. Cleared on every close.
+let scanReopenPending = false;
+// The barcode that opened the current scan-entry (enables the "Wrong bottle?"
+// fix button). pendingRemapCode holds a code awaiting the counter to tap the
+// CORRECT item, at which point we submit a barcode→right-item correction.
+let scanEntryCode = null;
+let pendingRemapCode = null;
+function setGuidedQtyMode(mode) {
+  if (appState.user?.role === 'venue_manager') return; // read-only role
+  appState.guidedQtyMode = (mode === 'add') ? 'add' : 'set';
+  const input  = document.getElementById('guidedQty');
+  const setBtn = document.getElementById('gqmSetBtn');
+  const addBtn = document.getElementById('gqmAddBtn');
+  const hint   = document.getElementById('guidedAddHint');
+  if (setBtn) setBtn.classList.toggle('active', appState.guidedQtyMode === 'set');
+  if (addBtn) addBtn.classList.toggle('active', appState.guidedQtyMode === 'add');
+  if (appState.guidedQtyMode === 'add') {
+    if (input) { input.value = ''; input.placeholder = 'amount to add'; }
+    if (hint)  { hint.classList.remove('hide'); hint.textContent = 'Adding to current count: ' + formatQty(guidedAddBase); }
+  } else {
+    if (input) { input.placeholder = '0'; input.value = guidedAddBase ? String(guidedAddBase) : ''; }
+    if (hint)  { hint.classList.add('hide'); hint.textContent = ''; }
+  }
+  if (input) input.focus();
+  onGuidedQtyInput();
+}
+
+/* Confirm button = the ONLY real save. The iOS keyboard's own "Done ✓" key
+   just dismisses the keypad, which counters mistook for confirming. Once a
+   valid qty is present we relabel Confirm with the resulting total and pulse
+   it, so the eye lands on the actual commit control. */
+function onGuidedQtyInput() {
+  const input = document.getElementById('guidedQty');
+  const btn = document.getElementById('guidedConfirmBtn');
+  if (!btn) return;
+  const str = input ? String(input.value).trim() : '';
+  const raw = parseFloat(str);
+  const has = str !== '' && !isNaN(raw) && raw >= 0;
+  if (has) {
+    if (appState.guidedQtyMode === 'add') {
+      const total = Math.round(((Number(guidedAddBase) || 0) + raw) * 100) / 100;
+      btn.textContent = 'Confirm total ' + formatQty(total);
+    } else {
+      btn.textContent = 'Confirm ' + formatQty(raw);
+    }
+    btn.classList.add('needs-confirm');
+  } else {
+    btn.textContent = 'Confirm';
+    btn.classList.remove('needs-confirm');
+  }
 }
 
 function setPartial(value) {
@@ -9258,6 +9399,7 @@ function setPartial(value) {
   const next = clampQty(base + value);
   input.value = String(Number.isFinite(next) ? next : value);
   document.querySelectorAll('#guidedPartialBtns .partial-btn').forEach(btn => btn.classList.remove('active'));
+  onGuidedQtyInput();
 }
 
 function selectGuidedIssue(element) {
@@ -9374,11 +9516,16 @@ function submitGuidedEntry() {
   const item = appState.guidedCurrentItem;
   if (!item) return;
 
-  const qty = parseFloat(document.getElementById('guidedQty').value);
-  if (isNaN(qty) || qty < 0) {
+  const raw = parseFloat(document.getElementById('guidedQty').value);
+  if (isNaN(raw) || raw < 0) {
     showToast('Enter a valid quantity', 'error');
     return;
   }
+  // In 'add' mode the field is the amount to add to the item's existing count
+  // in this zone; round to 2 decimals to avoid float noise (3 + 0.1 etc.).
+  const qty = (appState.guidedQtyMode === 'add')
+    ? Math.round(((Number(guidedAddBase) || 0) + raw) * 100) / 100
+    : raw;
 
   const issueNotes = document.getElementById('guidedIssueNotes')?.value?.trim() || null;
   const issue = appState.guidedIssue;
@@ -9467,19 +9614,32 @@ function submitGuidedEntry() {
     }, 2500);
   }
 
+  // If this entry was opened from a scan, re-open the scanner after closing so
+  // the counter keeps scanning without diving back through the menu. Capture
+  // the flag before closeGuidedEntry() clears it.
+  const _reopenScan = scanReopenPending;
   closeGuidedEntry();
   renderCountPage();
+  // Re-open synchronously (NOT via setTimeout): iOS Safari requires getUserMedia
+  // to run inside the Confirm-tap gesture, and a timer would break that chain.
+  if (_reopenScan && !isAuditLocked()) {
+    try { openBarcodeScanner(); } catch (e) {}
+  }
 }
 
 function closeGuidedEntry(event) {
   if (event && event.target !== event.currentTarget) return;
   document.getElementById('guidedEntryModal').classList.add('hide');
+  scanReopenPending = false; // a manual close/skip should not re-open the scanner
+  scanEntryCode = null;
   // Reset modal mode + hide the recount-only fields so a subsequent
   // non-recount guided open doesn't show the audit-result selector.
   const modal = document.getElementById('guidedEntryModal');
   if (modal) modal.dataset.mode = '';
   document.getElementById('recountResultGroup')?.classList.add('hide');
   document.getElementById('recountReasonGroup')?.classList.add('hide');
+  const _cb = document.getElementById('guidedConfirmBtn');
+  if (_cb) { _cb.textContent = 'Confirm'; _cb.classList.remove('needs-confirm'); }
 }
 
 /* Re-render the count view after an inline edit (adjustQuantity & friends).
@@ -10552,31 +10712,45 @@ async function openZxingWasmScanner() {
     // _zxingDecoding watchdog (same pattern as _nativeDetecting) skips a tick
     // rather than stacking awaits when a pass outlasts the interval.
     _zxingDecoding = false;
+    let zxingTick = 0;
     zxingScanInterval = setInterval(async () => {
       if (!barcodeActive || video.readyState < 2) return;
       if (_zxingDecoding) return;
       _zxingDecoding = true;
 
       try {
-        // Centered crop band: ~86% wide, ~40% tall. Matches roughly where the
-        // gold scan-frame sits and gives the decoder a tighter, higher-signal
-        // region than the full frame (faster + fewer false reads).
+        // Counter feedback (Poppy 2026-07): "doesn't read at distance / weird
+        // angles / unless held dead straight." Fixes: (a) a WIDER band (~92%×
+        // ~52%) than the old tight 86%×40% so an off-center bottle still lands
+        // in-frame; (b) every 4th tick decodes the FULL frame (unless digitally
+        // zoomed) to catch steeply-angled / far codes the band misses; (c) the
+        // readBarcodes call below adds tryRotate + tryInvert + tryDownscale.
         const vw = video.videoWidth, vh = video.videoHeight;
         if (vw && vh) {
+          zxingTick++;
           // Digital pinch-zoom: tighten the centered crop by _scanZoom so the
           // decoder sees a magnified center (matches the CSS-scaled preview).
           // Skip when real camera zoom is active (the frame is already zoomed —
           // dividing again would double it).
           const z = _scanZoomNative ? 1 : Math.max(1, Math.min(SCAN_ZOOM_MAX, _scanZoom));
-          const cw = Math.round(vw * 0.86 / z);
-          const ch = Math.round(vh * 0.40 / z);
-          const cx = Math.round((vw - cw) / 2);
-          const cy = Math.round((vh - ch) / 2);
+          const fullPass = (zxingTick % 4 === 0) && z === 1;
+          let cw, ch, cx, cy;
+          if (fullPass) {
+            cw = vw; ch = vh; cx = 0; cy = 0;   // whole frame — angle/distance catch
+          } else {
+            cw = Math.round(vw * 0.92 / z);
+            ch = Math.round(vh * 0.52 / z);
+            cx = Math.round((vw - cw) / 2);
+            cy = Math.round((vh - ch) / 2);
+          }
           if (_zxingCanvas.width !== cw) _zxingCanvas.width = cw;
           if (_zxingCanvas.height !== ch) _zxingCanvas.height = ch;
           _zxingCtx.drawImage(video, cx, cy, cw, ch, 0, 0, cw, ch);
           const imageData = _zxingCtx.getImageData(0, 0, cw, ch);
-          const results = await window.__zxingReadBarcodes(imageData, { tryHarder: true, formats: zxingFormats });
+          const results = await window.__zxingReadBarcodes(imageData, {
+            tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true,
+            maxNumberOfSymbols: 1, formats: zxingFormats,
+          });
           if (!barcodeActive) return; // closed during the await — drop stale results
           if (results && results.length > 0) {
             const code = results[0].text;
@@ -10687,6 +10861,7 @@ function openBarcodeScanner() {
   barcodeActive = true;
   lastScannedCode = '';
   recentlyScanned.clear();
+  pendingRemapCode = null; // opening the scanner cancels a half-finished remap
   resetScanConfirmation();
   _scanZoom = 1; _scanZoomNative = false; // fresh zoom each session
   bindPinchZoom();                        // idempotent — binds once
@@ -11082,35 +11257,71 @@ function instantScanCount(code) {
   const resolved = resolveInstantScan(code);
   if (!resolved) return false;
 
-  // Guards live in addCountEntry (locked / no-zone / networked-offline). If
-  // any blocks, it shows its own toast and the zone row is unchanged, so the
-  // running-total read below detects that nothing was counted and we skip the
-  // success overlay. We never bypass these guards.
-  const zone = appState.currentZone;
-  const before = (appState.audit && zone && appState.audit.counts[zone])
-    ? (appState.audit.counts[zone].find(i => String(i.masterId) === resolved.masterId) || null)
-    : null;
-  const beforeQty = before ? before.qty : 0;
-
-  addCountEntry(resolved.name, resolved.category, 1, 'barcode', code, null, 'none', null, null, resolved.masterId);
-
-  // Re-read the merged row so the overlay shows the true running total and the
-  // Edit affordance can target the just-counted master item.
-  const zoneAfter = appState.currentZone;
-  const after = (appState.audit && zoneAfter && appState.audit.counts[zoneAfter])
-    ? (appState.audit.counts[zoneAfter].find(i => String(i.masterId) === resolved.masterId) || null)
-    : null;
-
-  // If a guard blocked the add (or the fuzzy-picker deferred it), the running
-  // total won't have advanced — don't claim a count happened.
-  if (!after || after.qty <= beforeQty) {
-    return true; // still consumed: it was a known barcode, modal must NOT open
-  }
-
+  // Counter feedback (Poppy, 2026-07): the old behavior silently added 1 and
+  // showed a 2.6s Edit chip — miss it and you had to hunt for the item to fix
+  // the amount, and every scan left a phantom "1" to delete. New behavior: a
+  // known barcode CLOSES the scanner and OPENS the entry sheet (keypad up,
+  // empty qty) so the counter types the real amount. This also surfaces WHICH
+  // variant the barcode resolved to before any count is committed, so a wrong
+  // mapping is caught on the spot (Skip → manual search) instead of silently
+  // counted. After Confirm the scanner auto-resumes for the next bottle.
   if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
-  showInstantScanFeedback(resolved.name, after.qty, resolved.masterId);
-  renderCountPage();
-  return true;
+  pendingRemapCode = null; // a fresh scan supersedes any half-finished remap
+  closeBarcodeScanner();
+  openScanEntry(resolved.masterId, code);
+  return true; // consumed: it was a known barcode, fallback modal must NOT open
+}
+
+/* Open the guided entry sheet for a just-scanned item. If the item already has
+   a count in this zone, default to Add mode (each scan is another unit, and we
+   never want to silently overwrite an existing total); otherwise Set mode.
+   Flags scanReopenPending so a successful Confirm re-opens the scanner. `code`
+   is the scanned barcode — surfaced so the counter can flag a wrong variant. */
+function openScanEntry(masterId, code) {
+  openGuidedEntry(masterId, code);
+  if ((Number(guidedAddBase) || 0) > 0) setGuidedQtyMode('add');
+  scanReopenPending = true;
+}
+
+/* Counter feedback (Poppy 2026-07): some barcodes resolve to the WRONG variant
+   (Disaronno → wrong bottle, Sunny 750ml → 1L, etc.). From a scan-opened entry
+   the counter taps "Wrong bottle?" → we remember the code, close the sheet, and
+   ask them to tap the CORRECT item; that submits a barcode→right-item
+   correction to the admin Approvals queue (upc_mappings, pending). */
+function reportWrongBarcode() {
+  if (!scanEntryCode) return;
+  pendingRemapCode = scanEntryCode;
+  const code = scanEntryCode;
+  closeGuidedEntry();
+  showToast('Now tap the CORRECT bottle to fix barcode ' + code, 'success');
+  setTimeout(function () { document.getElementById('guidedSearchInput')?.focus(); }, 150);
+}
+
+function reportBarcodeRemap(code, item) {
+  if (!code || !item) return;
+  const payload = {
+    barcode_raw: code,
+    barcode_normalized: normalizeBarcode(code),
+    master_item_id: item.id || null,
+    purchase_item_id: null,
+    item_name: item.name,
+    item_brand: item.brand || null,
+    item_category: item.category || null,
+    submitted_by_email: (appState.user && appState.user.email) || 'unknown',
+    submitted_by_name: (appState.user && appState.user.name) || 'Unknown',
+    status: 'pending',
+    reviewed_by_email: null, reviewed_by_name: null, reviewed_at: null,
+  };
+  supabaseRest.insert('upc_mappings', payload)
+    .then(function (r) {
+      // A unique-barcode conflict just means it's already queued — still a win.
+      if (r && r.error && !/duplicate|conflict|23505|409/i.test(String(r.error.message || ''))) {
+        showToast('Could not send the barcode fix — try again', 'error');
+      } else {
+        showToast('Barcode fix sent for review → ' + item.name, 'success');
+      }
+    })
+    .catch(function () { showToast('Could not send the barcode fix — try again', 'error'); });
 }
 
 /* Compact in-scanner overlay confirming the instant count without closing the
@@ -13783,6 +13994,17 @@ function openRecountEntry(key) {
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'recount';
   document.getElementById('guidedEntryModal').dataset.masterId = key;
+
+  // Recount is absolute-only: hide the Set/Add toggle and force 'set'.
+  appState.guidedQtyMode = 'set';
+  const _rcModeRow = document.getElementById('guidedQtyModeRow');
+  if (_rcModeRow) _rcModeRow.classList.add('hide');
+  const _rcHint = document.getElementById('guidedAddHint');
+  if (_rcHint) { _rcHint.classList.add('hide'); _rcHint.textContent = ''; }
+
+  // Sync the Confirm button label/pulse to the recount qty and clear any stale
+  // "Confirm total N" + pulse leaked from a prior count-entry open.
+  onGuidedQtyInput();
 
   setTimeout(() => document.getElementById('guidedQty').focus(), 100);
 }

@@ -57,87 +57,128 @@ async function openScanner(page) {
   await page.evaluate(() => openBarcodeScanner());
 }
 
-test.describe('instant scan: known barcode counts without the modal', () => {
+// Clear the per-barcode cooldown + re-arm so an immediate re-scan of the same
+// code isn't blocked (simulates time passing / a different bottle).
+async function clearScanCooldown(page) {
+  await page.evaluate(() => { lastScanTime = 0; lastScannedCode = ''; recentlyScanned.clear(); });
+}
+
+test.describe('instant scan: known barcode opens the entry sheet (v1.97)', () => {
   test.beforeEach(async ({ page }) => { await startAuditAs(page, 'manager'); });
 
-  test('a KNOWN UPC counts +1 in the current zone, no modal, scanner stays open', async ({ page, db }) => {
+  test('a KNOWN UPC closes the scanner and opens the entry sheet — nothing counted until Confirm', async ({ page }) => {
     await mapKnownUpc(page);
     await openScanner(page);
     await scan(page, KNOWN_UPC);
 
-    // Counted +1 against the master (merge-key item, not a custom row).
-    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
+    // New behavior: the scanner closes and the guided entry sheet opens for the
+    // RESOLVED variant, so a wrong mapping is visible before anything is counted.
+    await expect(page.locator('#barcodeModal')).toHaveClass(/hide/);
+    await expect(page.locator('#guidedEntryModal')).not.toHaveClass(/hide/);
+    await expect(page.locator('#guidedHeroTitle')).toHaveText('Belvedere 1L');
+    // Fresh item → empty qty (Set mode), and NOTHING counted yet.
+    await expect(page.locator('#guidedQty')).toHaveValue('');
+    await expect(page.locator('#guidedAddHint')).toBeHidden();
+    expect((await counted(page)).length).toBe(0);
+  });
+
+  test('completing the scanned entry counts the typed qty (FK invariant) and re-opens the scanner', async ({ page, db }) => {
+    await mapKnownUpc(page);
+    await openScanner(page);
+    await scan(page, KNOWN_UPC);
+
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    await page.fill('#guidedQty', '4');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
+
+    // The typed qty (not a hard-coded 1) is recorded against the master.
+    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(4);
     const items = await counted(page);
     expect(items.find(i => i.name === 'Belvedere 1L').masterId).toBe(M.belv);
 
-    // The FK invariant still holds via the reused addCountEntry path.
+    // FK invariant preserved via the reused addCountEntry path.
     await expect.poll(() => db.t.kount_entries.filter(r => r.item_name === 'Belvedere 1L').length).toBe(1);
     const row = db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L');
     expect(row.item_id).toBeNull();
     expect(row.master_item_id).toBe(M.belv);
 
-    // The result modal must NOT have opened, and the scanner stays open.
-    await expect(page.locator('#barcodeEntryModal')).toHaveClass(/hide/);
+    // Auto-resume: the scanner re-opens after Confirm for the next bottle.
     await expect(page.locator('#barcodeModal')).not.toHaveClass(/hide/);
-
-    // In-scanner confirmation overlay shows the item + running qty.
-    await expect(page.locator('#instantScanFeedback')).toContainText('Belvedere 1L');
   });
 
-  test('the same KNOWN UPC fired again within the cooldown counts once', async ({ page }) => {
+  test('re-scanning an already-counted item opens in Add mode and adds (does not overwrite)', async ({ page }) => {
     await mapKnownUpc(page);
     await openScanner(page);
-    await scan(page, KNOWN_UPC);
-    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
 
-    // Immediately re-fire the SAME code (lingering bottle) — blocked by the
-    // per-barcode cooldown, so the qty must stay at 1.
+    // First scan+confirm establishes a count of 3 in the current zone.
     await scan(page, KNOWN_UPC);
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    await page.fill('#guidedQty', '3');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
+    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(3);
+
+    // Scanner auto-resumed; clear the cooldown and scan the same item again.
+    await clearScanCooldown(page);
     await scan(page, KNOWN_UPC);
-    await page.waitForTimeout(200);
-    expect(await qtyOf(page, 'Belvedere 1L')).toBe(1);
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    // Add mode: hint shown, field empty — the existing 3 must not be overwritten.
+    await expect(page.locator('#guidedAddHint')).toBeVisible();
+    await expect(page.locator('#guidedQty')).toHaveValue('');
+
+    // Add 7 → total 10 (not replaced by 7). Single merged row.
+    await page.fill('#guidedQty', '7');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
+    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(10);
+    expect((await counted(page)).filter(i => i.name === 'Belvedere 1L').length).toBe(1);
   });
 
-  test('interleaved A,B,A within the cooldown counts A once (FIX 1)', async ({ page }) => {
-    // PRE-FIX: the cooldown remembered only the SINGLE last code. Scanning A
-    // set lastScannedCode=A; scanning B overwrote it with B; scanning A again
-    // then passed the guard (last code was B, not A) and double-counted A.
-    // POST-FIX: every recently-locked code is remembered in recentlyScanned,
-    // so the second A is blocked while still inside the window.
+  test('scanning a DIFFERENT known bottle opens its own entry sheet', async ({ page }) => {
+    // The interleaved-double-count risk is gone (each scan opens a discrete
+    // entry), so this just confirms the second bottle resolves independently.
     await mapKnownUpc(page);
     await mapKnownUpcB(page);
     await openScanner(page);
 
     await scan(page, KNOWN_UPC);   // A
+    await expect(page.locator('#guidedHeroTitle')).toHaveText('Belvedere 1L');
+    await page.fill('#guidedQty', '1');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
     await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
-    await scan(page, KNOWN_UPC_B); // B
-    await expect.poll(() => qtyOf(page, 'Belvedere 1.75L')).toBe(1);
-    await scan(page, KNOWN_UPC);   // A again, still within the 2.5s window
-    await page.waitForTimeout(200);
 
-    // A must NOT have double-counted; B counted once.
-    expect(await qtyOf(page, 'Belvedere 1L')).toBe(1);
-    expect(await qtyOf(page, 'Belvedere 1.75L')).toBe(1);
-    // Each is a single merged row.
+    await clearScanCooldown(page);
+    await scan(page, KNOWN_UPC_B); // B → its own sheet
+    await expect(page.locator('#guidedHeroTitle')).toHaveText('Belvedere 1.75L');
+    await page.fill('#guidedQty', '1');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
+    await expect.poll(() => qtyOf(page, 'Belvedere 1.75L')).toBe(1);
+
     expect((await counted(page)).filter(i => i.name === 'Belvedere 1L').length).toBe(1);
     expect((await counted(page)).filter(i => i.name === 'Belvedere 1.75L').length).toBe(1);
   });
 
-  test('after the cooldown elapses the same KNOWN UPC merges (+1)', async ({ page }) => {
+  test('flagging a wrong-variant scan queues a barcode→correct-item fix', async ({ page, db }) => {
+    // KNOWN_UPC resolves to Belvedere 1L; pretend that's the WRONG bottle.
     await mapKnownUpc(page);
     await openScanner(page);
     await scan(page, KNOWN_UPC);
-    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(1);
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
 
-    // Advance past the 2.5s cooldown, then scan the same bottle again.
-    // v1.74: the cooldown is governed by the recentlyScanned MAP (per-code
-    // timestamps), so clear it as well as the legacy single-code vars.
-    await page.evaluate(() => { lastScanTime = 0; lastScannedCode = ''; recentlyScanned.clear(); });
-    await scan(page, KNOWN_UPC);
-    await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(2);
-    // Still a single merged entry, not two rows.
-    const items = (await counted(page)).filter(i => i.name === 'Belvedere 1L');
-    expect(items.length).toBe(1);
+    // A scan-opened entry offers the "Wrong bottle?" fix.
+    await expect(page.locator('#guidedWrongBarcodeBtn')).toBeVisible();
+    await page.locator('#guidedWrongBarcodeBtn').click();
+    await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
+
+    // Tap the CORRECT bottle from search → opens its entry AND queues the fix.
+    await page.fill('#guidedSearchInput', 'Campari');
+    await page.locator('#guidedSearchResults .c-item').filter({ hasText: 'Campari 1L' }).first()
+      .locator('.c-name').click();
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+
+    // A pending barcode→Campari correction landed in the admin queue.
+    await expect.poll(() => db.t.upc_mappings.filter(r => r.barcode_raw === KNOWN_UPC).length).toBeGreaterThan(0);
+    const row = db.t.upc_mappings.find(r => r.barcode_raw === KNOWN_UPC);
+    expect(row.item_name).toBe('Campari 1L');
+    expect(row.status).toBe('pending');
   });
 
   test('an UNKNOWN UPC opens the result modal (today\'s flow), no count', async ({ page }) => {

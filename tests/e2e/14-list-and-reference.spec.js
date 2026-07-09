@@ -36,7 +36,7 @@ test.describe('List tab + zone reference list (v1.72)', () => {
     await list.filter({ hasText: 'Campari 1L' }).first().locator('.c-name').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
     await page.fill('#guidedQty', '4');
-    await page.locator('#guidedEntryModal').getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole("button", { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
     await expect.poll(async () => {
@@ -63,7 +63,7 @@ test.describe('List tab + zone reference list (v1.72)', () => {
     // The visible label changed but the persisted token did not.
     await expect(chip).toHaveAttribute('data-issue', 'not-in-craftable');
     await chip.click();
-    await page.locator('#guidedEntryModal').getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole("button", { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
     await expect.poll(async () => {
@@ -100,7 +100,7 @@ test.describe('List tab + zone reference list (v1.72)', () => {
     await refRows.filter({ hasText: 'Belvedere 1L' }).first().locator('.c-name').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
     await page.fill('#guidedQty', '5');
-    await page.locator('#guidedEntryModal').getByRole("button", { name: "Confirm", exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole("button", { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
     await expect.poll(async () => {
       const it = (await counted(page)).find(i => i.name === 'Belvedere 1L');

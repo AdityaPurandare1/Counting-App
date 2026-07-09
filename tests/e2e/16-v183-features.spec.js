@@ -49,7 +49,7 @@ test.describe('F1 — manual search keeps results open after a pick (v1.83)', ()
       .locator('.c-name').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
     await page.fill('#guidedQty', '2');
-    await page.locator('#guidedEntryModal').getByRole('button', { name: 'Confirm', exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
     // The list must NOT have collapsed: query text is restored and the results
@@ -68,7 +68,7 @@ test.describe('F1 — manual search keeps results open after a pick (v1.83)', ()
       .locator('.c-name').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
     await page.fill('#guidedQty', '4');
-    await page.locator('#guidedEntryModal').getByRole('button', { name: 'Confirm', exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
     await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(2);
@@ -189,7 +189,7 @@ test.describe('F4 — per-zone qty isolation (v1.83)', () => {
     await page.evaluate((id) => openGuidedEntry(id), M.belv);
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
     await page.fill('#guidedQty', '2');
-    await page.locator('#guidedEntryModal').getByRole('button', { name: 'Confirm', exact: true }).click();
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
     // Switch to zone B (Bar) and open the SAME item via the guided path.
@@ -207,7 +207,7 @@ test.describe('F4 — per-zone qty isolation (v1.83)', () => {
     expect(zoneA).toBe(2);
   });
 
-  test('instant-scan path: scanning X in zone B counts +1 from 0, not 3', async ({ page }) => {
+  test('instant-scan path: scanning X in zone B opens entry from 0, not zone A\'s 3', async ({ page }) => {
     await startAuditAs(page, 'manager');
     await mapKnownUpc(page);
 
@@ -215,12 +215,21 @@ test.describe('F4 — per-zone qty isolation (v1.83)', () => {
     await addManual(page, 'Belvedere 1L', 3);
     await expect.poll(() => qtyOf(page, 'Belvedere 1L')).toBe(3);
 
-    // Switch to Bar and instant-scan the same item.
+    // Switch to Bar and scan the same item. New behavior (v1.97): the scan
+    // opens the entry sheet rather than auto-counting +1. It must open from
+    // Bar's per-zone base of 0 (Set mode, empty field), NOT zone A's 3.
     await switchZone(page, 'Bar');
     await page.evaluate(() => openBarcodeScanner());
     await scan(page, KNOWN_UPC);
+    await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    await expect(page.locator('#guidedQty')).toHaveValue('');       // from 0, not 3
+    await expect(page.locator('#guidedAddHint')).toBeHidden();       // Set mode (no existing Bar count)
 
-    // Bar's per-zone qty must be 1 (started from 0), NOT 3 carried over.
+    // Enter 1 and confirm → a fresh Bar row of 1.
+    await page.fill('#guidedQty', '1');
+    await page.locator('#guidedEntryModal').getByRole('button', { name: /^Confirm/ }).click();
+    await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
+
     await expect.poll(() => page.evaluate((id) =>
       (appState.audit.counts['Bar'] || []).find(i => i.masterId === id)?.qty, M.belv
     )).toBe(1);
