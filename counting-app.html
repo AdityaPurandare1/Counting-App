@@ -3143,7 +3143,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.97';
+const APP_VERSION = '1.98';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4087,6 +4087,17 @@ async function loadAvtFromSupabase() {
 
 // Map a kount_avt_rows row into the appState.avtData shape. Factored out of
 // loadAvtFromSupabase so loadAvtForAudit can reuse the exact same mapping.
+// Format the AVT unit variance as a bottle count for display. `variance` is
+// actual - theo in the item's count unit (migration 0030): negative = bottles
+// short/missing, positive = bottles over. Returns '' when zero so blind
+// full-list recounts (which carry no variance) don't render a misleading "0".
+function fmtBottleVar(v) {
+  const n = Number(v) || 0;
+  if (!n) return '';
+  const a = Math.abs(n);
+  return a.toFixed(1) + ' ' + (a === 1 ? 'bottle' : 'bottles') + ' ' + (n < 0 ? 'short' : 'over');
+}
+
 function _mapAvtRow(r) {
   return {
     store:         r.store || '',
@@ -9462,21 +9473,7 @@ function submitGuidedEntry() {
       // back to the email's local-part if user.name isn't set, then to
       // a literal "??" so the Reports CSV never shows a blank counter
       // column for an otherwise-recorded recount.
-      const u = appState.user || {};
-      rec.counterInitials = (function() {
-        const name = (u.name || '').trim();
-        if (name) {
-          const parts = name.split(/\s+/).filter(Boolean);
-          if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-          return parts[0].slice(0, 2).toUpperCase();
-        }
-        const email = (u.email || '').trim();
-        if (email) {
-          const local = email.split('@')[0];
-          if (local) return local.slice(0, 2).toUpperCase();
-        }
-        return '??';
-      })();
+      rec.counterInitials = computeCounterInitials(appState.user);
     }
 
     logActivity('Recount ' + auditResult + ' \u2014 ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty + ' (' + auditReason.slice(0, 60) + ')');
@@ -12874,6 +12871,27 @@ const SEVERITY_THRESHOLDS = {
   highDollars: 500,
 };
 
+// Materiality gate for the recount list: an item flagged for recount only if it's
+// CRITICAL/HIGH severity, OR a recountable mid-tier item whose gap is material by
+// dollars OR bottles. Global (per-venue tuning is out of scope). Applied ONLY in
+// generateRecountFromAvt (the computed-AVT path) — the no-AVT fallback still lists
+// all counted items so counters can verify when there's no variance data.
+const MATERIALITY_THRESHOLDS = {
+  minVarianceDollars: 250,   // |$ var| at/above this is material — the ONLY mid-tier gate now
+  minVarianceBottles: 3,     // (retired as a recount gate — see note) still used by legacy callers if any
+  minVariancePct: 25,        // (retired as a recount gate — see note)
+  maxRecountItems: 40,       // hard cap: recount at most the top-N offenders by |$ var| (CRITICAL/HIGH exempt from the cap)
+};
+// RECOUNT LIST = TOP OFFENDERS ONLY (2026-07-30). To make recounts fast, the
+// mid-tier gate is dollars-only (>= minVarianceDollars) and the whole list is
+// capped at maxRecountItems, ranked by |$ variance| (both shrinkage and
+// overage). The old bottle>=3 and pct>=25 arms were dropped — they pulled in
+// ~120 low-value items/audit (analysis of 6 Poppy audits: $250-only => ~37
+// items capturing ~87% of the gross $ variance; the combined arms => ~124).
+// CRITICAL/HIGH severity items are ALWAYS kept and never capped out (safety).
+// To switch to a fixed "top 30 regardless of $", set minVarianceDollars low
+// (e.g. 0.01) and maxRecountItems = 30.
+
 function isWineCategory(category) {
   return (category || '').toLowerCase().includes('wine') || (category || '').includes('5320');
 }
@@ -13600,7 +13618,7 @@ function generateRecountFromAvt() {
     venueAvt = avtData.filter(a => a.venueId === appState.currentVenue.id);
   }
 
-  const flagged = [];
+  let flagged = [];
 
   venueAvt.forEach(avt => {
     const counted = findCountedQtyForAvtItem(avt, countedMap);
@@ -13612,10 +13630,36 @@ function generateRecountFromAvt() {
       weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
     });
 
-    if (needsRecount(severity)) {
+    // Materiality gate (TOP OFFENDERS ONLY): always keep CRITICAL/HIGH. For
+    // mid-tier recountable items, keep only when the gap is material by DOLLARS
+    // (>= minVarianceDollars). The bottle/% arms were retired — they bloated the
+    // list ~3× with low-value items and slowed counters. weeksActive is
+    // deliberately NOT a trigger here. The list is then capped below.
+    let keep;
+    if (severity === 'CRITICAL' || severity === 'HIGH') {
+      keep = true;
+    } else {
+      keep = needsRecount(severity) &&
+        Math.abs(avt.varianceValue) >= MATERIALITY_THRESHOLDS.minVarianceDollars;
+    }
+    if (keep) {
       flagged.push({ avt, counted, severity });
     }
   });
+
+  // Cap to the top offenders by |$ variance| so recounts stay fast. CRITICAL/
+  // HIGH are kept in full first (never capped out); remaining slots up to
+  // maxRecountItems are filled with the largest-$ mid-tier items.
+  const cap = MATERIALITY_THRESHOLDS.maxRecountItems || 40;
+  if (flagged.length > cap) {
+    const absVal = f => Math.abs((f.avt && f.avt.varianceValue) || 0);
+    const mustKeep = flagged.filter(f => f.severity === 'CRITICAL' || f.severity === 'HIGH');
+    const rest = flagged
+      .filter(f => f.severity !== 'CRITICAL' && f.severity !== 'HIGH')
+      .sort((a, b) => absVal(b) - absVal(a));
+    const slots = Math.max(cap - mustKeep.length, 0);
+    flagged = mustKeep.concat(rest.slice(0, slots));
+  }
 
   flagged.sort((a, b) => severityOrder(a.severity) - severityOrder(b.severity));
   return flagged;
@@ -13864,53 +13908,92 @@ function renderRecountPage() {
     return severityOrder(a[1].severity) - severityOrder(b[1].severity);
   });
 
-  // Render with zone/category headers + audit-result state on each row
-  let lastZone = null;
-  document.getElementById('recountList').innerHTML = filtered.map(([key, rec]) => {
-    const isDone = rec.status === 'done';
-    const isRecorded = !!rec.auditResult;
-    const zoneLabel = rec.zone || '\u2014';
-    let zoneHeader = '';
-    if (zoneLabel !== lastZone) {
-      lastZone = zoneLabel;
-      zoneHeader = '<div style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:var(--text-muted);margin:14px 0 6px;padding:0 2px">\ud83d\udccd ' + esc(zoneLabel) + '</div>';
+  // v1.98: GROUP BY item name at RENDER TIME only. The underlying data stays
+  // per-(item,zone) - every zone keeps its own count1Qty / recountQty /
+  // auditResult and its own blind-recount entry. We just collapse the flat row
+  // list into one card per item, with a per-zone breakdown inside. First-seen
+  // order is preserved so the severity/zone/category sort above carries through.
+  const groups = new Map(); // itemName -> { rows:[[key,rec],...], severity, category }
+  filtered.forEach(function (pair) {
+    const key = pair[0], rec = pair[1];
+    const name = rec.itemName || key.split('|')[0];
+    if (!groups.has(name)) {
+      groups.set(name, { rows: [], severity: rec.severity, category: rec.category || '' });
     }
-    const resultBadge = isRecorded
-      ? '<span style="font-size:10px;font-weight:700;background:' + (rec.auditResult === 'corrected' ? 'var(--accent-dim)' : 'var(--success-dim, rgba(0,200,150,0.18))') + ';color:' + (rec.auditResult === 'corrected' ? 'var(--accent)' : 'var(--success)') + ';padding:2px 6px;border-radius:4px">' + (rec.auditResult === 'corrected' ? '\u270f\ufe0f Count Corrected' : '\u2713 Count Verified') + '</span>'
-      : '<span style="font-size:10px;font-weight:700;background:var(--warning-dim,rgba(255,180,0,0.18));color:var(--warning);padding:2px 6px;border-radius:4px">\u26a0 Awaiting recount decision</span>';
-    return zoneHeader +
-      '<div class="focus-item ' + (isRecorded ? 'resolved' : rec.severity === 'CRITICAL' || rec.severity === 'HIGH' ? '' : 'medium') + '" ' +
-      // BUG FIX (v1.40): wines have single quotes in their names
-      // ('Special Selection', 'Yellow Label', etc). The previous inline
-      // onclick passed the key as a JS string literal — esc() turned `'`
-      // into `&#39;`, the browser decoded that back to `'` when reading
-      // the attribute, and the resulting JS string had unescaped quotes
-      // that broke the parse. Wine click silently no-op'd.
-      // Switching to data-key + a delegated handler bypasses the JS-string
-      // escape problem entirely — the browser stores the key on the
-      // dataset, and we read it via el.dataset.key with no string parsing.
-      'data-recount-key="' + esc(key) + '" ' +
-      'onclick="openRecountEntryFromCard(this)" style="cursor:pointer">' +
+    groups.get(name).rows.push([key, rec]);
+  });
+
+  const _role = appState.user && appState.user.role;
+  const _canVerifyAll = _role === 'manager' || _role === 'corporate';
+  const _zoneScoped = recountZoneFilter !== 'all';
+  // When a specific zone is selected only that zone's rows survive the filter,
+  // so per-card totals reflect only the visible zone(s). Say so explicitly.
+  const zoneNote = _zoneScoped
+    ? '<div style="font-size:10px;color:var(--text-muted);margin:0 2px 8px;font-style:italic">Showing zone \u201c' + esc(recountZoneFilter) + '\u201d only \u2014 Count 1 totals reflect this zone.</div>'
+    : '';
+
+  document.getElementById('recountList').innerHTML = zoneNote + Array.from(groups.entries()).map(function (grp) {
+    const itemName = grp[0], group = grp[1];
+    const rows = group.rows;
+    const sev = group.severity || 'MEDIUM';
+    // Count 1 total = sum of per-zone count1Qty. Summing count1Qty across zones
+    // is CORRECT - each row's count1Qty is that zone's own count.
+    const count1Total = rows.reduce(function (sum, pair) {
+      return sum + (Number(pair[1].count1Qty) || 0);
+    }, 0);
+    // GUARDRAIL: variance / varianceValue are ITEM-LEVEL values duplicated onto
+    // every zone row (see closeCount1). Read from ONE row only - NEVER sum them
+    // across zone rows or you multiply the variance by the zone count.
+    const bottleVar = rows[0][1].variance;
+    const zonesRecorded = rows.filter(function (pair) { return !!pair[1].auditResult; }).length;
+    // Card "done" = every zone row in the group is done.
+    const isDone = rows.every(function (pair) { return pair[1].status === 'done'; });
+
+    // Per-zone breakdown: one sub-row per zone. Each carries its own
+    // data-recount-key + delegated onclick so the per-zone blind recount entry
+    // is preserved (tapping a zone row opens that zone's recount modal).
+    const zoneRows = rows.map(function (pair) {
+      const key = pair[0];
+      const r = pair[1];
+      const zoneLabel = r.zone || '\u2014';
+      const recorded = !!r.auditResult;
+      const badge = recorded
+        ? '<span style="font-size:9px;font-weight:700;background:' + (r.auditResult === 'corrected' ? 'var(--accent-dim)' : 'var(--success-dim, rgba(0,200,150,0.18))') + ';color:' + (r.auditResult === 'corrected' ? 'var(--accent)' : 'var(--success)') + ';padding:1px 5px;border-radius:4px">' + (r.auditResult === 'corrected' ? '\u270f\ufe0f Corrected' : '\u2713 Verified') + '</span>'
+        : '<span style="font-size:9px;font-weight:700;background:var(--warning-dim,rgba(255,180,0,0.18));color:var(--warning);padding:1px 5px;border-radius:4px">\u26a0 Awaiting</span>';
+      return '<div class="recount-zone-row" data-recount-key="' + esc(key) + '" onclick="openRecountEntryFromCard(this)" ' +
+        'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 2px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer">' +
+        '<span style="font-size:11px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\ud83d\udccd ' + esc(zoneLabel) + '</span>' +
+        '<span style="font-size:11px;color:var(--text-muted);display:flex;gap:8px;align-items:center;flex-shrink:0">' +
+          '<span>C1: <strong style="color:var(--text)">' + (r.count1Qty != null ? r.count1Qty : 'n/a') + '</strong></span>' +
+          (r.recountQty != null ? '<span style="color:var(--success)">RC: ' + r.recountQty + '</span>' : '') +
+          badge +
+        '</span>' +
+      '</div>';
+    }).join('');
+
+    // Manager/corporate-only one-tap cascade. Delegated handler (not an inline
+    // JS-string arg) to dodge the wine single-quote onclick-parse bug.
+    const verifyBtn = _canVerifyAll
+      ? '<button class="btn btn-secondary recount-verify-all" data-recount-item="' + esc(itemName) + '" onclick="verifyItemTotalFromCard(this)" ' +
+        'style="margin-top:8px;font-size:11px;width:100%;padding:6px">\u2713 Verify all zones (matches Count 1)</button>'
+      : '';
+
+    return '<div class="focus-item ' + (isDone ? 'resolved' : sev === 'CRITICAL' || sev === 'HIGH' ? '' : 'medium') + '" ' +
+      'data-recount-item="' + esc(itemName) + '" style="margin-bottom:10px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px;gap:6px">' +
-        // v1.41: display the clean item name, not the composite "name|zone"
-        // dict key. itemName is set in closeCount1 + refreshRecountsFromSupabase.
-        '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(rec.itemName || key.split('|')[0]) + '</div>' +
-        '<span class="sev-badge ' + rec.severity.toLowerCase() + '">' + rec.severity + '</span>' +
+        // Clean display name (not the composite "name|zone" dict key).
+        '<div style="font-weight:600;font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(itemName) + '</div>' +
+        '<span class="sev-badge ' + sev.toLowerCase() + '">' + sev + '</span>' +
       '</div>' +
-      '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:4px">' +
-        (rec.category ? '<span>' + esc(rec.category) + '</span>' : '') +
-        // Only show a variance figure when one actually exists. Blind full-list
-        // recounts carry no per-row variance, and a literal "$0.00" misreads as
-        // "no difference" — hide it rather than imply that.
-        (rec.varianceValue ? '<span>Var: $' + rec.varianceValue.toFixed(2) + '</span>' : '') +
-        '<span><strong style="color:var(--text)">Counted in Count 1: ' + (rec.count1Qty != null ? rec.count1Qty : 'n/a') + '</strong></span>' +
-        (rec.recountQty != null ? '<span style="color:var(--success)">Recount: ' + rec.recountQty + '</span>' : '') +
-        // v1.41: each row IS one zone, so there's no "+N more zones" hint
-        // on this row. Items that lived in multiple zones now appear as
-        // multiple recount rows (one per zone), each grouped under its
-        // own zone header.
+      '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px">' +
+        (group.category ? '<span>' + esc(group.category) + '</span>' : '') +
+        // Bottles, not dollars, rendered ONCE from a single row.
+        (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : '') +
+        '<span><strong style="color:var(--text)">Count 1 total: ' + count1Total + ' across ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + '</strong></span>' +
+        '<span>' + zonesRecorded + ' of ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + ' recorded</span>' +
       '</div>' +
-      '<div>' + resultBadge + (rec.auditReason ? '<span style="font-size:10px;color:var(--text-muted);margin-left:8px;font-style:italic">' + esc(rec.auditReason) + '</span>' : '') + '</div>' +
+      zoneRows +
+      verifyBtn +
     '</div>';
   }).join('');
 }
@@ -13922,6 +14005,73 @@ function openRecountEntryFromCard(el) {
   if (!el) return;
   const key = el.dataset && el.dataset.recountKey;
   if (key) openRecountEntry(key);
+}
+
+/* Counter initials for the admin Reports column. Falls back to the email's
+   local-part if user.name isn't set, then to "??" so the column is never blank.
+   Shared by submitGuidedEntry (per-zone recount) and verifyItemTotal (cascade). */
+function computeCounterInitials(u) {
+  u = u || appState.user || {};
+  const name = (u.name || '').trim();
+  if (name) {
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+    return parts[0].slice(0, 2).toUpperCase();
+  }
+  const email = (u.email || '').trim();
+  if (email) {
+    const local = email.split('@')[0];
+    if (local) return local.slice(0, 2).toUpperCase();
+  }
+  return '??';
+}
+
+/* Delegated handler for the "Verify all zones" button on a recount card. Reads
+   the item name from data-recount-item (not an inline JS-string arg) so wine
+   names with single quotes don't break the onclick parse. */
+function verifyItemTotalFromCard(el) {
+  if (!el) return;
+  const itemName = el.dataset && el.dataset.recountItem;
+  if (itemName) verifyItemTotal(itemName);
+}
+
+/* Manager/corporate one-tap cascade: mark EVERY zone row of an item as verified
+   with recountQty = its own Count-1 qty. Sets auditResult/auditReason/recountQty
+   on each zone row so closeCount2 + submitRecount gates (result + reason + finite
+   qty per row) all pass. Confirm-gated to match the other destructive actions. */
+function verifyItemTotal(itemName) {
+  if (!appState.audit?.recounts) { showToast('No recount list', 'error'); return; }
+  const role = appState.user && appState.user.role;
+  if (role !== 'manager' && role !== 'corporate') {
+    showToast('Only managers can verify all zones', 'error');
+    return;
+  }
+  const rowsToVerify = Object.entries(appState.audit.recounts)
+    .filter(function (e) { return e[1].itemName === itemName; });
+  if (rowsToVerify.length === 0) { showToast('No zones found for that item', 'error'); return; }
+
+  showConfirm('Verify all ' + rowsToVerify.length + ' zone' + (rowsToVerify.length === 1 ? '' : 's') + ' of "' + itemName + '" as matching Count 1? Each zone’s recount will be set to its Count-1 quantity.', function () {
+    const initials = computeCounterInitials(appState.user);
+    rowsToVerify.forEach(function (e) {
+      const rec = e[1];
+      rec.recountQty = rec.count1Qty;
+      rec.status = 'done';
+      rec.auditResult = 'verified';
+      // Don't clobber a reason a manager already typed for this zone.
+      if (!rec.auditReason || !String(rec.auditReason).trim()) {
+        rec.auditReason = 'Verified — recount matches Count 1';
+      }
+      rec.counterInitials = initials;
+    });
+    saveState();
+    // Sync each zone row independently so the desktop Recount screen updates live.
+    rowsToVerify.forEach(function (e) {
+      syncRecountUpdateToSupabase(e[0]).catch(function () {});
+    });
+    logActivity('Verified all zones for ' + itemName + ' (' + rowsToVerify.length + ' zone' + (rowsToVerify.length === 1 ? '' : 's') + ') — recount matches Count 1');
+    renderRecountPage();
+    showToast('Verified ' + rowsToVerify.length + ' zone' + (rowsToVerify.length === 1 ? '' : 's') + ' for ' + itemName, 'success');
+  });
 }
 
 function openRecountEntry(key) {
@@ -13952,20 +14102,37 @@ function openRecountEntry(key) {
     const priorLine = prior
       ? '<br><span style="color:var(--warning);font-weight:600">\u26a0 Previously recorded as ' + prior + ' \u2014 re-check before confirming</span>'
       : '';
-    // v1.41: each recount row IS one zone. Show that zone prominently —
-    // the modal hero is the counter's anchor for "where am I counting".
-    // No more multi-zone hint — the recount LIST shows the same item
-    // multiple times if it lives in multiple zones, so the counter sees
-    // every zone they need to visit at the list level.
-    const zoneLine = rec.zone
-      ? '<br>\ud83d\udccd <strong style="color:var(--text)">' + esc(rec.zone) + '</strong>'
-      : '<br><span style="color:var(--warning);font-size:11px">\u26a0 This item has no zone \u2014 flag for admin</span>';
+    // v1.98: this modal writes to ONE zone (rec.zone), but show the counter the
+    // full picture: every zone this item lives in + a Count-1 grand total. The
+    // current zone (the one this entry writes to) is highlighted so the counter
+    // knows exactly where they're counting. Bottles only, no dollars.
+    const siblings = Object.entries(appState.audit.recounts || {})
+      .filter(function (e) { return e[1].itemName === rec.itemName; });
+    const sibs = siblings.length ? siblings : [[key, rec]];
+    const count1Total = sibs.reduce(function (sum, e) {
+      return sum + (Number(e[1].count1Qty) || 0);
+    }, 0);
+    const zoneList = sibs.map(function (e) {
+      const r = e[1];
+      const zl = r.zone || '\u2014';
+      const isCurrent = (r.zone || '') === (rec.zone || '');
+      const rc = r.recountQty != null
+        ? ' <span style="color:var(--success)">RC ' + r.recountQty + '</span>'
+        : (r.auditResult ? ' <span style="color:var(--success)">\u2713</span>' : '');
+      const label = '\ud83d\udccd ' + esc(zl) + ': ' + (r.count1Qty != null ? r.count1Qty : 'n/a') + rc;
+      return isCurrent
+        ? '<div style="color:var(--text);font-weight:600">' + label + ' \u2190 counting here</div>'
+        : '<div style="color:var(--text-muted)">' + label + '</div>';
+    }).join('');
+    const noZoneWarn = rec.zone ? '' :
+      '<br><span style="color:var(--warning);font-size:11px">\u26a0 This item has no zone \u2014 flag for admin</span>';
     heroMeta.innerHTML =
       'Severity: <span class="sev-badge ' + esc(rec.severity.toLowerCase()) + '">' + esc(rec.severity) + '</span>' +
-      (rec.varianceValue ? ' \u00b7 Variance $' + rec.varianceValue.toFixed(2) : '') +
-      zoneLine +
+      (rec.variance ? ' \u00b7 ' + fmtBottleVar(rec.variance) : '') +
       (rec.category ? ' \u00b7 ' + esc(rec.category) : '') +
-      '<br>Count 1: <strong style="color:var(--text)">' + esc(String(rec.count1Qty != null ? rec.count1Qty : 'Not counted')) + '</strong>' +
+      noZoneWarn +
+      '<div style="margin-top:6px">' + zoneList + '</div>' +
+      '<div style="margin-top:2px">Count 1 total: <strong style="color:var(--text)">' + count1Total + '</strong> across ' + sibs.length + ' zone' + (sibs.length === 1 ? '' : 's') + '</div>' +
       priorLine;
   }
   const dupe = document.getElementById('guidedDupeWarning');
