@@ -147,7 +147,17 @@ function applyQuery(rows, q, tables) {
 // ---- the mock -------------------------------------------------------------
 class MockDB {
   constructor() { this.reset(); }
-  reset() { this.t = seed(); }
+  reset() {
+    this.t = seed();
+    // Test hook (v1.98 collision-replay net): item_names (lowercased) whose
+    // NEXT kount_entries INSERT must report a merge-key 23505 on the primary
+    // while the follow-up SELECT sees 0 rows. Faithfully models a real
+    // concurrent-delete / read-replica-lag race — the unique index rejected
+    // the insert, but by the time syncEntryToSupabase re-reads to merge, the
+    // colliding row is gone/invisible. Empty by default → no effect on any
+    // other spec. Add via db.ghostEntryNames.add('belvedere 1l').
+    this.ghostEntryNames = new Set();
+  }
 
   emailFromAuth(headers) {
     const auth = (headers['authorization'] || headers['Authorization'] || '');
@@ -196,6 +206,13 @@ class MockDB {
         const key = this.mergeKey(row);
         const self = this;
         if (this.t.kount_entries.some(function (e) { return self.mergeKey(e) === key; }))
+          return err(409, '23505', 'duplicate key value violates unique constraint "kount_entries_merge_key"');
+        // Ghost collision (test hook): the primary's unique index rejects this
+        // insert as a merge-key duplicate, but no row is actually persisted, so
+        // the caller's follow-up SELECT finds 0 rows (concurrent delete / replica
+        // lag). Mirrors the exact race the entry-collision-unresolved marker
+        // guards against.
+        if (this.ghostEntryNames && this.ghostEntryNames.has(String(row.item_name || '').toLowerCase()))
           return err(409, '23505', 'duplicate key value violates unique constraint "kount_entries_merge_key"');
         // migration 0036: partial unique on (audit_id, client_entry_id)
         // WHERE client_entry_id IS NOT NULL — replayed inserts collide with

@@ -5216,7 +5216,9 @@ async function flushAvtComputeQueue() {
       flushed++;
       // Suppress the realtime echo for our own RPC-triggered insert.
       _avtSelfComputedAuditId = entry.auditId;
-      setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+      // Only clear OUR claim: a newer close may own the flag within 30s.
+      var _claimedAvtId = entry.auditId;
+      setTimeout(function () { if (_avtSelfComputedAuditId === _claimedAvtId) _avtSelfComputedAuditId = null; }, 30000);
       console.log('[avt] flushed queued compute for', entry.auditId, '->', reportId);
     }
   }
@@ -6377,9 +6379,17 @@ async function syncEntryToSupabase(entry, zone, opts) {
       } else if (ck.data && ck.data[0]) {
         entry.supabaseId = ck.data[0].id;
         return ck.data[0];
+      } else {
+        // Row vanished between the 23505 and the lookup (concurrent delete),
+        // or the client_entry_id filter missed it. Leaving lastError as the
+        // original 23505 would classify this NON-retryable and SILENTLY DROP a
+        // real count. Replace it with a retryable marker (deliberately free of
+        // any "duplicate key"/23505/4xx substring so isRetryableError says
+        // yes): a replayed insert now succeeds if the colliding row is truly
+        // gone, or re-collides and adopts once it reappears. The queue's
+        // attempt cap bounds this so it can't spin forever.
+        lastError = new Error('entry-collision-unresolved: client-key row not found for adopt');
       }
-      // Row vanished between the 23505 and the lookup (concurrent delete) —
-      // fall through to the warn/queue logic with the original error.
     } else {
       // Merge-key collision (kount_entries_merge_key): a genuinely separate
       // scan of the same (zone, item) — merge qty into the existing row.
@@ -6412,6 +6422,16 @@ async function syncEntryToSupabase(entry, zone, opts) {
         });
         if (!upd.error) { entry.supabaseId = existing.id; return upd.data && upd.data[0]; }
         lastError = upd.error;
+      } else {
+        // The server reported a merge-key 23505 (a row with this
+        // (audit, zone, name, is_recount) exists) but the lookup came back
+        // empty — a concurrent delete, or an item_name the ilike filter didn't
+        // line up with. Keeping the original 23505 here classifies NON-retryable
+        // and the count is SILENTLY DROPPED. Swap in a retryable marker so the
+        // count is re-queued instead: a replay re-inserts (succeeds if the row
+        // was deleted) or re-collides and merges once the row is visible. The
+        // queue attempt cap bounds the pathological never-resolves case.
+        lastError = new Error('entry-collision-unresolved: merge-key row not found for merge');
       }
     }
   }
@@ -6425,11 +6445,22 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // noticing. 4xx and 23505-style hard failures are dropped — those are
   // bugs we want to surface, not paper over.
   if (appState.audit && appState.audit.supabaseId && isRetryableError(lastError)) {
-    enqueuePendingMutation('entry-sync', {
-      entry: snapshotEntry(entry),
-      zone: zone,
-      opts: opts || null,
-    }, { label: 'entry sync (' + (entry.name || 'unknown') + ')' });
+    // Attempt count rides in opts so a re-enqueued entry-sync (whose replay
+    // shifts the old queue slot and pushes a fresh one — see
+    // replayPendingMutations) still accumulates a bound. Without this the
+    // per-op counter resets every replay and a genuinely stuck sync (e.g. the
+    // collision-unresolved marker above that never heals) would churn forever.
+    const attempts = (opts && Number(opts._syncAttempts)) || 0;
+    if (attempts >= ENTRY_SYNC_MAX_ATTEMPTS) {
+      console.error('[audit] entry sync exceeded ' + ENTRY_SYNC_MAX_ATTEMPTS +
+        ' attempts — dropping:', entry && entry.name, lastError);
+    } else {
+      enqueuePendingMutation('entry-sync', {
+        entry: snapshotEntry(entry),
+        zone: zone,
+        opts: Object.assign({}, opts || {}, { _syncAttempts: attempts + 1 }),
+      }, { label: 'entry sync (' + (entry.name || 'unknown') + ')' });
+    }
   } else if (lastError) {
     console.error('[audit] entry sync non-retryable, dropping:', lastError);
   }
@@ -6452,6 +6483,13 @@ async function syncEntryToSupabase(entry, zone, opts) {
 const PENDING_MUTATIONS_KEY = 'hwood_pending_mutations_v1';
 const PENDING_MUTATIONS_MAX = 500;
 const PENDING_REPLAY_INTERVAL_MS = 30000;
+// Safety valve: an op that keeps failing with a *retryable-looking* error
+// (persistent 5xx, an unhealable collision-unresolved marker, a code-bug
+// exception that carries a message) must eventually be dropped so it can't
+// block the FIFO queue behind it forever. At the 30s ticker this is ~12min of
+// retries — long enough to outlast a real outage, short enough not to spin.
+const PENDING_MUTATION_MAX_ATTEMPTS = 25;
+const ENTRY_SYNC_MAX_ATTEMPTS = 25;
 
 let pendingMutations = [];
 try {
@@ -6489,7 +6527,22 @@ function snapshotEntry(entry) {
 
 function isRetryableError(err) {
   if (!err) return false;
-  const msg = String(err.message || err);
+  // Extract a usable message. Genuine transient failures (offline, DNS,
+  // socket reset, 5xx) ALWAYS carry a non-empty message — a thrown fetch
+  // TypeError is "Failed to fetch" / "NetworkError…" / "Load failed", and
+  // supabaseRest wraps HTTP failures as "HTTP <status>: …". Those are the
+  // ones we want to replay.
+  const rawMsg = (typeof err === 'string') ? err
+    : (err && typeof err.message === 'string') ? err.message
+    : '';
+  const msg = rawMsg.trim();
+  // No usable message ({}, an Error with an empty message, a thrown non-Error
+  // object, a bare {code:…} with no text) is an UNKNOWN/malformed shape, not a
+  // recognised transient. Treating it as retryable re-queues it forever and —
+  // because the queue replays FIFO and stops on the first retryable failure —
+  // wedges every op behind it. Classify unknown shapes as non-retryable so the
+  // caller surfaces (drops) them instead of poisoning the queue.
+  if (!msg) return false;
   // 23505 is a hard collision — by the time we land here the merge path
   // already had its shot. Replaying the same op won't change the answer.
   if (/duplicate key|23505/i.test(msg)) return false;
@@ -6568,6 +6621,15 @@ async function replayPendingMutations() {
         console.error('[sync-queue] non-retryable, dropping op:', op.label, opError);
         pendingMutations.shift();
         persistPendingMutations();
+      } else if (op.attempts >= PENDING_MUTATION_MAX_ATTEMPTS) {
+        // Retryable-looking but never healing — drop it so it stops blocking
+        // the ops queued behind it, and surface it loudly rather than papering
+        // over it. `continue` (not break) so the next op still gets a shot.
+        console.error('[sync-queue] op exceeded ' + PENDING_MUTATION_MAX_ATTEMPTS +
+          ' attempts — dropping to unblock queue:', op.label, opError);
+        pendingMutations.shift();
+        persistPendingMutations();
+        continue;
       } else {
         if (op.attempts % 10 === 0) {
           console.warn('[sync-queue] op stuck after ' + op.attempts + ' attempts:', op.label, opError);
@@ -6667,10 +6729,33 @@ function mergeRemoteEntryIntoLocal(row, evtType) {
   // Match by supabaseId first; fall back to client_entry_id so our OWN
   // insert echo (realtime event landing before the REST response stamped
   // supabaseId) merges into the local entry instead of duplicating it.
-  const existing = zoneItems.find(e => e.supabaseId === row.id) ||
+  let existing = zoneItems.find(e => e.supabaseId === row.id) ||
     (row.client_entry_id
       ? zoneItems.find(e => e.id === row.client_entry_id || e.clientEntryId === row.client_entry_id)
       : null);
+  // v1.98: a repeat-count DELTA (addCountEntry duplicate path) syncs with a
+  // FRESH clientEntryId that is never persisted on the local running-total
+  // entry. If that delta's insert wins the race and creates the server row,
+  // its INSERT echo matches neither supabaseId nor client_entry_id above and
+  // gets unshifted as a PHANTOM duplicate card that even the 12s reconcile
+  // can't collapse (both cards end up carrying the same supabaseId). The
+  // server's merge index guarantees at most ONE row per
+  // (audit, zone, item_id|lower(name), is_recount) and addCountEntry keeps at
+  // most one local entry per (masterId|name) per zone — so an otherwise
+  // unmatched row that lines up with an existing local entry on
+  // (masterId or name) + is_recount MUST be that same logical item. Adopt it
+  // instead of duplicating.
+  if (!existing && evtType !== 'DELETE') {
+    const rowRecount = !!row.is_recount;
+    const rowMaster = row.master_item_id ?? row.item_id ?? null;
+    const rowName = String(row.item_name || '').toLowerCase();
+    existing = zoneItems.find(e =>
+      (!!e.isRecount) === rowRecount && (
+        (rowMaster != null && e.masterId != null && String(e.masterId) === String(rowMaster)) ||
+        (rowMaster == null && e.masterId == null && String(e.name || '').toLowerCase() === rowName)
+      )
+    ) || null;
+  }
   if (existing) {
     if (evtType === 'DELETE') {
       const idx = zoneItems.indexOf(existing);
@@ -11204,9 +11289,18 @@ function matchBarcodeToMaster(code) {
     if (itemDigits === digitsOnly) return true;
     // Match without leading zeros
     if (itemNoZeros === noLeadZeros && noLeadZeros.length >= 6) return true;
-    // Scanned code contains item UPC or vice versa (handles check digit differences)
+    // Scanned code contains item UPC or vice versa (handles check-digit /
+    // single system-digit drift). GUARD: only when the two lengths are within
+    // 1 of each other. An unconstrained substring match resolves a SHORT code
+    // to the WRONG master whenever it happens to be embedded in a longer,
+    // unrelated UPC — e.g. scanning "12345678" would match an item whose UPC is
+    // "123456789012", and "234567890" is a substring of "0123456789012". The
+    // legitimate cases this branch exists for (stored-without-check-digit, one
+    // extra GS1 system digit) are all length-delta ≤ 1, so the guard keeps them
+    // while dropping the embedding false positives.
     if (digitsOnly.length >= 8 && itemDigits.length >= 8) {
-      if (digitsOnly.includes(itemDigits) || itemDigits.includes(digitsOnly)) return true;
+      if (Math.abs(digitsOnly.length - itemDigits.length) <= 1 &&
+          (digitsOnly.includes(itemDigits) || itemDigits.includes(digitsOnly))) return true;
       // Match last N digits (some scanners add/remove leading zero)
       if (digitsOnly.slice(-10) === itemDigits.slice(-10) && itemDigits.length >= 10) return true;
     }
@@ -13428,7 +13522,12 @@ function closeCount1() {
           // after it returns can let onAvtReportInserted -> loadAvtFromSupabase
           // (venue-latest) fire on a possibly-wrong report first.
           _avtSelfComputedAuditId = auditSupabaseId;
-          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+          // Only clear OUR claim: a newer close (another audit finalized within
+          // 30s) may have overwritten the flag, and this stale timer must not
+          // clobber that newer claim — leave it for the newer close's own timer.
+          setTimeout(function () {
+            if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
+          }, 30000);
           const { error } = await supabaseRest.rpc(
             'compute_avt_for_audit',
             { p_audit_id: auditSupabaseId }
@@ -13436,8 +13535,9 @@ function closeCount1() {
           if (error) {
             console.warn('[avt] compute_avt_for_audit (count1) failed:', error.message || error);
             // Compute didn't run — release the self-echo claim so a later
-            // legitimate report for this audit isn't suppressed.
-            _avtSelfComputedAuditId = null;
+            // legitimate report for this audit isn't suppressed. Guard: only
+            // clear OUR claim; a newer close may own the flag by now.
+            if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
             enqueueComputeAvt(auditSupabaseId);
           } else {
             // FIX 4: re-verify the audit didn't change under us during the
@@ -13458,7 +13558,7 @@ function closeCount1() {
           }
         } catch (e) {
           console.warn('[avt] compute_avt_for_audit (count1) threw:', e);
-          _avtSelfComputedAuditId = null;
+          if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
           enqueueComputeAvt(auditSupabaseId);
         }
       }
@@ -13709,20 +13809,34 @@ function closeCount1AndFinalize() {
       if (auditSupabaseId) { try { await metaSync; } catch (e) {} } else { metaSync.catch(() => {}); }
 
       // Compute the final variance from Count 1 (same RPC closeCount1 uses).
+      let computeReadError = false;
       if (auditSupabaseId && navigator.onLine) {
         try {
           _avtSelfComputedAuditId = auditSupabaseId;
-          setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+          // Only clear OUR claim: a newer close (another audit finalized within
+          // 30s) may have overwritten the flag, and this stale timer must not
+          // clobber that newer claim — leave it for the newer close's own timer.
+          setTimeout(function () {
+            if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
+          }, 30000);
           const { error } = await supabaseRest.rpc('compute_avt_for_audit', { p_audit_id: auditSupabaseId });
           if (error) {
-            _avtSelfComputedAuditId = null;
+            if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
             enqueueComputeAvt(auditSupabaseId);
             showToast('Audit finalized, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
           } else if (appState.audit && appState.audit.supabaseId === auditSupabaseId) {
-            await loadAvtForAudit(auditSupabaseId);
+            // Honour loadAvtForAudit's tri-state (mirrors closeCount1). The RPC
+            // succeeded, but if the read-back lagged ('error') the report never
+            // loaded locally — do NOT tell the user "final report ready" or the
+            // variance page renders empty/stale under a success banner.
+            const loaded = await loadAvtForAudit(auditSupabaseId);
+            if (loaded === 'error') {
+              computeReadError = true;
+              enqueueComputeAvt(auditSupabaseId);
+            }
           }
         } catch (e) {
-          _avtSelfComputedAuditId = null;
+          if (_avtSelfComputedAuditId === auditSupabaseId) _avtSelfComputedAuditId = null;
           enqueueComputeAvt(auditSupabaseId);
           showToast('Audit finalized, but variance computation failed — it will retry.', 'warning');
         }
@@ -13739,7 +13853,15 @@ function closeCount1AndFinalize() {
         logActivity('Count 1 finalized by admin (Count 2 skipped). Final report generated.');
         saveState();
         loadHistoricAuditsFromSupabase().catch(function () {});
-        showToast('Audit finalized from Count 1 — final report ready.', 'success');
+        // Don't claim "final report ready" if the report computed but the
+        // read-back lagged — it will land shortly (a recompute is queued) or
+        // can be recomputed from the admin. Overstating success here hides an
+        // empty variance view behind a green banner.
+        if (computeReadError) {
+          showToast('Audit finalized — variance report is still loading; it will appear shortly.', 'warning');
+        } else {
+          showToast('Audit finalized from Count 1 — final report ready.', 'success');
+        }
         showPage('variance');
         renderVariancePage();
       } else {
@@ -14266,15 +14388,17 @@ function finalizeCount2() {
         // let onAvtReportInserted -> loadAvtFromSupabase (venue-latest) fire on
         // a possibly-wrong report before the flag is set.
         _avtSelfComputedAuditId = _auditSupabaseIdForAvt;
-        setTimeout(function () { _avtSelfComputedAuditId = null; }, 30000);
+        // Only clear OUR claim: a newer close may have overwritten the flag
+        // within 30s; a stale timer must not clobber that newer claim.
+        setTimeout(function () { if (_avtSelfComputedAuditId === _auditSupabaseIdForAvt) _avtSelfComputedAuditId = null; }, 30000);
         const { data: reportId, error } = await supabaseRest.rpc(
           'compute_avt_for_audit',
           { p_audit_id: _auditSupabaseIdForAvt }
         );
         if (error) {
           console.warn('[avt] compute_avt_for_audit RPC failed:', error.message || error);
-          // Compute didn't run — release the self-echo claim.
-          _avtSelfComputedAuditId = null;
+          // Compute didn't run — release the self-echo claim (only if still ours).
+          if (_avtSelfComputedAuditId === _auditSupabaseIdForAvt) _avtSelfComputedAuditId = null;
           enqueueComputeAvt(_auditSupabaseIdForAvt);
           // v1.70: surface the failure (was silent). The audit is already
           // submitted at this point — close never blocks on compute.
@@ -14298,7 +14422,7 @@ function finalizeCount2() {
       }
     } catch (e) {
       console.warn('[avt] compute_avt_for_audit threw:', e);
-      _avtSelfComputedAuditId = null;
+      if (_avtSelfComputedAuditId === _auditSupabaseIdForAvt) _avtSelfComputedAuditId = null;
       enqueueComputeAvt(_auditSupabaseIdForAvt);
       showToast('Audit submitted, but variance computation failed — it will retry, or recompute from the admin.', 'warning');
     }
