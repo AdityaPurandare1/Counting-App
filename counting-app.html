@@ -3066,6 +3066,17 @@ html, body {
       <label>Issue notes (optional)</label>
       <input class="form-input" id="guidedIssueNotes" placeholder="e.g. sticker fell off, wrong shelf...">
     </div>
+    <!-- Recount-only: fix a wrongly-located item without leaving the recount.
+         Counters could already FLAG "Wrong location" but had no way to ACT on
+         it — isAuditLocked() is true during review/count2, so the Count-1 ⇄
+         move button isn't rendered at all. Applied on Confirm (not on change)
+         so it rides the same single action as the qty/result, and backing out
+         via Skip leaves the zone untouched. (Anna @ Poppy, 2026-08-10.) -->
+    <div class="form-group hide" id="recountZoneGroup">
+      <label>Location</label>
+      <select class="form-input" id="recountZoneSelect" onchange="onRecountZoneChange()"></select>
+      <div id="recountZoneHint" style="font-size:11px;color:var(--text-muted);margin-top:4px"></div>
+    </div>
     <!-- Recount-only block: visible when openRecountEntry sets data-mode="recount".
          Both fields are required to mark the row as "recorded" — finalizeCount2
          and the recount close button block until every recount row has both. -->
@@ -3143,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.98';
+const APP_VERSION = '1.99';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -9562,11 +9573,32 @@ function submitGuidedEntry() {
     }
 
     logActivity('Recount ' + auditResult + ' \u2014 ' + (appState.guidedCurrentItem?.name || recountKey) + ': ' + qty + ' (' + auditReason.slice(0, 60) + ')');
+
+    // Location fix: if the counter picked a different zone, relocate the
+    // Count-1 stock AND this recount row now \u2014 AFTER the qty/result/reason
+    // above are on `rec`, so a fold into an existing target-zone row carries
+    // the counter's work across. The move can re-key the row, so sync the key
+    // it returns rather than the one the modal opened with.
+    let syncKey = recountKey;
+    const _zoneSel   = document.getElementById('recountZoneSelect');
+    const _zoneGroup = document.getElementById('recountZoneGroup');
+    if (_zoneSel && _zoneGroup && !_zoneGroup.classList.contains('hide')) {
+      const _fromZone = _zoneSel.dataset.originalZone || '';
+      const _toZone   = (_zoneSel.value || '').trim();
+      if (_fromZone && _toZone && _toZone !== _fromZone) {
+        const _movedKey = moveRecountLocation(recountKey, _toZone);
+        if (_movedKey) {
+          syncKey = _movedKey;
+          showToast('Moved to ' + _toZone, 'success');
+        }
+      }
+    }
+
     saveState();
 
     // Push this recount row's update to kount_recounts so the desktop sees
     // the count2 value + audit_result + audit_reason live.
-    syncRecountUpdateToSupabase(recountKey).catch(function() {});
+    syncRecountUpdateToSupabase(syncKey).catch(function() {});
 
     closeGuidedEntry();
 
@@ -9720,6 +9752,13 @@ function closeGuidedEntry(event) {
   if (modal) modal.dataset.mode = '';
   document.getElementById('recountResultGroup')?.classList.add('hide');
   document.getElementById('recountReasonGroup')?.classList.add('hide');
+  // Clear the location picker too, so a later non-recount open can't inherit a
+  // stale originalZone and silently "move" the wrong item on Confirm.
+  document.getElementById('recountZoneGroup')?.classList.add('hide');
+  const _zs = document.getElementById('recountZoneSelect');
+  if (_zs) { _zs.innerHTML = ''; delete _zs.dataset.originalZone; }
+  const _zh = document.getElementById('recountZoneHint');
+  if (_zh) { _zh.textContent = ''; _zh.style.color = 'var(--text-muted)'; }
   const _cb = document.getElementById('guidedConfirmBtn');
   if (_cb) { _cb.textContent = 'Confirm'; _cb.classList.remove('needs-confirm'); }
 }
@@ -9886,14 +9925,28 @@ function closeSizePicker() {
 
 function moveEntryToZone(entryId, toZone, fromZoneOverride) {
   closeMoveMenu();
-  if (isAuditLocked() || !appState.audit || !toZone) return;
+  if (isAuditLocked()) return;
+  if (!performEntryZoneMove(entryId, toZone, fromZoneOverride)) return;
+  renderCountPage();
+}
+
+/* Core of the zone move, WITHOUT the Count-1 phase lock. moveEntryToZone (the
+   ⇄ button) wraps this with isAuditLocked(); the recount location fix
+   (moveRecountLocation) calls it directly, because relocating a mis-placed
+   item is exactly what the recount is FOR — the lock exists to stop new
+   Count-1 quantities, not to freeze where the counted stock physically lives.
+   Qty is never changed by this function, only which zone owns it.
+   Returns true if a move happened. opts.silent suppresses the toast. */
+function performEntryZoneMove(entryId, toZone, fromZoneOverride, opts) {
+  const silent = !!(opts && opts.silent);
+  if (!appState.audit || !toZone) return false;
   // fromZoneOverride is set when triggered from the All Count tab; otherwise
   // the entry is assumed to live in the current zone.
   const fromZone = fromZoneOverride || appState.currentZone;
-  if (toZone === fromZone) return;
+  if (toZone === fromZone) return false;
   const fromItems = appState.audit.counts[fromZone] || [];
   const idx = fromItems.findIndex(function (i) { return i.id === entryId; });
-  if (idx === -1) return;
+  if (idx === -1) return false;
   const entry = fromItems[idx];
   if (!appState.audit.counts[toZone]) appState.audit.counts[toZone] = [];
   const toItems = appState.audit.counts[toZone];
@@ -9987,7 +10040,7 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
       if (entry.supabaseId) runDelete('id=eq.' + encodeURIComponent(entry.supabaseId), 'move-merge delete', function () { deleteSourceByClientKey(entry); });
       else deleteSourceByClientKey(entry);
     }
-    showToast('Moved & merged into ' + toZone, 'success');
+    if (!silent) showToast('Moved & merged into ' + toZone, 'success');
   } else {
     fromItems.splice(idx, 1);
     toItems.unshift(entry);
@@ -10018,9 +10071,9 @@ function moveEntryToZone(entryId, toZone, fromZoneOverride) {
         }).catch(function () { updateOfflineBannerState('error'); });
       }
     }
-    showToast('Moved to ' + toZone, 'success');
+    if (!silent) showToast('Moved to ' + toZone, 'success');
   }
-  renderCountPage();
+  return true;
 }
 
 /* After a non-merge move where the source row had no stamped supabaseId, the
@@ -14196,6 +14249,144 @@ function verifyItemTotal(itemName) {
   });
 }
 
+/* ---------- Recount location fix (Anna @ Poppy, 2026-08-10) ----------
+   A counter in the recount could already FLAG "Wrong location", but had no way
+   to act on it: isAuditLocked() is true during review/count2, so the Count-1
+   ⇄ move button isn't rendered. These helpers add a Location picker to the
+   recount sheet and apply the move on Confirm.
+
+   Zone is a LOCATION attribute only — compute_avt_for_audit aggregates actuals
+   per ITEM across every zone, so relocating stock never changes the variance
+   numbers. What it fixes is WHERE the stock is recorded, which drives the next
+   audit's per-zone reference lists (getZoneReferenceItems) and tells the venue
+   where the bottles actually are. */
+
+/* Zones offered by the picker: the venue's configured zones, plus any zone the
+   audit actually holds counts in, plus the row's own zone. A zone can be
+   renamed or dropped from the venue config after counting started, and the
+   current zone must always be selectable so the picker can show where the item
+   sits today. */
+function getRecountZoneOptions(currentZone) {
+  const out = [];
+  const push = function (z) { if (z && out.indexOf(z) === -1) out.push(z); };
+  const venue = appState.currentVenue;
+  ((venue && venue.zones) || []).forEach(push);
+  Object.keys((appState.audit && appState.audit.counts) || {}).forEach(push);
+  push(currentZone);
+  return out;
+}
+
+function populateRecountZoneSelect(rec) {
+  const group = document.getElementById('recountZoneGroup');
+  const sel   = document.getElementById('recountZoneSelect');
+  const hint  = document.getElementById('recountZoneHint');
+  if (!group || !sel) return;
+  const current = rec.zone || '';
+  const zones = getRecountZoneOptions(current);
+  // An unzoned legacy row has no zone to move FROM and its per-(item,zone) key
+  // can't be rebuilt — leave the picker hidden and let the existing
+  // "no zone — flag for admin" hero warning stand.
+  if (!current || zones.length < 2) { group.classList.add('hide'); return; }
+  sel.innerHTML = zones.map(function (z) {
+    return '<option value="' + esc(z) + '"' + (z === current ? ' selected' : '') + '>' + esc(z) + '</option>';
+  }).join('');
+  sel.value = current;
+  sel.dataset.originalZone = current;
+  group.classList.remove('hide');
+  if (hint) { hint.textContent = ''; hint.style.color = 'var(--text-muted)'; }
+}
+
+function onRecountZoneChange() {
+  const sel  = document.getElementById('recountZoneSelect');
+  const hint = document.getElementById('recountZoneHint');
+  if (!sel || !hint) return;
+  const from = sel.dataset.originalZone || '';
+  const to   = sel.value || '';
+  if (!to || to === from) {
+    hint.textContent = '';
+    hint.style.color = 'var(--text-muted)';
+    return;
+  }
+  hint.textContent = 'On Confirm, this item’s Count-1 stock moves from “' + from + '” to “' + to + '”.';
+  hint.style.color = 'var(--warning)';
+}
+
+/* Relocate a recount row — and the Count-1 entry behind it — to another zone.
+   Returns the resulting recount key (the caller syncs it), or null if nothing
+   moved. Quantities are never invented here: the same stock just changes zone.
+
+   NOTE: when the target zone already holds this item, the underlying Count-1
+   move merges and DELETES the source kount_entries row. That delete is
+   silently cancelled until migration 0050 drops the
+   _guard_block_active_entry_delete trigger — the two ship together. */
+function moveRecountLocation(recountKey, toZone) {
+  const recounts = (appState.audit && appState.audit.recounts) || null;
+  const rec = recounts && recounts[recountKey];
+  if (!rec || !toZone) return null;
+  const fromZone = rec.zone || '';
+  if (!fromZone || fromZone === toZone) return null;
+
+  const itemName = rec.itemName || (rec.avtItem && rec.avtItem.itemName) ||
+                   String(recountKey).split('|')[0];
+
+  // 1. Move the Count-1 entry this recount row was generated from. Recount
+  //    entries ALSO live in appState.audit.counts (mergeRemoteEntryIntoLocal
+  //    unshifts is_recount rows too) — skip those, only the Count-1 row
+  //    records where the stock was physically counted.
+  const fromItems = (appState.audit.counts && appState.audit.counts[fromZone]) || [];
+  const src = fromItems.find(function (e) {
+    if (e.isRecount) return false;
+    return rec.masterId
+      ? String(e.masterId) === String(rec.masterId)
+      : String(e.name || '').toLowerCase() === String(itemName).toLowerCase();
+  });
+  if (src) performEntryZoneMove(src.id, toZone, fromZone, { silent: true });
+
+  // 2. Re-key the recount row. kount_recounts carries a UNIQUE index on
+  //    (audit_id, coalesce(item_id::text, lower(item_name)), coalesce(zone,'')),
+  //    so when the target zone already holds a row for this item a plain zone
+  //    patch would 23505 — fold into that row and drop ours instead.
+  const newKey = String(itemName) + '|' + String(toZone);
+  const dest = (newKey !== recountKey) ? recounts[newKey] : null;
+
+  if (dest) {
+    // count1Qty is the ONLY per-zone-summable field. variance / varianceValue
+    // are ITEM-level numbers duplicated onto every zone row — summing them
+    // would multiply the variance (the v1.98 grouped-render guardrail).
+    dest.count1Qty = (Number(dest.count1Qty) || 0) + (Number(rec.count1Qty) || 0);
+    // Carry across a recount already recorded on the moved row so the
+    // counter's work isn't lost. If both rows hold one they describe the same
+    // physical stock, now pooled in one zone, so they add.
+    if (rec.recountQty != null) {
+      dest.recountQty = (Number(dest.recountQty) || 0) + Number(rec.recountQty);
+      dest.status = 'done';
+    }
+    if (!dest.auditResult && rec.auditResult) {
+      dest.auditResult     = rec.auditResult;
+      dest.auditReason     = rec.auditReason;
+      dest.counterInitials = rec.counterInitials;
+    }
+    const staleId = rec.supabaseId;
+    delete recounts[recountKey];
+    saveState();
+    if (staleId && appState.audit.supabaseId) {
+      supabaseRest.deleteRows('kount_recounts', 'id=eq.' + encodeURIComponent(staleId))
+        .catch(function () {});
+    }
+    logActivity('Recount location: ' + itemName + ' ' + fromZone + ' → ' + toZone + ' (merged)');
+    return newKey;
+  }
+
+  rec.zone = toZone;
+  if (newKey !== recountKey) {
+    delete recounts[recountKey];
+    recounts[newKey] = rec;
+  }
+  saveState();
+  logActivity('Recount location: ' + itemName + ' ' + fromZone + ' → ' + toZone);
+  return newKey;
+}
+
 function openRecountEntry(key) {
   const rec = appState.audit?.recounts?.[key];
   if (!rec) return;
@@ -14279,6 +14470,10 @@ function openRecountEntry(key) {
   if (reasonGroup) reasonGroup.classList.remove('hide');
   if (resultSel)   resultSel.value   = rec.auditResult || '';
   if (reasonInput) reasonInput.value = rec.auditReason || '';
+
+  // Location picker — lets a "Wrong location" flag actually be fixed here
+  // rather than only reported. Applied on Confirm by submitGuidedEntry.
+  populateRecountZoneSelect(rec);
 
   document.getElementById('guidedEntryModal').classList.remove('hide');
   document.getElementById('guidedEntryModal').dataset.mode = 'recount';
