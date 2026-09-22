@@ -3143,7 +3143,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.97';
+const APP_VERSION = '1.98';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4098,7 +4098,10 @@ function _mapAvtRow(r) {
     theo:          Number(r.theo || 0),
     variance:      Number(r.variance || 0),
     varianceValue: Number(r.variance_value || 0),
-    variancePct:   Number(r.variance_pct || 0),
+    // v1.98: preserve a genuine NULL (server sends it when theo=0, since
+    // percentage variance is undefined with no theoretical baseline) —
+    // coercing it to 0 made a real anomaly display and score as "0.0%".
+    variancePct:   (r.variance_pct === null || r.variance_pct === undefined) ? null : Number(r.variance_pct),
     cuPrice:       Number(r.cu_price || 0),
     start:         Number(r.start_qty || 0),
     purchases:     Number(r.purchases || 0),
@@ -4557,7 +4560,11 @@ async function approveUPCPending(id) {
       title: p.item_name,
       brand: p.item_brand || '',
       category: p.item_category || 'other',
-      masterId: p.master_item_id ? String(p.master_item_id) : null,
+      // v1.98: use the server-resolved master_item_id (data), not the
+      // stale pre-approval p.master_item_id — when the RPC resolves via
+      // name-fallback, p.master_item_id is still null and this used to
+      // cache a blank item link for up to 5 minutes.
+      masterId: data.master_item_id ? String(data.master_item_id) : null,
       barcode: p.barcode_raw,
       approvedAt: new Date().toISOString(),
     };
@@ -11183,12 +11190,15 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// v1.98: delegates to detectCategoryFromText instead of keeping its own
+// keyword list. This used to duplicate detectCategoryFromText with a
+// shorter, independently-drifted spirits regex (missing aperol/campari/
+// vermouth/liqueur/mezcal/brandy, among others) — the same product's
+// category depended on whether it came through the barcode-lookup path
+// (this function) or the photo-OCR path (detectCategoryFromText). Now
+// there is exactly one keyword list to keep current.
 function detectCategory(title, description) {
-  const text = ((title || '') + (description || '')).toLowerCase();
-  if (/wine|cabernet|merlot|pinot|chardonnay|champagne|prosecco/.test(text)) return 'wine';
-  if (/vodka|whiskey|bourbon|gin|rum|tequila|cognac|scotch|hennessy|patron/.test(text)) return 'spirits';
-  if (/beer|ale|lager|stout|ipa|heineken|corona|modelo|seltzer/.test(text)) return 'beer';
-  return 'other';
+  return detectCategoryFromText((title || '') + ' ' + (description || ''));
 }
 
 /* Strategy-2 matcher — scanned barcode → ’ itemMaster row by inline UPC.
@@ -11996,44 +12006,56 @@ function closePhotoReview(event) {
   clearExtraLocations('photoExtraLocations');
 }
 
+let _submittingPhotoEntry = false; // v1.98: see guard below
+
 async function submitPhotoEntry() {
   if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return; // FIX #1
+  // v1.98: submitPhotoEntry awaits savePhoto (IndexedDB) before the modal
+  // closes, with no button-disable — a fast double-tap used to re-enter
+  // this function while the first call was still in flight, and the second
+  // call's addCountEntry landed on the duplicate-in-zone merge branch,
+  // silently doubling the recorded quantity.
+  if (_submittingPhotoEntry) return;
+  _submittingPhotoEntry = true;
+  try {
+    const name = document.getElementById('photoName').value.trim();
+    if (!name) { showToast('Enter item name', 'error'); return; }
 
-  const name = document.getElementById('photoName').value.trim();
-  if (!name) { showToast('Enter item name', 'error'); return; }
+    // Save photo to IndexedDB (not localStorage)
+    const photoId = 'P' + Date.now();
+    try { await savePhoto(photoId, capturedPhotoData); } catch (e) {}
 
-  // Save photo to IndexedDB (not localStorage)
-  const photoId = 'P' + Date.now();
-  try { await savePhoto(photoId, capturedPhotoData); } catch (e) {}
+    // Get masterId if OCR matched an item, plus UPC if Claude / the matched
+    // catalog row supplied one (parseLabelWithClaude → populatePhotoFormFromParsed
+    // stores it on the input's dataset). Falls through to null on the legacy
+    // Tesseract path, which doesn't populate UPC.
+    const masterId = document.getElementById('photoName').dataset.masterId || null;
+    const upc      = document.getElementById('photoName').dataset.upc      || null;
+    const category = document.getElementById('photoCategory').value;
+    const qty = document.getElementById('photoQty').value;
+    const details = document.getElementById('photoDetails').value.trim();
+    // Issue: counter can pick from chips after the photo is parsed; if the
+    // AI couldn't match a catalog row, populatePhotoFormFromParsed pre-
+    // selects 'not-in-craftable' so the entry surfaces on the Issues page.
+    // Notes free-text rides alongside in the entry's notes field so the
+    // admin sees context.
+    const issue = appState.photoIssue || 'none';
+    const issueNotesEl = document.getElementById('photoIssueNotes');
+    const issueNotes = (issueNotesEl && issueNotesEl.value.trim()) || details || null;
 
-  // Get masterId if OCR matched an item, plus UPC if Claude / the matched
-  // catalog row supplied one (parseLabelWithClaude → populatePhotoFormFromParsed
-  // stores it on the input's dataset). Falls through to null on the legacy
-  // Tesseract path, which doesn't populate UPC.
-  const masterId = document.getElementById('photoName').dataset.masterId || null;
-  const upc      = document.getElementById('photoName').dataset.upc      || null;
-  const category = document.getElementById('photoCategory').value;
-  const qty = document.getElementById('photoQty').value;
-  const details = document.getElementById('photoDetails').value.trim();
-  // Issue: counter can pick from chips after the photo is parsed; if the
-  // AI couldn't match a catalog row, populatePhotoFormFromParsed pre-
-  // selects 'not-in-craftable' so the entry surfaces on the Issues page.
-  // Notes free-text rides alongside in the entry's notes field so the
-  // admin sees context.
-  const issue = appState.photoIssue || 'none';
-  const issueNotesEl = document.getElementById('photoIssueNotes');
-  const issueNotes = (issueNotesEl && issueNotesEl.value.trim()) || details || null;
+    addCountEntry(name, category, qty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
 
-  addCountEntry(name, category, qty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
+    // Extras: other zones chosen via "+ Location"
+    applyExtraLocations('photoExtraLocations', function(zone, extraQty) {
+      addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
+    });
 
-  // Extras: other zones chosen via "+ Location"
-  applyExtraLocations('photoExtraLocations', function(zone, extraQty) {
-    addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
-  });
-
-  closePhotoReview();
-  renderCountPage();
+    closePhotoReview();
+    renderCountPage();
+  } finally {
+    _submittingPhotoEntry = false;
+  }
 }
 
 /* ================================================================
@@ -13159,6 +13181,11 @@ function _avtNamesMatch(a, b) {
 function findCountedQtyForAvtItem(avt, countedMap) {
   const avtName = avt.itemName || '';
   let bestQty = 0;
+  // v1.98: track whether the first pass actually matched, separately from
+  // bestQty being 0 — a legitimately-counted zero used to be indistinguishable
+  // from "no match found", which fell through into the broader fuzzy pass
+  // and could attribute an unrelated item's quantity to this AVT row.
+  let matched = false;
 
   // First pass: try matching against itemMaster-linked entries
   for (const [masterId, qty] of Object.entries(countedMap)) {
@@ -13166,6 +13193,7 @@ function findCountedQtyForAvtItem(avt, countedMap) {
     if (!masterItem) continue;
     if (_avtNamesMatch(masterItem.name, avtName)) {
       bestQty = qty;
+      matched = true;
       break;
     }
   }
@@ -13173,7 +13201,7 @@ function findCountedQtyForAvtItem(avt, countedMap) {
   // Second pass: fall back to free-text counted entries (custom items,
   // typo'd names that didn't pick up a masterId on submit). Sums across
   // all matching rows in the audit, all zones.
-  if (bestQty === 0 && appState.audit) {
+  if (!matched && appState.audit) {
     for (const [zone, items] of Object.entries(appState.audit.counts)) {
       for (const item of items) {
         if (_avtNamesMatch(item.name, avtName)) {
@@ -14608,7 +14636,7 @@ function exportCountCSV(countNumber) {
       Number(avt.variance || 0).toFixed(2),
       '$' + Number(avt.cuPrice || 0).toFixed(2),
       '$' + Number(avt.varianceValue || 0).toFixed(2),
-      (avt.variancePct || 0).toFixed(1) + '%',
+      (avt.variancePct === null || avt.variancePct === undefined) ? 'N/A' : Number(avt.variancePct).toFixed(1) + '%',
       countedQty || '',
       severity,
       recount ? 'YES' : 'NO',
