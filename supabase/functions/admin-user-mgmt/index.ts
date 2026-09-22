@@ -23,7 +23,7 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
-type Role = 'corporate' | 'manager' | 'counter';
+type Role = 'corporate' | 'manager' | 'counter' | 'venue_manager';
 
 interface InvitePayload {
   action: 'invite';
@@ -231,8 +231,8 @@ async function handleInvite(
 ): Promise<Response> {
   const email = (payload.email || '').toLowerCase().trim();
   if (!email || !email.includes('@')) return reject(400, 'Valid email required');
-  if (!payload.role || !['corporate', 'manager', 'counter'].includes(payload.role)) {
-    return reject(400, 'role must be corporate | manager | counter');
+  if (!payload.role || !['corporate', 'manager', 'counter', 'venue_manager'].includes(payload.role)) {
+    return reject(400, 'role must be corporate | manager | counter | venue_manager');
   }
   const venueIds = Array.isArray(payload.venue_ids) ? payload.venue_ids : [];
 
@@ -494,8 +494,8 @@ async function handleUpdateProfile(
   const update: Record<string, unknown> = {};
   if (typeof payload.name === 'string')          update.name = payload.name;
   if (typeof payload.role === 'string') {
-    if (!['corporate', 'manager', 'counter'].includes(payload.role)) {
-      return reject(400, 'role must be corporate | manager | counter');
+    if (!['corporate', 'manager', 'counter', 'venue_manager'].includes(payload.role)) {
+      return reject(400, 'role must be corporate | manager | counter | venue_manager');
     }
     update.role = payload.role;
   }
