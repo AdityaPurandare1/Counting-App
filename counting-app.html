@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.05';
+const APP_VERSION = '2.06';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3430,6 +3430,10 @@ if (typeof window !== 'undefined') {
 
 let supabaseItems = [];
 let supabaseLoaded = false;
+// v2.06: true whenever itemMaster came from the bundled items.json rather
+// than the live catalog, so callers can tell a real miss from a stale-data
+// miss instead of offering 'add as new' against a months-old list.
+let itemMasterIsStaleFallback = false;
 
 // In-scope master_items categories for the Counting-App (bar / bev / liquor
 // / wine / mixers + beer). Food, produce, supplies, services are excluded —
@@ -4880,6 +4884,7 @@ async function loadItemMaster() {
   var supabaseOk = await loadSupabaseItems();
 
   if (supabaseOk && supabaseItems.length > 0) {
+    itemMasterIsStaleFallback = false;  // v2.06: live catalog reached
     itemMaster = mapSupabaseToItemMaster(supabaseItems);
     itemMasterLoaded = true;
     mergeCustomItemsIntoMaster();
@@ -4915,8 +4920,18 @@ async function loadItemMaster() {
     itemMasterLoaded = true;
     mergeCustomItemsIntoMaster();
     buildItemMasterDisplay();
-    console.log('Item master from items.json: ' + itemMaster.length + ' items (display: ' + itemMasterDisplay.length + ')');
-    showToast(itemMaster.length + ' items loaded', 'success');
+    console.warn('[catalog] FELL BACK to bundled items.json: ' + itemMaster.length +
+      ' items. This file ships with the app and is only as current as the last' +
+      ' release — the live catalog is larger and newer.');
+    // v2.06: this used to fire a GREEN SUCCESS toast ('4,592 items loaded'),
+    // so a counter whose catalog read failed (e.g. the transient PostgREST
+    // 500s logged on 2026-09-23) saw a success message and had no way to
+    // know they were searching a months-old bundled list. The fallback
+    // itself is right — a stale catalog beats no catalog — but it must
+    // announce itself. Warning tone, names the cause, and says what to do.
+    showToast('Offline catalog in use (' + itemMaster.length + ' items) — could not reach the ' +
+      'live catalog, so some items may be missing. Pull to refresh, or reopen the app.', 'warn');
+    itemMasterIsStaleFallback = true;
     validateItemMaster('items.json');
 
     currentPage = document.querySelector('.page:not(.hide)');
