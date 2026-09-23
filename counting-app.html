@@ -8,7 +8,7 @@
 <meta name="theme-color" content="#0a0a0a">
 <title>Keva Inventory</title>
 <link rel="manifest" href="manifest.json">
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
 <!-- Reliable decoder for iPhones/iOS (no usable native BarcodeDetector there;
      Quagga above is unreliable on iOS). zxing-wasm reader, pinned + wasm served
@@ -55,25 +55,33 @@
 :root {
   /* ====== WOODY PALETTE ====== */
   /* Surfaces — warm cream / off-white foundation */
-  --bg: #ECE6DF;
-  --canvas: #ECE6DF;
+  --bg: #FFF9F5;
+  --canvas: #FFF9F5;
   --surface: #FFFFFF;
   --surface2: #F5F1EC;
   --surface3: #E7E0D6;
   --off-100: #FFF9F5;
-  --off-200: #F5F1EC;
-  --off-300: #E7E0D6;
-  --border: #D9D2C5;
-  --border-strong: #B5AB97;
+  --off-200: #F5F2F0;
+  --off-300: #EDE9E6;
+  --border: #E9E3DF;
+  --border-strong: #BDB8B6;
 
-  /* Text — ink-forward, generous contrast */
-  --text: #0D0A08;
-  --ink: #0D0A08;
-  --fg-primary: #0D0A08;
-  --fg-secondary: #4F4B4B;
-  --fg-muted: #8A8380;
-  --text-muted: #4F4B4B;
-  --text-dim: #8A8380;
+  /* Text — ink-forward, generous contrast.
+     v2.08: secondary/muted/caution darkened off the design-system values.
+     Measured on the new canvas, Woody's own #7B7775 / #918C8B / #B87333
+     came in at 4.43 / 3.32 / 3.79 :1 — under AA's 4.5 for body text. This
+     app is read in dim bar lighting on a phone held at arm's length, which
+     is the worst case for low-contrast secondary text, so they were lifted
+     to 7.03 / 4.76 / 4.76 :1. The naive minimum put secondary and muted at
+     #767270 and #767271 — indistinguishable — so secondary was taken
+     further to keep three visibly separate steps. */
+  --text: #231F20;
+  --ink: #231F20;
+  --fg-primary: #231F20;
+  --fg-secondary: #5C5856;
+  --fg-muted: #767271;
+  --text-muted: #5C5856;
+  --text-dim: #767271;
 
   /* Brand — Woody uses ink as primary CTA, gold as highlight */
   --accent: #0D0A08;
@@ -84,45 +92,55 @@
   --primary-dim: rgba(13, 10, 8, 0.06);
 
   /* Dark scale */
-  --dark-700: #3D342F;
-  --dark-800: #1E1612;
-  --dark-900: #0D0A08;
+  --dark-700: #4F4B4B;
+  --dark-800: #393536;
+  --dark-900: #231F20;
 
   /* Gold — highlight/status */
-  --gold-100: #F5EBD0;
-  --gold-300: #C9A24C;
-  --gold-400: #8B6F1E;
+  --gold-100: #F0E3D3;
+  --gold-300: #C49A6C;
+  --gold-400: #A4815C;
 
   /* Raspberry — critical / danger */
-  --raspberry-100: #F7DEE4;
-  --raspberry-200: #E8A8B6;
-  --raspberry-300: #C13A57;
-  --raspberry-400: #7C1E31;
+  --raspberry-100: #FBEBE9;
+  --raspberry-200: #E0A69E;
+  --raspberry-300: #B4453A;
+  --raspberry-400: #8E3229;
 
   /* Teal — positive / in-progress */
-  --teal-100: #DCEAE6;
-  --teal-300: #3F7D73;
+  --teal-100: #E6F5F2;
+  --teal-300: #2D7D6F;
 
   /* Copper — caution */
-  --copper-100: #F5E0CE;
-  --copper-300: #B2703F;
-  --copper-400: #7A4818;
+  --copper-100: #FBF0E5;
+  --copper-300: #A1652C;
+  --copper-400: #8A5625;
 
   /* Amethyst — inform / scheduled */
-  --amethyst-100: #EBE2F2;
-  --amethyst-200: #C9B6DC;
-  --amethyst-300: #8B6FA8;
-  --amethyst-400: #4E3A6B;
+  --amethyst-100: #F0EDF8;
+  --amethyst-200: #BAB0DE;
+  --amethyst-300: #6654A3;
+  --amethyst-400: #403568;
+
+  /* v2.07: Woody semantic names, so phone and admin can be reasoned about
+     with one vocabulary. The older aliases below are kept — they are used
+     in ~770 places and renaming them would be churn, not improvement. */
+  --brand: #C49A6C;        --brand-ink: #FFF9F5;
+  --critical: #B4453A;     --critical-bg: #FBEBE9;
+  --caution: #A1652C;      --caution-bg: #FBF0E5;
+  --positive: #2D7D6F;     --positive-bg: #E6F5F2;
+  --inform: #6654A3;       --inform-bg: #F0EDF8;
+  --shadow-focus: 0 0 0 2px #C49A6C, 0 0 0 6px rgba(196,154,108,.25);
 
   /* Semantic aliases (Phase A uses these) */
-  --danger: #C13A57;
-  --danger-dim: rgba(193, 58, 87, 0.10);
-  --success: #3F7D73;
-  --success-dim: rgba(63, 125, 115, 0.10);
-  --warning: #B2703F;
-  --warning-dim: rgba(178, 112, 63, 0.10);
-  --blue: #8B6FA8;
-  --blue-dim: rgba(139, 111, 168, 0.10);
+  --danger: #B4453A;
+  --danger-dim: rgba(180, 69, 58, 0.10);
+  --success: #2D7D6F;
+  --success-dim: rgba(45, 125, 111, 0.10);
+  --warning: #A1652C;
+  --warning-dim: rgba(184, 115, 51, 0.10);
+  --blue: #6654A3;
+  --blue-dim: rgba(102, 84, 163, 0.10);
 
   /* Shape — tighter radii to match Woody's squared feel */
   --radius: 12px;
@@ -133,7 +151,7 @@
   --shadow-lg: 0 12px 32px rgba(13, 10, 8, 0.14), 0 4px 8px rgba(13, 10, 8, 0.06);
 
   /* Typography */
-  --font: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
   --mono: 'JetBrains Mono', ui-monospace, monospace;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-top: env(safe-area-inset-top, 0px);
@@ -3154,7 +3172,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.06';
+const APP_VERSION = '2.08';
 
 /* ================================================================
    SUPABASE INTEGRATION
