@@ -68,6 +68,8 @@
 
   /* Text — ink-forward, generous contrast.
      v2.08: secondary/muted/caution darkened off the design-system values.
+     v2.09: offline counting -- counts save locally + replay from the durable
+            queue (audit-pinned, live-card bound, JWT refresh, close gate).
      Measured on the new canvas, Woody's own #7B7775 / #918C8B / #B87333
      came in at 4.43 / 3.32 / 3.79 :1 — under AA's 4.5 for body text. This
      app is read in dim bar lighting on a phone held at arm's length, which
@@ -3172,7 +3174,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.08';
+const APP_VERSION = '2.09';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -6432,8 +6434,11 @@ async function syncEntryToSupabase(entry, zone, opts) {
     showToast('View-only access — counting is disabled', 'error');
     return { data: null, error: { message: 'venue_manager-readonly' } };
   }
-  if (!appState.audit || !appState.audit.supabaseId) return null;
-  const auditId = appState.audit.supabaseId;
+  // v2.09: a replayed queue op may belong to an audit this phone has since
+  // left (counted offline, joined a different audit before reconnecting).
+  // opts.auditId pins the write to the audit the count was actually made in.
+  const auditId = (opts && opts.auditId) || (appState.audit && appState.audit.supabaseId) || null;
+  if (!auditId) return null;
   const isRecount = !!(opts && opts.isRecount);
 
   // The phone overloads `entry.sku` to carry either a catalog SKU or a
@@ -6489,6 +6494,15 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // merge-update error), not the stale initial 23505 that's expected on
   // collision.
   let lastError = null;
+
+  // v2.09 OFFLINE COUNTING: while the browser knows it is offline, don't burn
+  // a fetch (and a queue attempt) -- park the op in the durable queue and let
+  // replay push it when connectivity returns. Pre-v2.09 the count was refused.
+  if (navigator.onLine === false) {
+    queueEntrySync(entry, zone, opts, auditId, (opts && Number(opts._syncAttempts)) || 0);
+    updateOfflineBannerState();
+    return null;
+  }
 
   const { data, error } = await supabaseRest.insert('kount_entries', payload);
   if (!error && data && data[0]) {
@@ -6578,14 +6592,15 @@ async function syncEntryToSupabase(entry, zone, opts) {
   }
 
   console.warn('[audit] sync entry failed:', lastError);
-  updateOfflineBannerState('error');
+  // Offline is not a database error -- keep the banner on the offline copy.
+  updateOfflineBannerState(navigator.onLine === false ? undefined : 'error');
 
   // Hand off to the retry queue if the failure looks transient. The queue
   // replays on `online`, channel re-subscribe, and a periodic ticker, so
   // a flaky network or 5xx blip eventually heals without the user
   // noticing. 4xx and 23505-style hard failures are dropped — those are
   // bugs we want to surface, not paper over.
-  if (appState.audit && appState.audit.supabaseId && isRetryableError(lastError)) {
+  if (auditId && isRetryableError(lastError)) {
     // Attempt count rides in opts so a re-enqueued entry-sync (whose replay
     // shifts the old queue slot and pushes a fresh one — see
     // replayPendingMutations) still accumulates a bound. Without this the
@@ -6596,11 +6611,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
       console.error('[audit] entry sync exceeded ' + ENTRY_SYNC_MAX_ATTEMPTS +
         ' attempts — dropping:', entry && entry.name, lastError);
     } else {
-      enqueuePendingMutation('entry-sync', {
-        entry: snapshotEntry(entry),
-        zone: zone,
-        opts: Object.assign({}, opts || {}, { _syncAttempts: attempts + 1 }),
-      }, { label: 'entry sync (' + (entry.name || 'unknown') + ')' });
+      queueEntrySync(entry, zone, opts, auditId, attempts + 1);
     }
   } else if (lastError) {
     console.error('[audit] entry sync non-retryable, dropping:', lastError);
@@ -6666,6 +6677,50 @@ function snapshotEntry(entry) {
   };
 }
 
+/* v2.09: locate the LIVE local entry a queued sync belongs to. A new entry's
+   local id doubles as its client_entry_id; a repeat count of the same item
+   syncs a DELTA copy under a fresh clientEntryId that no live entry carries,
+   so deltas deliberately never match here (they must replay verbatim). */
+function findLiveEntryForSync(snap, auditId) {
+  if (!snap || !appState.audit || !appState.audit.supabaseId) return null;
+  if (auditId && appState.audit.supabaseId !== auditId) return null;
+  const key = snap.clientEntryId || snap.id;
+  if (!key) return null;
+  const counts = appState.audit.counts || {};
+  const zones = Object.keys(counts);
+  for (let i = 0; i < zones.length; i++) {
+    const hit = (counts[zones[i]] || []).find(function (e) { return (e.clientEntryId || e.id) === key; });
+    if (hit) return { entry: hit, zone: zones[i] };
+  }
+  return null;
+}
+
+/* v2.09: single place that parks an entry insert in the retry queue. Records
+   the audit it belongs to and whether the snapshot IS a live count card (so
+   replay can push the card's current qty/zone and drop it if it was removed). */
+function queueEntrySync(entry, zone, opts, auditId, attempts) {
+  enqueuePendingMutation('entry-sync', {
+    entry: snapshotEntry(entry),
+    zone: zone,
+    auditId: auditId,
+    live: !!findLiveEntryForSync(entry, auditId),
+    opts: Object.assign({}, opts || {}, { _syncAttempts: attempts, auditId: auditId }),
+  }, { label: 'entry sync (' + (entry.name || 'unknown') + ')' });
+}
+
+/* v2.09: a phone that sat offline past the JWT lifetime (~1h) used to replay
+   with an expired token -> HTTP 401 -> "non-retryable" -> counts DROPPED.
+   getSession() refreshes an expired session when online; adopt the new token
+   before the queue drains. */
+async function refreshJwtForReplay() {
+  if (!supabaseClient || !supabaseClient.auth) return;
+  try {
+    const resp = await supabaseClient.auth.getSession();
+    const tok = resp && resp.data && resp.data.session && resp.data.session.access_token;
+    if (tok && tok !== currentSupabaseJwt) { currentSupabaseJwt = tok; syncRealtimeAuth(); }
+  } catch (e) {}
+}
+
 function isRetryableError(err) {
   if (!err) return false;
   // Extract a usable message. Genuine transient failures (offline, DNS,
@@ -6689,6 +6744,10 @@ function isRetryableError(err) {
   if (/duplicate key|23505/i.test(msg)) return false;
   // 4xx is non-retryable: validation, RLS, not-found. Replaying just keeps
   // the queue full of zombie ops.
+  // 401 is an expired/rotated session, not a bad op -- replay refreshes the
+  // token first (refreshJwtForReplay). Bounded by the attempt cap if the user
+  // really is signed out.
+  if (/HTTP 401/.test(msg)) return true;
   if (/HTTP 4\d\d/.test(msg)) return false;
   return true;
 }
@@ -6717,6 +6776,7 @@ async function replayPendingMutations() {
   if (navigator.onLine === false) return;
   _replayInFlight = true;
   try {
+    await refreshJwtForReplay();
     // FIFO so dependent ops (insert before update on the same row) replay
     // in their original order. Stop on the first retryable failure to
     // avoid spinning — the next trigger will pick up where we left off.
@@ -6727,13 +6787,36 @@ async function replayPendingMutations() {
       let opError = null;
       try {
         if (op.kind === 'entry-sync') {
-          const result = await syncEntryToSupabase(op.args.entry, op.args.zone, op.args.opts);
-          // syncEntryToSupabase re-enqueues itself on its own retryable
-          // failures (and returns null). If it returned null, the new
-          // queue entry is at the tail; we still shift the old one off so
-          // the queue doesn't double-count this op forever.
-          succeeded = result !== null;
-          if (!succeeded) opError = new Error('entry-sync replay returned null');
+          // v2.09: bind the op to the LIVE count card when it still exists in
+          // the audit it was counted in, so replay pushes the counter's current
+          // qty/zone (offline +/- edits included) and stamps supabaseId on the
+          // card the UI shows -- not on a stale snapshot. A live op whose card
+          // was removed offline is dropped (nothing left to upload). Delta ops
+          // (live:false) and ops from an audit the phone has since left replay
+          // their snapshot verbatim, pinned to auditId via opts.
+          let target = op.args.entry, targetZone = op.args.zone, skip = false;
+          if (op.args.live) {
+            const hit = findLiveEntryForSync(op.args.entry, op.args.auditId);
+            if (hit) {
+              target = hit.entry; targetZone = hit.zone;
+              if (hit.entry.supabaseId) skip = true; // already on the server
+            } else if (appState.audit && appState.audit.supabaseId === op.args.auditId) {
+              console.log('[sync-queue] count removed before upload, dropping:', op.label);
+              skip = true;
+            }
+          }
+          if (skip) {
+            succeeded = true;
+          } else {
+            const result = await syncEntryToSupabase(target, targetZone, op.args.opts);
+            // syncEntryToSupabase re-enqueues itself on its own retryable
+            // failures (and returns null). If it returned null, the new
+            // queue entry is at the tail; we still shift the old one off so
+            // the queue doesn't double-count this op forever.
+            succeeded = result !== null;
+            if (!succeeded) opError = new Error('entry-sync replay returned null');
+            if (succeeded && target !== op.args.entry) saveState();
+          }
         } else if (op.kind === 'rest-update') {
           const r = await supabaseRest.update(op.args.table, op.args.filter, op.args.body);
           if (r && r.error) opError = r.error; else succeeded = true;
@@ -7038,10 +7121,15 @@ function updateOfflineBannerState(forcedState) {
   const online = navigator.onLine !== false;
   const pending = (typeof pendingMutations !== 'undefined' && pendingMutations.length) || 0;
   const pendSuffix = pending > 0 ? ' \u00b7 ' + pending + ' queued' : '';
-  if (forcedState === 'error')    { showOfflineBanner('Database error \u2014 changes paused' + pendSuffix); return; }
-  if (!online)                    { showOfflineBanner('Offline \u2014 changes queued' + pendSuffix); return; }
+  if (!online) {
+    showOfflineBanner(pending > 0
+      ? 'Offline \u2014 keep counting, ' + pending + ' change' + (pending === 1 ? '' : 's') + ' will upload when reconnected'
+      : 'Offline \u2014 keep counting, changes upload when reconnected');
+    return;
+  }
+  if (forcedState === 'error')    { showOfflineBanner('Upload failed \u2014 retrying' + pendSuffix); return; }
   if (auditChannelState === 'connecting') { showOfflineBanner('Reconnecting to audit\u2026' + pendSuffix); return; }
-  if (auditChannelState === 'error')      { showOfflineBanner('Disconnected \u2014 reconnect to continue' + pendSuffix); return; }
+  if (auditChannelState === 'error')      { showOfflineBanner('Live updates paused \u2014 counts still save' + pendSuffix); return; }
   if (pending > 0) { showOfflineBanner('Syncing ' + pending + ' queued change' + (pending === 1 ? '' : 's') + '\u2026'); return; }
   hideOfflineBanner();
 }
@@ -7067,6 +7155,28 @@ function hideOfflineBanner() {
 function isNetworkedAuditBlocked() {
   return !!(appState.audit && appState.audit.supabaseId) &&
          (navigator.onLine === false || auditChannelState === 'error');
+}
+
+/* v2.09: closing/finalizing computes variance server-side from kount_entries,
+   so it must not run while THIS phone still holds count changes that haven't
+   uploaded. Keys on queued kount_entries ops only -- an offline close with an
+   empty queue is still allowed (it takes the no-compute fallback). Returns
+   true (after toasting) when the close should be refused. */
+function pendingUploadsBlockClose() {
+  if (!appState.audit || !appState.audit.supabaseId) return false;
+  const q = (typeof pendingMutations !== 'undefined' && pendingMutations) || [];
+  const n = q.filter(function (op) {
+    return op.kind === 'entry-sync' || (op.args && op.args.table === 'kount_entries');
+  }).length;
+  if (n === 0) return false;
+  const what = n + ' count change' + (n === 1 ? '' : 's');
+  if (navigator.onLine === false) {
+    showToast('Offline \u2014 ' + what + ' on this phone still need to upload. Reconnect before closing.', 'error');
+  } else {
+    showToast(what + ' still uploading \u2014 wait for the banner to clear, then try again', 'warn');
+    replayPendingMutations();
+  }
+  return true;
 }
 
 window.addEventListener('online',  () => updateOfflineBannerState());
@@ -10388,12 +10498,10 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
     showToast('Pick a zone before counting', 'warn');
     return;
   }
-  // Networked audits must be online. Refuse rather than let the local count
-  // drift from Supabase (option 3B — block offline writes).
-  if (isNetworkedAuditBlocked()) {
-    showToast('Disconnected \u2014 reconnect to continue counting', 'error');
-    return;
-  }
+  // v2.09: counting is allowed offline. The entry is saved to local storage
+  // right away and syncEntryToSupabase parks it in the durable retry queue,
+  // which replays on 'online' / channel re-subscribe / a 30s ticker. (Until
+  // v2.08 this refused the count with "Disconnected".)
 
   if (!appState.audit.counts[appState.currentZone]) {
     appState.audit.counts[appState.currentZone] = [];
@@ -10526,8 +10634,8 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
   showToast('Added: ' + name, 'success');
   saveState();
 
-  // Mirror to Supabase for networked audits (fire-and-forget; offline-block
-  // above prevents this path when disconnected).
+  // Mirror to Supabase for networked audits (fire-and-forget; offline or a
+  // transient failure lands the insert in the retry queue, not on the floor).
   if (appState.audit && appState.audit.supabaseId) {
     syncEntryToSupabase(newEntry, appState.currentZone).catch(err => {
       console.warn('[audit] syncEntryToSupabase failed:', err);
@@ -13719,6 +13827,7 @@ function closeCount1() {
     showToast('Count 1 already closed', 'error');
     return;
   }
+  if (pendingUploadsBlockClose()) return;
 
   const allItems = getAllCountedItems();
   if (allItems.length === 0) {
@@ -14047,6 +14156,7 @@ function closeCount1AndFinalize() {
   if ((appState.audit.countPhase || 'count1') === 'final' || appState.audit.status === 'submitted') {
     showToast('Audit already finalized', 'error'); return;
   }
+  if (pendingUploadsBlockClose()) return;
   const allItems = getAllCountedItems();
   if (allItems.length === 0) { showToast('No items counted yet. Count some items first.', 'error'); return; }
 
@@ -14156,6 +14266,7 @@ function closeCount2() {
     showToast('Only managers can close the recount', 'error');
     return;
   }
+  if (pendingUploadsBlockClose()) return;
 
   // Strict close gate restored 2026-06-09 (was temporarily relaxed on
   // 2026-05-27 after the item_id FK outage left counts incomplete). The
@@ -14716,6 +14827,7 @@ function submitRecount() {
     showToast('Only managers can close the recount', 'error');
     return;
   }
+  if (pendingUploadsBlockClose()) return;
   // Block close if any row hasn't been "recorded" — i.e., the manager
   // hasn't marked it Corrected or Verified yet. Quantity alone isn't
   // enough because the count may have stayed the same on purpose.
@@ -15893,6 +16005,7 @@ function submitAudit() {
     showToast('Audit already submitted', 'error');
     return;
   }
+  if (pendingUploadsBlockClose()) return;
 
   showConfirm('Submit this audit? It will be locked from editing.', () => {
     appState.audit.status = 'submitted';
