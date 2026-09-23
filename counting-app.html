@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.02';
+const APP_VERSION = '2.03';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7494,6 +7494,28 @@ try {
 async function loadAppUsersFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
+    // v2.03: app_users SELECT is {authenticated}-only, so a read sent with
+    // the anon key returns 0 rows and NO error — which the self-eval below
+    // reads as 'you are not in the active list' and SIGNS THE USER OUT.
+    // The boot-time call races getSession(), so a signed-in user could be
+    // ejected with 'Your access has been revoked' while their account was
+    // perfectly healthy. Same root cause as the v2.01 venue fix, but this
+    // one locks people out, so it gets a hard guard as well as the await.
+    if (!currentSupabaseJwt && supabaseClient) {
+      try {
+        const sess = await supabaseClient.auth.getSession();
+        const tok = sess && sess.data && sess.data.session && sess.data.session.access_token;
+        if (tok) currentSupabaseJwt = tok;
+      } catch (e) { /* fall through to the guard below */ }
+    }
+    // Hard guard: with no JWT this read CANNOT return rows, so an empty
+    // result carries no information about anyone's access. Never let it
+    // reach the revoke path — keep the cached list and try again later.
+    if (!currentSupabaseJwt) {
+      console.warn('[app_users] no JWT yet — skipping load so the empty ' +
+                   'anon result cannot be misread as a revoked account');
+      return false;
+    }
     const { data, error } = await supabaseRest.query(
       'app_users',
       'select=*&is_active=eq.true&order=role,email'
@@ -8032,11 +8054,31 @@ async function _hydrateUserProfileFromSession(opts) {
     session = resp && resp.data && resp.data.session;
   } catch (e) { return; }
   if (!session || !session.user || !session.user.email) return;
+  // v2.03: adopt the token from the session we just fetched BEFORE querying.
+  // currentSupabaseJwt is normally set by the getSession().then / 
+  // onAuthStateChange handlers, but this function runs from the boot
+  // setTimeout and can win that race. Without this the profile read below
+  // goes out with the ANON key, app_users returns 0 rows under its
+  // {authenticated}-only policy, `row` is undefined, and we called
+  // signOut() on a perfectly valid account — destroying the session
+  // server-side and producing a login loop.
+  if (session.access_token && !currentSupabaseJwt) {
+    currentSupabaseJwt = session.access_token;
+    try { syncRealtimeAuth(); } catch (e) {}
+  }
   const email = session.user.email.toLowerCase();
   const profile = await supabaseRest.query(
     'app_users',
     'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
   );
+  // A failed read tells us NOTHING about this user's access. Only a
+  // successful response that definitively returns no row (or an inactive
+  // one) may sign someone out. Previously any transient error left
+  // profile.data undefined and took the sign-out branch.
+  if (profile.error) {
+    console.warn('[auth] profile re-check failed, keeping session:', profile.error);
+    return;
+  }
   const row = profile.data && profile.data[0];
   if (!row || row.is_active === false) {
     // Session is valid but profile is missing or revoked — sign out so
