@@ -3143,7 +3143,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.98';
+const APP_VERSION = '1.99';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8465,6 +8465,18 @@ async function addCustomZone() {
 
 async function removeCustomZone(zoneName, evt) {
   if (evt && evt.stopPropagation) evt.stopPropagation();
+  // v1.99: product decision — removing a zone that still has live counts in
+  // it hides those counts from every total (they stay saved server-side,
+  // but nothing on screen sums them), and if the same items later get
+  // recounted under a different zone, there's no way to tell that's a
+  // continuation rather than new stock. Rather than patch the totals math
+  // around that risk, zone removal is blocked for the entire duration of
+  // an audit — zones can only be added/removed before an audit starts or
+  // after it's fully submitted, never mid-count.
+  if (appState.audit) {
+    showToast('Cannot remove a zone while an audit is in progress. Finish or submit the audit first.', 'error');
+    return;
+  }
   const role = appState.user && appState.user.role;
   if (role !== 'corporate' && role !== 'manager') {
     showToast('Only managers can remove zones', 'warn');
