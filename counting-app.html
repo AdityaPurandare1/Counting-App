@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '1.99';
+const APP_VERSION = '2.00';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3865,9 +3865,15 @@ async function loadVenuesFromSupabase() {
       return false;
     }
     if (resp.data.length === 0) {
-      // Schema present but empty (e.g. seed didn't run) — keep the local
-      // hardcoded fallback so the picker isn't blank.
-      console.warn('[venues] table is empty, keeping hardcoded list');
+      // Zero rows is ambiguous: either the table really is empty, or RLS
+      // answered an unauthenticated read. kount_venues is {authenticated}
+      // only, so a pre-login call always lands here. Keep the hardcoded
+      // fallback either way (a blank picker is worse), but say which it
+      // was — this masked a stale venue list for weeks.
+      console.warn('[venues] 0 rows returned' +
+        (currentSupabaseJwt ? ' while signed in — table really is empty'
+                            : ' (no JWT yet — RLS denied the anon read; will re-pull after login)') +
+        ', keeping hardcoded list');
       return false;
     }
     var prevById = {};
@@ -7670,6 +7676,13 @@ async function handleLogin() {
   };
 
   saveState();
+  // v2.00: re-pull the venue list now that we have a JWT. The boot-time
+  // call at the bottom of this file runs BEFORE the session is restored,
+  // so it goes out with the anon key; kount_venues is {authenticated}-only
+  // since the Sept RLS tightening, so anon gets 0 rows and the loader
+  // silently keeps the hardcoded v1..v10 fallback. Without this refresh the
+  // picker shows four retired venues and hides every venue added since.
+  loadVenuesFromSupabase().catch(function() {});
   showToast('Signed in as ' + appState.user.name + ' (' + appState.user.role + ')', 'success');
 
   // Admin-only version prompt so corporate always knows which build they are on.
@@ -8015,6 +8028,9 @@ async function _hydrateUserProfileFromSession(opts) {
     venueIds: row.role === 'corporate' ? 'all' : (row.venue_ids || []),
   };
   saveState();
+  // v2.00: same reason as the sign-in path — this runs once the JWT exists,
+  // so it is the first venue read that RLS will actually answer.
+  loadVenuesFromSupabase().catch(function() {});
   if (redirect) showPage('venues');
 }
 
