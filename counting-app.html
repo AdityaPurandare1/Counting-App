@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.04';
+const APP_VERSION = '2.05';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4650,7 +4650,13 @@ async function approveUPCPending(id) {
       title: p.item_name,
       brand: p.item_brand || '',
       category: p.item_category || 'other',
-      masterId: p.master_item_id ? String(p.master_item_id) : null,
+      // v2.05 (Harsh): use the server-resolved id, not the stale
+      // pre-approval p.master_item_id, which is still null when the RPC
+      // resolved the master by name-fallback — that cached a blank item
+      // link for up to 5 minutes. Verified against the live RPC: both
+      // 'ok' payloads carry master_item_id, and we only reach here after
+      // the data.ok === false check above.
+      masterId: data.master_item_id ? String(data.master_item_id) : null,
       barcode: p.barcode_raw,
       approvedAt: new Date().toISOString(),
     };
@@ -7751,6 +7757,17 @@ async function handleLogin() {
       'app_users',
       'select=name,role,venue_ids,is_active&email=eq.' + encodeURIComponent(email) + '&limit=1'
     );
+    // v2.05 (Harsh): supabaseRest.query never throws — a transient network
+    // or API failure surfaces as profile.error with data undefined, which
+    // used to fall into the 'no profile found' branch below and SIGN THE
+    // USER OUT. Same family as the v2.03 lockout: never infer that someone
+    // lacks access from a read that simply did not succeed.
+    if (profile.error) {
+      console.warn('[auth] app_users lookup returned error:', profile.error);
+      errorEl.textContent = 'Signed in but profile fetch failed. Try again in a moment.';
+      errorEl.style.display = 'block';
+      return;
+    }
     const row = profile.data && profile.data[0];
     if (!row) {
       errorEl.textContent = 'Signed in but no app profile found. Ask admin to set your role.';
@@ -12283,10 +12300,21 @@ function closePhotoReview(event) {
   clearExtraLocations('photoExtraLocations');
 }
 
+let _submittingPhotoEntry = false; // v2.05 (Harsh): see guard below
+
 async function submitPhotoEntry() {
   if (appState.user?.role === 'venue_manager') return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
+  // v2.05 (Harsh): this awaits savePhoto (IndexedDB) before the modal
+  // closes, with no button-disable, so a fast double-tap re-entered the
+  // function while the first call was still in flight; the second call's
+  // addCountEntry hit the duplicate-in-zone merge branch and silently
+  // DOUBLED the recorded quantity. try/finally so every exit path — early
+  // return or thrown error — clears the flag and the feature can't wedge.
+  if (_submittingPhotoEntry) return;
+  _submittingPhotoEntry = true;
+  try {
   const name = document.getElementById('photoName').value.trim();
   if (!name) { showToast('Enter item name', 'error'); return; }
 
@@ -12321,6 +12349,9 @@ async function submitPhotoEntry() {
 
   closePhotoReview();
   renderCountPage();
+  } finally {
+    _submittingPhotoEntry = false;
+  }
 }
 
 /* ================================================================
@@ -13467,6 +13498,11 @@ function _avtNamesMatch(a, b) {
 function findCountedQtyForAvtItem(avt, countedMap) {
   const avtName = avt.itemName || '';
   let bestQty = 0;
+  // v2.05 (Harsh): track whether the first pass MATCHED, separately from
+  // bestQty being 0. A legitimately-counted zero was indistinguishable from
+  // 'no match found', so it fell through to the broader free-text pass and
+  // could attribute an unrelated item's quantity to this AVT row.
+  let matched = false;
 
   // First pass: try matching against itemMaster-linked entries
   for (const [masterId, qty] of Object.entries(countedMap)) {
@@ -13474,6 +13510,7 @@ function findCountedQtyForAvtItem(avt, countedMap) {
     if (!masterItem) continue;
     if (_avtNamesMatch(masterItem.name, avtName)) {
       bestQty = qty;
+      matched = true;
       break;
     }
   }
@@ -13481,7 +13518,7 @@ function findCountedQtyForAvtItem(avt, countedMap) {
   // Second pass: fall back to free-text counted entries (custom items,
   // typo'd names that didn't pick up a masterId on submit). Sums across
   // all matching rows in the audit, all zones.
-  if (bestQty === 0 && appState.audit) {
+  if (!matched && appState.audit) {
     for (const [zone, items] of Object.entries(appState.audit.counts)) {
       for (const item of items) {
         if (_avtNamesMatch(item.name, avtName)) {
