@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.00';
+const APP_VERSION = '2.02';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3855,6 +3855,19 @@ function searchItemMaster(query, limit) {
 async function loadVenuesFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   try {
+    // v2.01: kount_venues is {authenticated}-only, so a read sent with the
+    // anon key returns 0 rows (not an error) and we would keep the stale
+    // hardcoded list. If no JWT is in hand yet — the boot-time call and the
+    // cold-open session restore both race getSession() — wait for the
+    // session first. For a signed-out user this resolves to null and the
+    // read still goes out as anon, which is fine: the picker is post-login.
+    if (!currentSupabaseJwt && supabaseClient) {
+      try {
+        const sess = await supabaseClient.auth.getSession();
+        const tok = sess && sess.data && sess.data.session && sess.data.session.access_token;
+        if (tok) currentSupabaseJwt = tok;
+      } catch (e) { /* fall through with whatever we have */ }
+    }
     const resp = await supabaseRest.query(
       'kount_venues',
       'select=id,name,address,default_zones,store_aliases,ordinal,is_active'
@@ -3925,9 +3938,24 @@ async function loadVenuesFromSupabase() {
    channels (avoid same-user-on-multiple-devices collisions). */
 let venuesChannel = null;
 
-function startVenuesRealtime() {
+async function startVenuesRealtime() {
   if (!supabaseClient) return;
   if (venuesChannel) return;
+  // v2.02: this used to subscribe at boot, BEFORE getSession() resolved, so
+  // the channel joined with the anon token. Realtime enforces RLS on
+  // postgres_changes with the token the channel joined under, and
+  // kount_venues is {authenticated}-only — so anon-joined channels never
+  // received venue events, and an admin adding/renaming a venue never
+  // reached open phones (two live 'touch the row' nudges on 2026-09-23
+  // reached nothing). Wait for the session first, like the loader does.
+  if (!currentSupabaseJwt) {
+    try {
+      const sess = await supabaseClient.auth.getSession();
+      const tok = sess && sess.data && sess.data.session && sess.data.session.access_token;
+      if (tok) { currentSupabaseJwt = tok; syncRealtimeAuth(); }
+    } catch (e) { /* subscribe anyway; a later syncRealtimeAuth may lift it */ }
+    if (venuesChannel) return;  // re-check after the await
+  }
   venuesChannel = supabaseClient
     .channel('venues-' + _tabSessionId)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'kount_venues' }, function() {
