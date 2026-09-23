@@ -3154,7 +3154,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.03';
+const APP_VERSION = '2.04';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3448,6 +3448,18 @@ const IN_SCOPE_FILTER = 'category=in.(' + IN_SCOPE_CATEGORIES.map(function(c) { 
 
 async function loadSupabaseItems() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  {
+  // v2.04: the boot-time call races getSession(), read as anon, got 0 rows, and fell back to items.json (Apr 2026, 4,592 rows vs 10,301 live).
+  // A read sent with the anon key returns 0 rows and NO error on this
+  // {authenticated}-only table, so wait for the session before asking.
+  if (!currentSupabaseJwt && supabaseClient) {
+    try {
+      const _sess = await supabaseClient.auth.getSession();
+      const _tok = _sess && _sess.data && _sess.data.session && _sess.data.session.access_token;
+      if (_tok) currentSupabaseJwt = _tok;
+    } catch (e) { /* fall through with whatever we have */ }
+  }
+  }
 
   // Post-Path-B: catalog source is master_items, not purchase_items.
   // master_items is ~12k active rows vs purchase_items' 26k, and 1.7× of
@@ -3492,6 +3504,18 @@ let carriedSet = new Set();
 
 async function loadCarriedItemsFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
+  {
+  // v2.04: same race — an anon boot read emptied carriedSet so search lost its 'items in inventory' ranking until the 60s retry.
+  // A read sent with the anon key returns 0 rows and NO error on this
+  // {authenticated}-only table, so wait for the session before asking.
+  if (!currentSupabaseJwt && supabaseClient) {
+    try {
+      const _sess = await supabaseClient.auth.getSession();
+      const _tok = _sess && _sess.data && _sess.data.session && _sess.data.session.access_token;
+      if (_tok) currentSupabaseJwt = _tok;
+    } catch (e) { /* fall through with whatever we have */ }
+  }
+  }
   try {
     // Post-Path-B: carried set is keyed by master_item_id, not
     // purchase_item_id. The 0023 migration backfilled the new column and
@@ -3560,9 +3584,22 @@ function reconcileCarriedAgainstMaster() {
    modest (~6.9k rows) so a full re-fetch on any change is still cheaper than
    maintaining a diff; we just swap carriedSet. */
 let carriedItemsChannel = null;
-function startCarriedItemsRealtime() {
+async function startCarriedItemsRealtime() {
   if (!supabaseClient) return;
   if (carriedItemsChannel) return;
+  // v2.04: same defect as the venues channel (v2.02). Subscribing at boot,
+  // before getSession() resolved, joined this channel with the anon token;
+  // Realtime enforces RLS under the join token, so carried-list changes
+  // (e.g. the 180 Alphabet items linked 2026-09-22) never reached open
+  // phones. Wait for the session, sync realtime auth, then join.
+  if (!currentSupabaseJwt) {
+    try {
+      const sess = await supabaseClient.auth.getSession();
+      const tok = sess && sess.data && sess.data.session && sess.data.session.access_token;
+      if (tok) { currentSupabaseJwt = tok; syncRealtimeAuth(); }
+    } catch (e) { /* subscribe anyway */ }
+    if (carriedItemsChannel) return;  // re-check after the await
+  }
   carriedItemsChannel = supabaseClient
     .channel('kount-carried-items-live')
     .on('postgres_changes',
@@ -5306,6 +5343,18 @@ async function loadApprovedUpcMappings(force) {
   if (!force && (now - upcMappingsCacheLoadedAt) < UPC_CACHE_TTL_MS) {
     return; // cache still fresh
   }
+  {
+  // v2.04: an anon boot read left this cache EMPTY, so every scan fell through to items.json UPCs then to the UPCitemdb API and 'UPC not found — enter item details', minting duplicates for bottles already in the catalog.
+  // A read sent with the anon key returns 0 rows and NO error on this
+  // {authenticated}-only table, so wait for the session before asking.
+  if (!currentSupabaseJwt && supabaseClient) {
+    try {
+      const _sess = await supabaseClient.auth.getSession();
+      const _tok = _sess && _sess.data && _sess.data.session && _sess.data.session.access_token;
+      if (_tok) currentSupabaseJwt = _tok;
+    } catch (e) { /* fall through with whatever we have */ }
+  }
+  }
   const PAGE_SIZE = 1000;
   const MAX_PAGES = 50;
   const next = {};
@@ -5943,6 +5992,14 @@ async function joinNetworkedAudit(rawCode) {
     refreshRecountsFromSupabase().catch(function() {});
   }
 
+  // v2.04: startAudit has always re-pulled master + carried + UPC caches
+  // with the user's token so a stale localStorage cache can't drive
+  // search/scan; JOINING an audit never did. A joiner who cold-opened the
+  // app therefore searched the Apr-2026 items.json and scanned against an
+  // empty barcode cache until the 60s periodic retry. Same refresh here.
+  loadItemMaster().catch(function() {});
+  loadCarriedItemsFromSupabase().catch(function() {});
+  loadApprovedUpcMappings(true).catch(function() {});
   showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
   showPage('count');
   return audit;
