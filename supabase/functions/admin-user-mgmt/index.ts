@@ -223,6 +223,13 @@ Deno.serve(async (req) => {
 // -----------------------------------------------------------------------------
 // Action handlers
 // -----------------------------------------------------------------------------
+/* Mirrors the app_users.role CHECK constraint exactly:
+   CHECK (role = ANY (ARRAY['corporate','manager','counter','venue_manager']))
+   Keep these in lockstep — a role the constraint allows but this list
+   omits is a role the admin UI cannot assign OR edit (sending the
+   existing value back on an unrelated profile edit would 400). */
+const ALLOWED_ROLES = ['corporate', 'manager', 'counter', 'venue_manager'];
+const ROLE_ERROR = 'role must be ' + ALLOWED_ROLES.join(' | ');
 
 async function handleInvite(
   admin: ReturnType<typeof createClient>,
@@ -231,8 +238,12 @@ async function handleInvite(
 ): Promise<Response> {
   const email = (payload.email || '').toLowerCase().trim();
   if (!email || !email.includes('@')) return reject(400, 'Valid email required');
-  if (!payload.role || !['corporate', 'manager', 'counter'].includes(payload.role)) {
-    return reject(400, 'role must be corporate | manager | counter');
+  // venue_manager is a real, schema-allowed role (app_users CHECK constraint
+  // lists it and a user already holds it in prod) — it is the read-only
+  // "Venue Management" role the phone gates counting on. Omitting it here
+  // rejected a role the database accepts.
+  if (!payload.role || !ALLOWED_ROLES.includes(payload.role)) {
+    return reject(400, ROLE_ERROR);
   }
   const venueIds = Array.isArray(payload.venue_ids) ? payload.venue_ids : [];
 
@@ -494,8 +505,8 @@ async function handleUpdateProfile(
   const update: Record<string, unknown> = {};
   if (typeof payload.name === 'string')          update.name = payload.name;
   if (typeof payload.role === 'string') {
-    if (!['corporate', 'manager', 'counter'].includes(payload.role)) {
-      return reject(400, 'role must be corporate | manager | counter');
+    if (!ALLOWED_ROLES.includes(payload.role)) {
+      return reject(400, ROLE_ERROR);
     }
     update.role = payload.role;
   }
