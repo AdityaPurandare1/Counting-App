@@ -70,6 +70,8 @@
      v2.08: secondary/muted/caution darkened off the design-system values.
      v2.09: offline counting -- counts save locally + replay from the durable
             queue (audit-pinned, live-card bound, JWT refresh, close gate).
+     v2.10: ported the two remaining hursh-dev data-integrity fixes
+            (variance% NULL preservation, single category keyword list).
      Measured on the new canvas, Woody's own #7B7775 / #918C8B / #B87333
      came in at 4.43 / 3.32 / 3.79 :1 — under AA's 4.5 for body text. This
      app is read in dim bar lighting on a phone held at arm's length, which
@@ -3174,7 +3176,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.09';
+const APP_VERSION = '2.10';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4215,7 +4217,13 @@ function _mapAvtRow(r) {
     theo:          Number(r.theo || 0),
     variance:      Number(r.variance || 0),
     varianceValue: Number(r.variance_value || 0),
-    variancePct:   Number(r.variance_pct || 0),
+    // v2.10 (Harsh): preserve a genuine NULL. compute_avt_for_audit emits
+    // `case when fr.theo = 0 then null ...` because a percentage variance is
+    // undefined with no theoretical baseline — and theo is 0 for EVERY row of
+    // a first count (no prior audit => start/purchases/depletions all 0).
+    // Coercing that to 0 reported "no variance" for rows that actually have
+    // no basis for a percentage at all.
+    variancePct:   (r.variance_pct === null || r.variance_pct === undefined) ? null : Number(r.variance_pct),
     cuPrice:       Number(r.cu_price || 0),
     start:         Number(r.start_qty || 0),
     purchases:     Number(r.purchases || 0),
@@ -11619,12 +11627,16 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// v2.10 (Harsh): delegate to detectCategoryFromText instead of keeping a
+// second, independently-drifted keyword list. The old local list missed
+// aperol/campari/vermouth/liqueur/mezcal/brandy/whisky (and every wine grape
+// beyond six), so the SAME bottle was categorised differently depending on
+// whether it arrived via barcode lookup (here) or photo OCR
+// (detectCategoryFromText). One list to keep current.
+// Joined with a space, not concatenated: 'Ginger Beer' + 'ale' style joins
+// could otherwise fuse two words into a phantom third token.
 function detectCategory(title, description) {
-  const text = ((title || '') + (description || '')).toLowerCase();
-  if (/wine|cabernet|merlot|pinot|chardonnay|champagne|prosecco/.test(text)) return 'wine';
-  if (/vodka|whiskey|bourbon|gin|rum|tequila|cognac|scotch|hennessy|patron/.test(text)) return 'spirits';
-  if (/beer|ale|lager|stout|ipa|heineken|corona|modelo|seltzer/.test(text)) return 'beer';
-  return 'other';
+  return detectCategoryFromText((title || '') + ' ' + (description || ''));
 }
 
 /* Strategy-2 matcher — scanned barcode → ’ itemMaster row by inline UPC.
@@ -15419,7 +15431,11 @@ function exportCountCSV(countNumber) {
       Number(avt.variance || 0).toFixed(2),
       '$' + Number(avt.cuPrice || 0).toFixed(2),
       '$' + Number(avt.varianceValue || 0).toFixed(2),
-      (avt.variancePct || 0).toFixed(1) + '%',
+      // v2.10: null (theo = 0) has no percentage to report — say so rather
+      // than printing a confident "0.0%". Severity is unaffected: scoreSeverity
+      // reads `variancePct || 0`, and its only pct band is `absPct >= 25`,
+      // which a null could never have satisfied anyway.
+      avt.variancePct == null ? 'n/a' : Number(avt.variancePct).toFixed(1) + '%',
       countedQty || '',
       severity,
       recount ? 'YES' : 'NO',
