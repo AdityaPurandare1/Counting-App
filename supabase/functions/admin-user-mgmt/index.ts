@@ -11,7 +11,7 @@
 // Auth model:
 //   1. Caller must present their own JWT in the Authorization header.
 //   2. We resolve that JWT to a user, look them up in app_users, and reject
-//      if their role isn't 'corporate'. Even if a managed admin somehow
+//      if their role isn't 'admin'. Even if a corporate user somehow
 //      got the function URL, they can't bypass the role check.
 //   3. Only after both checks do we instantiate the service-role client
 //      and perform the requested action.
@@ -23,7 +23,7 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
-type Role = 'corporate' | 'manager' | 'counter';
+type Role = 'admin' | 'corporate' | 'manager' | 'counter' | 'venue_manager';
 
 interface InvitePayload {
   action: 'invite';
@@ -172,7 +172,7 @@ Deno.serve(async (req) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
 
-  // --- 4. Authorize: only corporate role can hit this function. ---
+  // --- 4. Authorize: only the admin role can hit this function. ---
   const { data: callerProfile, error: profileErr } = await admin
     .from('app_users')
     .select('role,is_active')
@@ -187,8 +187,11 @@ Deno.serve(async (req) => {
   if (!callerProfile || callerProfile.is_active === false) {
     return reject(403, 'Caller is not an active app user');
   }
-  if (callerProfile.role !== 'corporate') {
-    return reject(403, 'Corporate role required');
+  // Granting access is admin-only. Corporate keeps every operational screen
+  // but no longer decides who gets in — it is handed out too widely for that,
+  // and this function is the one place the service-role key is used.
+  if (callerProfile.role !== 'admin') {
+    return reject(403, 'Admin role required');
   }
 
   // --- 5. Parse + dispatch ---
@@ -224,11 +227,11 @@ Deno.serve(async (req) => {
 // Action handlers
 // -----------------------------------------------------------------------------
 /* Mirrors the app_users.role CHECK constraint exactly:
-   CHECK (role = ANY (ARRAY['corporate','manager','counter','venue_manager']))
+   CHECK (role = ANY (ARRAY['admin','corporate','manager','counter','venue_manager']))
    Keep these in lockstep — a role the constraint allows but this list
    omits is a role the admin UI cannot assign OR edit (sending the
    existing value back on an unrelated profile edit would 400). */
-const ALLOWED_ROLES = ['corporate', 'manager', 'counter', 'venue_manager'];
+const ALLOWED_ROLES = ['admin', 'corporate', 'manager', 'counter', 'venue_manager'];
 const ROLE_ERROR = 'role must be ' + ALLOWED_ROLES.join(' | ');
 
 async function handleInvite(
@@ -515,10 +518,11 @@ async function handleUpdateProfile(
 
   if (Object.keys(update).length === 0) return reject(400, 'Nothing to update');
 
-  // Guard: don't let an admin demote themselves out of corporate (would
-  // lock them out of this function on the very next call).
-  if (email === callerEmail && update.role && update.role !== 'corporate') {
-    return reject(400, 'Cannot demote yourself out of corporate role');
+  // Guard: don't let an admin demote themselves out of admin (would lock them
+  // out of this function on the very next call). The admin UI also refuses to
+  // remove the last active admin, which is the other half of the same problem.
+  if (email === callerEmail && update.role && update.role !== 'admin') {
+    return reject(400, 'Cannot demote yourself out of the admin role');
   }
   if (email === callerEmail && update.is_active === false) {
     return reject(400, 'Cannot deactivate yourself');
