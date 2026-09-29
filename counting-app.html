@@ -3176,7 +3176,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.10';
+const APP_VERSION = '2.11';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7521,7 +7521,14 @@ async function submitPendingItem(payload) {
   const row = {
     name:        payload.name.trim(),
     brand:       (payload.brand || '').trim() || null,
-    category:    payload.category || null,
+    // Mapped, not raw. The selector speaks the app's vocabulary — spirits,
+    // food, other — and approve_pending_item only accepts the catalog's
+    // (Liquor Cost, Wine Cost, Bar Consumables...). Submitting the raw value
+    // put items in the queue that could never be approved: the admin pressed
+    // Approve and got "Out-of-scope category: spirits", with no way to fix it
+    // from that screen. The corporate direct-create path below already mapped;
+    // the suggestion path did not.
+    category:    masterCategoryForCreate(payload.category),
     subcategory: (payload.subcategory || '').trim() || null,
     size:        (payload.size || '').trim() || null,
     upc:         (payload.upc || '').replace(/\D/g, '') || null,

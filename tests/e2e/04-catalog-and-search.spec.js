@@ -33,11 +33,31 @@ test.describe('catalog create + matching', () => {
     await startAuditAs(page, 'manager'); // manager = non-corporate, can start + suggest
     await page.getByRole('button', { name: 'Manual' }).click();
     await page.locator('#manualModal').waitFor({ state: 'visible' });
-    await page.fill('#manualName', 'Another New Thing 1L');
+    await page.fill('#manualName', 'Another New Mezcal 1L');
+    // Spirits specifically: the selector's default is Wine, whose raw value
+    // happens to be one approve_pending_item accepts, so it hides this bug.
+    await page.selectOption('#manualCategory', 'spirits');
     await expect(page.locator('#manualCreateBtn')).toBeHidden();
     await expect(page.locator('#manualSuggestBtn')).toBeVisible();
     await page.locator('#manualSuggestBtn').click();
-    await expect.poll(() => db.t.kount_pending_items.filter(p => /Another New Thing/.test(p.name)).length).toBe(1);
+    await expect.poll(() => db.t.kount_pending_items.filter(p => /Another New Mezcal/.test(p.name)).length).toBe(1);
+
+    // The category must already be in the catalog's vocabulary when it lands in
+    // the queue. approve_pending_item validates against a fixed list and the
+    // app's own selector values ('spirits', 'food', 'other') are not on it, so
+    // an unmapped submission created a row the admin could never approve:
+    // pressing Approve returned "Out-of-scope category: spirits" with no way to
+    // correct it from that screen. Seven rows reached production that way.
+    // The corporate create-direct path mapped; this one did not.
+    const APPROVABLE = [
+      'Wine Cost', 'wine', 'Wine', 'Liquor Cost', 'liquor', 'Liquor',
+      'Beer Cost', 'beer', 'N/A Beverage Cost', 'non_alcoholic_beverage',
+      'Bar Consumables', 'bar_consumable', 'Bar Supplies',
+    ];
+    const pending = db.t.kount_pending_items.find(p => /Another New Mezcal/.test(p.name));
+    expect(APPROVABLE).toContain(pending.category);
+    // And specifically not the raw selector value it used to be.
+    expect(['spirits', 'food', 'other', 'na', 'consumable']).not.toContain(pending.category);
   });
 
   test('manual search surfaces a non-carried catalog variant under a divider', async ({ page }) => {
