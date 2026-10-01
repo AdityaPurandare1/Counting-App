@@ -3143,7 +3143,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.1';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4335,6 +4335,7 @@ async function linkUPCToItem(barcode, item) {
     // server error -> surface the specific message so the admin can fix it.
     const msg = (error && error.message) ? String(error.message) : 'unknown error';
     console.error('[upc] insert failed:', msg, '\npayload was:', payload);
+    logClientError('upcMappingInsert', msg);
     // Network-vs-server classification: the supabaseRest wrapper prefixes every
     // server-side rejection with "HTTP nnn" — so anything WITHOUT that prefix
     // means the fetch itself threw and never reached the server. This is
@@ -4444,6 +4445,7 @@ async function linkUPCToItem(barcode, item) {
               return;
             }
             console.warn('[upc] master_item_upcs insert failed:', resp.error);
+            logClientError('masterItemUpcInsert', miuMsg);
             showToast('UPC link not saved to catalog: ' + miuMsg.slice(0, 120), 'warn');
           }
         });
@@ -5032,6 +5034,7 @@ function saveState() {
       }
     } catch (error) {
       console.warn('State save failed:', error);
+      logClientError('saveState', error);
     }
   }, 100);
 }
@@ -5052,6 +5055,7 @@ function loadState() {
     }
   } catch (error) {
     console.warn('State load failed:', error);
+    logClientError('loadState', error);
   }
 
   // Load AVT from its own key (takes priority over legacy)
@@ -5743,6 +5747,7 @@ async function startNetworkedAudit(venue) {
     code = String(data).replace(/^"|"$/g, '');
   } catch (e) {
     console.error('[audit] generate_kount_join_code failed:', e);
+    logClientError('startNetworkedAudit.joinCode', e);
     return null;
   }
 
@@ -5760,6 +5765,7 @@ async function startNetworkedAudit(venue) {
   });
   if (insErr || !inserted || !inserted[0]) {
     console.error('[audit] insert kount_audits failed:', insErr);
+    logClientError('startNetworkedAudit.insertAudit', insErr);
     return null;
   }
   const audit = inserted[0];
@@ -5775,6 +5781,7 @@ async function startNetworkedAudit(venue) {
   }).then(resp => {
     if (resp && resp.error) {
       console.warn('[audit] insert starter member failed:', resp.error);
+      logClientError('startNetworkedAudit.insertMember', resp.error);
       showToast('Could not register you on the member list', 'warn');
     }
   });
@@ -5849,8 +5856,9 @@ async function joinNetworkedAudit(rawCode) {
       });
       if (resp.error && !/duplicate key|23505/i.test(resp.error.message || '')) {
         console.warn('[audit] join kount_members failed:', resp.error);
+        logClientError('joinNetworkedAudit.insertMember', resp.error);
       }
-    } catch (e) { console.warn('[audit] join threw:', e); }
+    } catch (e) { console.warn('[audit] join threw:', e); logClientError('joinNetworkedAudit', e); }
   }
 
   // Pull the existing entries so the counter starts in sync
@@ -5956,7 +5964,7 @@ async function syncRecountsToSupabase() {
 
     // Bulk insert; PostgREST accepts an array
     const { data, error } = await supabaseRest.insert('kount_recounts', payloads);
-    if (error) { console.warn('[recounts] bulk insert failed:', error); return; }
+    if (error) { console.warn('[recounts] bulk insert failed:', error); logClientError('syncRecounts.bulkInsert', error); return; }
 
     // Stash the returned ids back into local state so the per-row update path
     // can target by id without re-matching on name.
@@ -5977,6 +5985,7 @@ async function syncRecountsToSupabase() {
     }
   } catch (e) {
     console.warn('[recounts] sync failed:', e);
+    logClientError('syncRecounts', e);
   }
 }
 
@@ -6036,6 +6045,7 @@ async function syncRecountsIndividually() {
       }
     } catch (e) {
       console.warn('[recounts] individual sync failed for', k, e);
+      logClientError('syncRecountsIndividually', e);
     }
   }
 }
@@ -6096,6 +6106,7 @@ async function syncRecountUpdateToSupabase(key) {
     const { error } = await supabaseRest.update('kount_recounts', match, patch);
     if (error) {
       console.warn('[recounts] update failed:', error);
+      logClientError('syncRecountUpdateToSupabase', error);
       markPending('Saved locally \u2014 recount sync will retry when online');
       return;
     }
@@ -6107,6 +6118,7 @@ async function syncRecountUpdateToSupabase(key) {
     }
   } catch (e) {
     console.warn('[recounts] update threw:', e);
+    logClientError('syncRecountUpdateToSupabase', e);
     markPending('Offline \u2014 recount sync will retry when online');
   }
 }
@@ -6142,6 +6154,7 @@ async function syncAuditMetaToSupabase(patch) {
     lastError = e;
   }
   console.warn('[audit] sync meta failed:', lastError);
+  logClientError('syncAuditMetaToSupabase', lastError);
   if (isRetryableError(lastError)) {
     enqueuePendingMutation('rest-update', {
       table: 'kount_audits',
@@ -7126,6 +7139,7 @@ async function createMasterItemFromApp(payload) {
       // link isn't silently lost (the item lands in the catalog either way).
       if (resp && resp.error) {
         console.warn('[catalog] master_item_upcs insert failed:', resp.error);
+        logClientError('catalogMasterItemUpcInsert', resp.error);
         showToast('Item added, but UPC link not saved: ' + String(resp.error.message || resp.error).slice(0, 100), 'warn');
       }
     });
