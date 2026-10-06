@@ -12544,7 +12544,16 @@ function openManualEntry() {
 
   updateManualSuggestBtn();
 
-  setTimeout(() => document.getElementById('manualName').focus(), 100);
+  // Never yank focus from a field already focused inside the modal: if the
+  // qty box was focused within the delay, the late focus() moved the caret to
+  // the name mid-entry and the qty keystrokes landed there ("Belvedere 1L" +
+  // qty 3 -> "Belvedere 1L3" -> no exact catalog match -> "Did you mean?").
+  // This was the root cause of the e2e suite's intermittent failures.
+  setTimeout(() => {
+    const modal = document.getElementById('manualModal');
+    if (modal.classList.contains('hide') || modal.contains(document.activeElement)) return;
+    document.getElementById('manualName').focus();
+  }, 100);
 }
 
 function closeManualEntry(event) {
@@ -14507,11 +14516,12 @@ function renderRecountPage() {
       // Counter feedback @ Poppy: the row IS one onclick target already (it's
       // on this outer div, not just the zone-name span), but nothing about it
       // LOOKED tappable \u2014 no affordance, thin 5px padding \u2014 so counters
-      // instinctively tapped only the location text. Bigger padding (full-row
-      // 44px-ish touch target) + a trailing chevron make the whole row read
-      // as one button instead of two columns of plain text.
+      // instinctively tapped only the location text. 14px padding puts the
+      // row at ~45px (Apple's 44pt minimum touch target; it was ~27px), and a
+      // trailing chevron makes the whole row read as one button instead of
+      // two columns of plain text.
       return '<div class="recount-zone-row" data-recount-key="' + esc(key) + '" onclick="openRecountEntryFromCard(this)" ' +
-        'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:11px 6px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer">' +
+        'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:14px 6px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer">' +
         '<span style="font-size:11px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\ud83d\udccd ' + esc(zoneLabel) + '</span>' +
         '<span style="font-size:11px;color:var(--text-muted);display:flex;gap:8px;align-items:center;flex-shrink:0">' +
           '<span>C1: <strong style="color:var(--text)">' + (r.count1Qty != null ? r.count1Qty : 'n/a') + '</strong></span>' +
