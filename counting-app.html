@@ -3176,7 +3176,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.12';
+const APP_VERSION = '2.13';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -12561,7 +12561,15 @@ function openManualEntry() {
 
   updateManualSuggestBtn();
 
-  setTimeout(() => document.getElementById('manualName').focus(), 100);
+  // Never yank focus from a field already focused inside the modal: if the
+  // qty box was focused within the delay, the late focus() moved the caret to
+  // the name mid-entry and the qty keystrokes landed there ("Belvedere 1L" +
+  // qty 3 -> "Belvedere 1L3" -> no exact catalog match -> "Did you mean?").
+  setTimeout(() => {
+    const modal = document.getElementById('manualModal');
+    if (modal.classList.contains('hide') || modal.contains(document.activeElement)) return;
+    document.getElementById('manualName').focus();
+  }, 100);
 }
 
 function closeManualEntry(event) {
