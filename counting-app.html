@@ -2034,6 +2034,13 @@ html, body {
   opacity: 0.6;
 }
 
+/* Per-zone recount row (inside a focus-item card) — the full row is one tap
+   target (onclick lives on this div, not a child span), but needs visible
+   press feedback or it doesn't read as tappable. */
+.recount-zone-row:active {
+  background: var(--accent-soft, rgba(0,0,0,0.04));
+}
+
 /* ---------- ADMIN SECTION ---------- */
 .admin-section {
   border: 1.5px solid var(--accent);
@@ -12561,7 +12568,16 @@ function openManualEntry() {
 
   updateManualSuggestBtn();
 
-  setTimeout(() => document.getElementById('manualName').focus(), 100);
+  // Never yank focus from a field already focused inside the modal: if the
+  // qty box was focused within the delay, the late focus() moved the caret to
+  // the name mid-entry and the qty keystrokes landed there ("Belvedere 1L" +
+  // qty 3 -> "Belvedere 1L3" -> no exact catalog match -> "Did you mean?").
+  // This was the root cause of the e2e suite's intermittent failures.
+  setTimeout(() => {
+    const modal = document.getElementById('manualModal');
+    if (modal.classList.contains('hide') || modal.contains(document.activeElement)) return;
+    document.getElementById('manualName').focus();
+  }, 100);
 }
 
 function closeManualEntry(event) {
@@ -14025,6 +14041,7 @@ function closeCount1() {
               severity: item.severity,
               varianceValue: item.avt.varianceValue,
               variance: item.avt.variance,
+              weeksActive: item.weeksActive || 0,
               actual: item.avt.actual,
               theo: item.avt.theo,
               count1Qty: qty,                  // per-zone qty
@@ -14140,12 +14157,13 @@ function generateRecountFromAvt() {
 
   venueAvt.forEach(avt => {
     const counted = findCountedQtyForAvtItem(avt, countedMap);
+    const weeksActive = getWeeksFlaggedFor(avt.itemName, avt.venueId);
     const severity = scoreSeverity({
       varianceValue: avt.varianceValue,
       variance: avt.variance,
       variancePct: avt.variancePct,
       category: avt.category,
-      weeksActive: getWeeksFlaggedFor(avt.itemName, avt.venueId),
+      weeksActive: weeksActive,
     });
 
     // Materiality gate (TOP OFFENDERS ONLY): always keep CRITICAL/HIGH. For
@@ -14161,7 +14179,7 @@ function generateRecountFromAvt() {
         Math.abs(avt.varianceValue) >= MATERIALITY_THRESHOLDS.minVarianceDollars;
     }
     if (keep) {
-      flagged.push({ avt, counted, severity });
+      flagged.push({ avt, counted, severity, weeksActive });
     }
   });
 
@@ -14487,6 +14505,23 @@ function renderRecountPage() {
     // every zone row (see closeCount1). Read from ONE row only - NEVER sum them
     // across zone rows or you multiply the variance by the zone count.
     const bottleVar = rows[0][1].variance;
+    // Counter feedback @ Poppy: a card showing only "HIGH"/"CRITICAL" with no
+    // bottleVar line (this audit's own count matched theoretical exactly) left
+    // counters unable to tell why an item was flagged at all, let alone
+    // whether they were over or short. scoreSeverity can flag CRITICAL/HIGH
+    // purely on weeksActive (a chronic, multi-audit pattern) even when THIS
+    // audit's qty variance is exactly 0 — show that reason explicitly instead
+    // of leaving the card silent.
+    const weeksActive = rows[0][1].weeksActive || 0;
+    // scoreSeverity's only path to CRITICAL/HIGH with a zero $ variance is the
+    // weeksActive band (10+ / 5+ weeks respectively) — a zero qty variance
+    // forces a zero $ variance too (variance_value = (actual-theo)*cu_price),
+    // so weeksActive is the one honest explanation available here.
+    const flagReason = bottleVar
+      ? ''
+      : (weeksActive > 0
+          ? '<span style="color:var(--warning)">No change this count — flagged for being off ' + weeksActive + ' week' + (weeksActive === 1 ? '' : 's') + ' running</span>'
+          : '<span style="color:var(--warning)">No change this count — flagged by historical pattern</span>');
     const zonesRecorded = rows.filter(function (pair) { return !!pair[1].auditResult; }).length;
     // Card "done" = every zone row in the group is done.
     const isDone = rows.every(function (pair) { return pair[1].status === 'done'; });
@@ -14502,13 +14537,21 @@ function renderRecountPage() {
       const badge = recorded
         ? '<span style="font-size:9px;font-weight:700;background:' + (r.auditResult === 'corrected' ? 'var(--accent-dim)' : 'var(--success-dim, rgba(0,200,150,0.18))') + ';color:' + (r.auditResult === 'corrected' ? 'var(--accent)' : 'var(--success)') + ';padding:1px 5px;border-radius:4px">' + (r.auditResult === 'corrected' ? '\u270f\ufe0f Corrected' : '\u2713 Verified') + '</span>'
         : '<span style="font-size:9px;font-weight:700;background:var(--warning-dim,rgba(255,180,0,0.18));color:var(--warning);padding:1px 5px;border-radius:4px">\u26a0 Awaiting</span>';
+      // Counter feedback @ Poppy: the row IS one onclick target already (it's
+      // on this outer div, not just the zone-name span), but nothing about it
+      // LOOKED tappable \u2014 no affordance, thin 5px padding \u2014 so counters
+      // instinctively tapped only the location text. 14px padding puts the
+      // row at ~45px (Apple's 44pt minimum touch target; it was ~27px), and a
+      // trailing chevron makes the whole row read as one button instead of
+      // two columns of plain text.
       return '<div class="recount-zone-row" data-recount-key="' + esc(key) + '" onclick="openRecountEntryFromCard(this)" ' +
-        'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 2px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer">' +
+        'style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:14px 6px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer">' +
         '<span style="font-size:11px;color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\ud83d\udccd ' + esc(zoneLabel) + '</span>' +
         '<span style="font-size:11px;color:var(--text-muted);display:flex;gap:8px;align-items:center;flex-shrink:0">' +
           '<span>C1: <strong style="color:var(--text)">' + (r.count1Qty != null ? r.count1Qty : 'n/a') + '</strong></span>' +
           (r.recountQty != null ? '<span style="color:var(--success)">RC: ' + r.recountQty + '</span>' : '') +
           badge +
+          '<span style="color:var(--text-dim,var(--text-muted));opacity:0.6">\u203a</span>' +
         '</span>' +
       '</div>';
     }).join('');
@@ -14529,8 +14572,9 @@ function renderRecountPage() {
       '</div>' +
       '<div style="font-size:11px;color:var(--text-muted);display:flex;flex-wrap:wrap;gap:8px;margin-bottom:6px">' +
         (group.category ? '<span>' + esc(group.category) + '</span>' : '') +
-        // Bottles, not dollars, rendered ONCE from a single row.
-        (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : '') +
+        // Bottles, not dollars, rendered ONCE from a single row. When there's
+        // no qty variance to show, say why it's flagged instead of nothing.
+        (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : flagReason) +
         '<span><strong style="color:var(--text)">Count 1 total: ' + count1Total + ' across ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + '</strong></span>' +
         '<span>' + zonesRecorded + ' of ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + ' recorded</span>' +
       '</div>' +
