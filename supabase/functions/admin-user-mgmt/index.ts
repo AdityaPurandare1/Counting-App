@@ -138,6 +138,28 @@ function metadataWithoutKountTag(existing: Record<string, unknown> | null | unde
   return { ...base, apps: tags.filter((t) => t !== APP_TAG) };
 }
 
+// Best-effort write to kount_admin_audit_log (0048). Never throws — audit
+// logging is observability, not a gate; a logging failure must not undo or
+// block the action it's recording. Uses the service-role client, which
+// bypasses that table's RLS (there is no client-writable path to it).
+async function logAudit(
+  admin: ReturnType<typeof createClient>,
+  actorEmail: string,
+  action: Payload['action'],
+  targetEmail: string | null,
+  ok: boolean,
+  details?: Record<string, unknown>,
+): Promise<void> {
+  const { error } = await admin.from('kount_admin_audit_log').insert({
+    actor_email: actorEmail,
+    action,
+    target_email: targetEmail,
+    ok,
+    details: details ?? null,
+  });
+  if (error) console.warn('[admin-user-mgmt] audit log write failed (continuing):', error);
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST')    return reject(405, 'Method not allowed');
@@ -311,6 +333,7 @@ async function handleInvite(
       }
       const otherApps = appTagsFromMetadata(existing.user_metadata).filter((t) => t !== APP_TAG);
       console.log('[admin-user-mgmt] linked existing auth user by', callerEmail, '→', email, 'other_apps=', otherApps);
+      await logAudit(admin, callerEmail, 'invite', email, true, { role: payload.role, linked_existing_user: true });
       return jsonResponse(200, {
         ok: true,
         email,
@@ -343,6 +366,7 @@ async function handleInvite(
   }
 
   console.log('[admin-user-mgmt] invite issued by', callerEmail, '→', email);
+  await logAudit(admin, callerEmail, 'invite', email, true, { role: payload.role });
   return jsonResponse(200, { ok: true, email, user_id: invited.user.id, action: 'invite' });
 }
 
@@ -360,6 +384,7 @@ async function handleDisable(
     // Auth user missing — only flip app_users so the legacy/in-flight
     // record stops working in the app.
     await admin.from('app_users').update({ is_active: false }).eq('email', email);
+    await logAudit(admin, callerEmail, 'disable', email, true, { note: 'no auth user; app_users is_active=false' });
     return jsonResponse(200, { ok: true, email, action: 'disable', note: 'no auth user; app_users is_active=false' });
   }
 
@@ -371,6 +396,7 @@ async function handleDisable(
 
   await admin.from('app_users').update({ is_active: false }).eq('email', email);
   console.log('[admin-user-mgmt] disable by', callerEmail, '→', email);
+  await logAudit(admin, callerEmail, 'disable', email, true);
   return jsonResponse(200, { ok: true, email, user_id: userId, action: 'disable' });
 }
 
@@ -390,6 +416,7 @@ async function handleEnable(
 
   await admin.from('app_users').update({ is_active: true }).eq('email', email);
   console.log('[admin-user-mgmt] enable by', callerEmail, '→', email);
+  await logAudit(admin, callerEmail, 'enable', email, true);
   return jsonResponse(200, { ok: true, email, user_id: userId, action: 'enable' });
 }
 
@@ -432,6 +459,7 @@ async function handleDelete(
   await admin.from('app_users').delete().eq('email', email);
   console.log('[admin-user-mgmt] delete by', callerEmail, '→', email,
     keptAuthAccount ? '(kept auth, also in ' + otherApps.join(',') + ')' : '(full delete)');
+  await logAudit(admin, callerEmail, 'delete', email, true, { kept_auth_account: keptAuthAccount, other_apps: otherApps });
   return jsonResponse(200, {
     ok: true,
     email,
@@ -489,6 +517,7 @@ async function handleResetPassword(
   }
 
   console.log('[admin-user-mgmt] reset_password by', callerEmail, '→', email);
+  await logAudit(admin, callerEmail, 'reset_password', email, true);
   return jsonResponse(200, {
     ok: true,
     email,
@@ -532,6 +561,7 @@ async function handleUpdateProfile(
   if (error) return reject(500, 'app_users update failed: ' + error.message);
 
   console.log('[admin-user-mgmt] update_profile by', callerEmail, '→', email, Object.keys(update).join(','));
+  await logAudit(admin, callerEmail, 'update_profile', email, true, { ...update, updated_fields: Object.keys(update) });
   return jsonResponse(200, { ok: true, email, action: 'update_profile', updated_fields: Object.keys(update) });
 }
 
@@ -608,6 +638,7 @@ async function handleMigrateLegacy(
   const ok = results.filter((r) => r.ok).length;
   const failed = results.length - ok;
   console.log('[admin-user-mgmt] migrate_legacy by', callerEmail, '— invited', ok, '/ failed', failed);
+  await logAudit(admin, callerEmail, 'migrate_legacy', null, failed === 0, { invited: ok, failed, total_active: appUsers.length });
   return jsonResponse(200, {
     ok: true,
     action: 'migrate_legacy',
