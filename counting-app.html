@@ -3176,7 +3176,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.12';
+const APP_VERSION = '2.13';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -13844,6 +13844,53 @@ function getCountedMap() {
    ================================================================ */
 let _closingCount1 = false;
 
+/* v2.13 -- pre-close checks (migration 0078, kount_count_guardrails): empty zones, items missing since
+   the last count, a different bottle size, counts far below a recent delivery, and invoice weeks missing
+   for regular vendors. The RPC only answers for venues on R365 invoice matching (Alphabet, Lady Delilah);
+   every other venue gets no rows and closes exactly as before. Warnings only: the manager can go back or
+   close anyway, and a failed check never blocks a close. Acknowledged once per audit per session. */
+const _guardrailsAck = {};
+const GUARDRAIL_LABELS = {
+  zone_empty: 'Zones with stock last time, nothing counted now',
+  low_after_delivery: 'Counts far below recent deliveries',
+  size_switch: 'Possibly the wrong bottle size',
+  not_counted: 'Items counted last time, missing now',
+  invoice_gap: 'Invoices missing (the variance will look short)',
+};
+function guardrailsNeeded() {
+  const id = appState.audit && appState.audit.supabaseId;
+  return !!id && !_guardrailsAck[id];
+}
+function formatGuardrails(rows) {
+  let msg = 'Before closing, please check:\n';
+  ['zone_empty', 'low_after_delivery', 'size_switch', 'not_counted', 'invoice_gap'].forEach(k => {
+    const items = rows.filter(r => r.kind === k);
+    if (!items.length) return;
+    msg += '\n' + GUARDRAIL_LABELS[k] + ':\n';
+    items.slice(0, 6).forEach(r => { msg += '• ' + r.message + '\n'; });
+    if (items.length > 6) msg += '• …and ' + (items.length - 6) + ' more\n';
+  });
+  return msg + '\nConfirm to close anyway, or Cancel to go back and count.';
+}
+async function runCloseGuardrails(retry) {
+  const auditId = appState.audit && appState.audit.supabaseId;
+  const el = document.getElementById('confirmMsg');
+  const resetStyle = () => { if (el) { el.style.whiteSpace = ''; el.style.textAlign = ''; el.style.maxHeight = ''; el.style.overflowY = ''; } };
+  // Deferred: closeConfirm() clears its callback AFTER running it, so a dialog opened synchronously
+  // from inside the callback (closeCount1's own confirm) would lose its handler.
+  const proceed = () => { resetStyle(); if (auditId) _guardrailsAck[auditId] = true; setTimeout(retry, 0); };
+  if (!auditId || typeof supabaseRest === 'undefined' || !supabaseRest) { proceed(); return; }
+  let rows = [];
+  try {
+    const { data, error } = await supabaseRest.rpc('kount_count_guardrails', { p_audit_id: auditId });
+    if (error) { console.warn('[guardrails] check failed, not blocking close', error); proceed(); return; }
+    rows = Array.isArray(data) ? data : [];
+  } catch (e) { console.warn('[guardrails] check failed, not blocking close', e); proceed(); return; }
+  if (!rows.length) { proceed(); return; }
+  if (el) { el.style.whiteSpace = 'pre-line'; el.style.textAlign = 'left'; el.style.maxHeight = '60vh'; el.style.overflowY = 'auto'; }
+  showConfirm(formatGuardrails(rows), proceed, resetStyle);
+}
+
 function closeCount1() {
   if (!appState.audit) { showToast('No active audit', 'error'); return; }
 
@@ -13877,6 +13924,7 @@ function closeCount1() {
     showToast('No items counted yet. Count some items first.', 'error');
     return;
   }
+  if (guardrailsNeeded()) { runCloseGuardrails(closeCount1); return; }
 
   // v1.70: closeCount1 now COMPUTES the variance at close (computed AVT is the
   // product; Craftable pre-loads are gone). The recount list is built from the
@@ -14202,6 +14250,7 @@ function closeCount1AndFinalize() {
   if (pendingUploadsBlockClose()) return;
   const allItems = getAllCountedItems();
   if (allItems.length === 0) { showToast('No items counted yet. Count some items first.', 'error'); return; }
+  if (guardrailsNeeded()) { runCloseGuardrails(closeCount1AndFinalize); return; }
 
   showConfirm('Finalize from Count 1? This SKIPS Count 2, treats the Count-1 counts as final, and generates the variance report. This cannot be undone in the app.', async () => {
     if (_finalizingFromCount1 || _closingCount1) return;

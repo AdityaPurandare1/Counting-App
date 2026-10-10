@@ -273,6 +273,11 @@ class MockDB {
     if (fn === 'find_auth_user_by_email') return { status: 200, body: null };
     if (fn === 'list_auth_user_emails') return { status: 200, body: [] };
     if (fn === 'compute_avt_for_audit') return this.computeAvtForAudit(args || {});
+    // v2.13: pre-close checks (migration 0078). Specs set db.guardrailsRows / db.guardrailsError.
+    if (fn === 'kount_count_guardrails') {
+      if (this.guardrailsError) return err(500, 'P0001', this.guardrailsError);
+      return { status: 200, body: this.guardrailsRows || [] };
+    }
     return { status: 200, body: { ok: true } };
   }
 
