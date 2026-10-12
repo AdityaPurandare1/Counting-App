@@ -1,4 +1,4 @@
-/* v2.13 MANUAL ENTRY FOCUS RACE.
+/* v2.14 MANUAL ENTRY FOCUS RACE.
  *
  * openManualEntry() focuses #manualName on a 100ms setTimeout. If the qty field
  * was focused inside that window, the late focus() moved the caret to the name
@@ -13,7 +13,7 @@
  */
 const { test, expect, startAuditAs, addManual, qtyOf } = require('../fixtures');
 
-test.describe('v2.13 manual entry — delayed focus never steals from qty', () => {
+test.describe('v2.14 manual entry — delayed focus never steals from qty', () => {
   test('focusing qty right after opening keeps focus (and the typed qty) there', async ({ page }) => {
     await startAuditAs(page, 'manager');
     await page.evaluate(() => {
