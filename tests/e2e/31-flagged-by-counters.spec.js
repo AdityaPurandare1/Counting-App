@@ -100,7 +100,7 @@ test.describe('v2.17 "Flagged for recount" equals the recount list', () => {
   test('the filter chip says what it shows', async ({ page }) => {
     await startAuditAs(page, 'manager');
     await page.evaluate(() => showPage('variance'));
-    await expect(page.locator('.mode-btn[data-vf="critical"]')).toHaveText('Critical + High');
+    await expect(page.locator('.mode-btn[data-vf="critical"]')).toHaveText('Crit + High');
     await page.evaluate(() => showPage('variance'));
     await expect(stats(page).locator('.stat-label', { hasText: 'Critical + High' })).toBeVisible();
   });

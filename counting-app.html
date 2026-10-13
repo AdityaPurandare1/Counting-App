@@ -2481,7 +2481,7 @@ html, body {
       <button class="mode-btn active" data-vf="all" onclick="setVarianceFilter('all', this)">All</button>
       <button class="mode-btn" data-vf="flagged" onclick="setVarianceFilter('flagged', this)">Flagged</button>
       <button class="mode-btn" data-vf="missing" onclick="setVarianceFilter('missing', this)">Missing</button>
-      <button class="mode-btn" data-vf="critical" onclick="setVarianceFilter('critical', this)">Critical + High</button>
+      <button class="mode-btn" data-vf="critical" onclick="setVarianceFilter('critical', this)">Crit + High</button>
     </div>
     <div id="varianceList"></div>
     <div id="parAlerts" style="margin-top:12px"></div>
@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.17';
+const APP_VERSION = '2.18';
 
 /* ================================================================
    SUPABASE INTEGRATION
