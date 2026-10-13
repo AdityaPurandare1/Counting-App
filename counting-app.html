@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.15';
+const APP_VERSION = '2.16';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -14562,6 +14562,14 @@ function renderRecountPage() {
       : (weeksActive > 0
           ? '<span style="color:var(--warning)">No change this count — flagged for being off ' + weeksActive + ' week' + (weeksActive === 1 ? '' : 's') + ' running</span>'
           : '<span style="color:var(--warning)">No change this count — flagged by historical pattern</span>');
+    // Counter feedback @ Poppy: "unclear whether we're overstocked or missing
+    // items". The card only had the count they typed, never what the system
+    // expected, so there was nothing to compare it to. theo is item-level
+    // (duplicated onto every zone row), so read it from ONE row like bottleVar.
+    const theoRaw = rows[0][1].theo;
+    const expectedHtml = (theoRaw != null && isFinite(Number(theoRaw)))
+      ? '<span>System expects <strong style="color:var(--text)">' + Number(Number(theoRaw).toFixed(1)) + '</strong></span>'
+      : '';
     const zonesRecorded = rows.filter(function (pair) { return !!pair[1].auditResult; }).length;
     // Card "done" = every zone row in the group is done.
     const isDone = rows.every(function (pair) { return pair[1].status === 'done'; });
@@ -14615,6 +14623,7 @@ function renderRecountPage() {
         // Bottles, not dollars, rendered ONCE from a single row. When there's
         // no qty variance to show, say why it's flagged instead of nothing.
         (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : flagReason) +
+        expectedHtml +
         '<span><strong style="color:var(--text)">Count 1 total: ' + count1Total + ' across ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + '</strong></span>' +
         '<span>' + zonesRecorded + ' of ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + ' recorded</span>' +
       '</div>' +

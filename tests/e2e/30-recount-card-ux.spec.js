@@ -62,6 +62,30 @@ test.describe('v2.15 recount card — why-flagged explanation', () => {
     expect(text).not.toContain('No change this count');
   });
 
+  test('card states what the system expects, once per card, so over/short can be judged', async ({ page, db }) => {
+    await startAuditAs(page, 'manager');
+    await seedTwoZoneRecount(page, db);
+    const theo = await page.evaluate(() =>
+      Object.values(appState.audit.recounts).find((r) => r.itemName === 'Belvedere 1L').theo);
+    expect(typeof theo).toBe('number');
+    const text = await card(page).innerText();
+    expect((text.match(/System expects/g) || []).length).toBe(1);
+    expect(text).toContain('System expects ' + Number(theo.toFixed(1)));
+  });
+
+  test('expected line is omitted (not "NaN") when theo is missing', async ({ page, db }) => {
+    await startAuditAs(page, 'manager');
+    await seedTwoZoneRecount(page, db);
+    await page.evaluate(() => {
+      Object.values(appState.audit.recounts)
+        .filter((r) => r.itemName === 'Belvedere 1L').forEach((r) => { delete r.theo; });
+      renderRecountPage();
+    });
+    const text = await card(page).innerText();
+    expect(text).not.toContain('System expects');
+    expect(text).not.toContain('NaN');
+  });
+
   test('zero variance + weeksActive explains the chronic flag', async ({ page, db }) => {
     await startAuditAs(page, 'manager');
     await seedTwoZoneRecount(page, db);
