@@ -2481,7 +2481,7 @@ html, body {
       <button class="mode-btn active" data-vf="all" onclick="setVarianceFilter('all', this)">All</button>
       <button class="mode-btn" data-vf="flagged" onclick="setVarianceFilter('flagged', this)">Flagged</button>
       <button class="mode-btn" data-vf="missing" onclick="setVarianceFilter('missing', this)">Missing</button>
-      <button class="mode-btn" data-vf="critical" onclick="setVarianceFilter('critical', this)">Critical</button>
+      <button class="mode-btn" data-vf="critical" onclick="setVarianceFilter('critical', this)">Crit + High</button>
     </div>
     <div id="varianceList"></div>
     <div id="parAlerts" style="margin-top:12px"></div>
@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.16';
+const APP_VERSION = '2.18';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -9481,7 +9481,7 @@ function renderGuidedMode() {
       const meta =
         '<span class="method-badge ' + item.method + '">' + item.method + '</span>' +
         (visibleSku(item.sku) ? '<span style="font-family:var(--mono);font-size:10px">' + esc(visibleSku(item.sku)) + '</span>' : '') +
-        (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(item.issue) + '</span>' : '');
+        (item.issue && item.issue !== 'none' ? '<span style="color:var(--warning)">' + esc(issueLabel(item.issue)) + '</span>' : '');
       const top =
         '<div style="display:flex;align-items:center;gap:12px">' +
           '<div class="c-thumb" style="color:' + getCategoryColor(item.category) + '">' + getCategoryLabel(item.category) + '</div>' +
@@ -13453,6 +13453,45 @@ function severityOrder(sev) {
   return { CRITICAL: 0, HIGH: 1, MEDIUM: 2, WATCH: 3, LOW: 4 }[sev] || 5;
 }
 
+/* Counter-raised issues (the chips on the count forms: Not in inventory, No
+   sticker, Damaged ...). They live on the entry, are NOT variance items, and
+   so never appear under Critical / High / the recount list. Poppy's counter
+   was told "1 item flagged" and could not find it: it was a counter-raised
+   'Not in inventory' on one entry, visible only in a header-menu Issues page
+   and as a raw token in the zone list. */
+const ISSUE_LABELS = {
+  'not-in-craftable': 'Not in inventory',
+  'no-sticker': 'No sticker',
+  'no-upc': 'No UPC/barcode',
+  'wrong-location': 'Wrong location',
+  'damaged': 'Damaged',
+  'misplaced': 'Misplaced',
+};
+function issueLabel(token) {
+  if (ISSUE_LABELS[token]) return ISSUE_LABELS[token];
+  const t = String(token || '').replace(/-/g, ' ').trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : 'Issue';
+}
+/* Entries in the current audit that carry a counter-raised issue. */
+function getFlaggedEntries() {
+  if (!appState.audit || !appState.audit.counts) return [];
+  const out = [];
+  Object.entries(appState.audit.counts).forEach(function ([zone, items]) {
+    (items || []).forEach(function (item) {
+      if (item.issue && item.issue !== 'none') {
+        out.push({ name: item.name, zone: zone, qty: item.qty, issue: item.issue });
+      }
+    });
+  });
+  return out;
+}
+/* Jump from the Variance screen to the zone where an item was flagged. */
+function goToFlaggedZone(zone) {
+  appState.currentZone = zone;
+  saveState();
+  showPage('count');
+}
+
 /* ================================================================
    VARIANCE PAGE RENDERING
    Shows AVT data cross-referenced with count data.
@@ -13488,6 +13527,9 @@ function renderVariancePage() {
 
   // Cross-reference with count data
   const countedMap = getCountedMap();
+  const recountNames = (inRecountStage && appState.audit.recounts && Object.keys(appState.audit.recounts).length)
+    ? new Set(Object.values(appState.audit.recounts).map(function (r) { return r.itemName; }))
+    : null;
   let totalExpected = 0, totalCounted = 0, flaggedCount = 0, missingCount = 0, criticalCount = 0;
 
   const rows = filteredAvt.map(avt => {
@@ -13504,7 +13546,11 @@ function renderVariancePage() {
     });
     // Only surface recount targeting in the recount stage; during Count 1
     // (or no audit) this stays false so no row is presented "to recount".
-    const recount = inRecountStage && needsRecount(severity);
+    // Once the recount list exists, 'flagged' means exactly the items on it —
+    // the list drops MEDIUMs under the $ gate and caps at maxRecountItems, so
+    // counting every MEDIUM here made the number disagree with what counters
+    // could find. Before the list exists, fall back to the severity rule.
+    const recount = inRecountStage && (recountNames ? recountNames.has(avt.itemName) : needsRecount(severity));
     const isMissing = counted === 0 && expected > 0;
 
     totalExpected += expected;
@@ -13527,6 +13573,20 @@ function renderVariancePage() {
   });
 
   // Stats
+    const flaggedEntries = getFlaggedEntries();
+  const flaggedByCountersHtml = flaggedEntries.length
+    ? '<div class="stat-row" style="flex-direction:column;align-items:stretch;gap:6px">' +
+        '<span class="stat-label">Flagged by counters (' + flaggedEntries.length + ') — not variance items</span>' +
+        flaggedEntries.slice(0, 10).map(function (f) {
+          return '<div class="flagged-entry" data-zone="' + esc(f.zone) + '" onclick="goToFlaggedZone(this.dataset.zone)" ' +
+            'style="display:flex;justify-content:space-between;gap:8px;padding:10px 6px;border-top:1px solid var(--border,rgba(255,255,255,0.06));cursor:pointer;font-size:12px">' +
+            '<span style="min-width:0"><strong>' + esc(f.name) + '</strong><br><span style="color:var(--text-muted)">' + esc(f.zone) + ' · ' + esc(String(f.qty)) + '</span></span>' +
+            '<span style="color:var(--warning);flex-shrink:0">' + esc(issueLabel(f.issue)) + ' ›</span>' +
+          '</div>';
+        }).join('') +
+        (flaggedEntries.length > 10 ? '<span class="stat-label">…and ' + (flaggedEntries.length - 10) + ' more (header menu → Issues)</span>' : '') +
+      '</div>'
+    : '';
   document.getElementById('varianceStats').innerHTML =
     '<div class="stat-row"><span class="stat-label">AVT items</span><span class="stat-value">' + filteredAvt.length + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Items counted</span><span class="stat-value accent">' + Object.keys(countedMap).length + '</span></div>' +
@@ -13534,11 +13594,12 @@ function renderVariancePage() {
     (inRecountStage
       ? '<div class="stat-row"><span class="stat-label">Flagged for recount</span><span class="stat-value danger">' + flaggedCount + '</span></div>'
       : '') +
-    '<div class="stat-row"><span class="stat-label">Critical</span><span class="stat-value danger">' + criticalCount + '</span></div>' +
+    '<div class="stat-row"><span class="stat-label">Critical + High</span><span class="stat-value danger">' + criticalCount + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Missing (not counted)</span><span class="stat-value warning">' + missingCount + '</span></div>' +
     '<div class="stat-row"><span class="stat-label">Total variance value</span><span class="stat-value ' +
       (filteredAvt.reduce((s, a) => s + a.varianceValue, 0) < 0 ? 'danger' : 'success') + '">$' +
-      Math.abs(filteredAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '</span></div>';
+      Math.abs(filteredAvt.reduce((s, a) => s + a.varianceValue, 0)).toFixed(2) + '</span></div>' +
+    flaggedByCountersHtml;
 
   // Hide the "Flagged" filter chip outside the recount stage — there are no
   // recount targets to filter to, and the active filter has already been
@@ -13942,7 +14003,13 @@ function closeCount1() {
     ? 'Close Count 1? This computes variance from POS + recipes + purchases and generates the recount list.'
     : 'Close Count 1? This is a local audit \u2014 the recount list will include all counted items for verification.';
 
-  showConfirm(msg, async () => {
+  const flaggedAtClose = getFlaggedEntries();
+  const flaggedNote = flaggedAtClose.length
+    ? '\n\n' + flaggedAtClose.length + ' item' + (flaggedAtClose.length === 1 ? '' : 's') + ' flagged by counters (not in the recount list): ' +
+      flaggedAtClose.slice(0, 3).map(function (f) { return f.name + ' (' + issueLabel(f.issue) + ', ' + f.zone + ')'; }).join('; ') +
+      (flaggedAtClose.length > 3 ? '; …' : '') + '.'
+    : '';
+  showConfirm(msg + flaggedNote, async () => {
     if (_closingCount1) return;
     // Re-check the phase at confirm-accept time: the dialog can sit open
     // while another manager closes Count 1 (realtime flips countPhase), and
