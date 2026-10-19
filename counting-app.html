@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.17';
+const APP_VERSION = '2.18';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3590,6 +3590,61 @@ async function loadCarriedItemsFromSupabase() {
    a meaningful chunk of curated IDs (almost always because itemMaster was
    built from the static items.json fallback while carriedSet has live
    Supabase UUIDs), force a fresh Supabase items reload. */
+/* v2.18: precise top-up for NEWLY carried items.
+   Root cause of Little Luck 2026-10-18: 143 wine/sake masters were added
+   mid-count and counters already in the app never saw them -- only 1 of the
+   143 was counted. The 60s ticker refreshes carriedSet but deliberately skips
+   itemMaster once loaded, and the reconcile below only forced a reload when
+   resolution fell under 80%. 143 new items against ~5.6k carried is 97.5%
+   resolution, so the reload NEVER fired: the threshold detects a wholesale
+   stale catalog, not new items, and could not trip on fewer than ~1,100 at once.
+   Instead of a percentage gate, fetch exactly the missing masters and append
+   them, so even ONE new item reaches every phone within a minute. */
+let _missingNotInScope = new Set();   // carried ids the in-scope fetch never returns (e.g. food)
+let _topUpInFlight = false;
+async function fetchMissingCarriedMasters(ids) {
+  if (_topUpInFlight || !ids || !ids.length) return 0;
+  _topUpInFlight = true;
+  try {
+    const have = new Set();
+    for (let i = 0; i < itemMaster.length; i++) {
+      if (itemMaster[i] && itemMaster[i].id) have.add(String(itemMaster[i].id));
+    }
+    let added = 0;
+    // Chunk to keep the PostgREST URL a sane length.
+    for (let i = 0; i < ids.length; i += 100) {
+      const chunk = ids.slice(i, i + 100);
+      const qs = 'select=*&is_active=eq.true&' + IN_SCOPE_FILTER +
+                 '&id=in.(' + chunk.map(encodeURIComponent).join(',') + ')';
+      const { data, error } = await supabaseRest.query('master_items', qs);
+      if (error) throw error;
+      const got = new Set((data || []).map(function (r) { return String(r.id); }));
+      // Carried but out of the phone's category scope (4 such rows in prod):
+      // remember them so they are not re-requested every minute forever.
+      chunk.forEach(function (id) { if (!got.has(id)) _missingNotInScope.add(id); });
+      const mapped = mapSupabaseToItemMaster(data || []);
+      for (let j = 0; j < mapped.length; j++) {
+        const id = String(mapped[j].id);
+        if (have.has(id)) continue;
+        itemMaster.push(mapped[j]);
+        have.add(id);
+        added++;
+      }
+    }
+    if (added > 0) {
+      buildItemMasterDisplay();
+      console.log('[carried] topped up ' + added + ' newly carried item(s) into the catalog');
+    }
+    return added;
+  } catch (e) {
+    console.warn('[carried] top-up failed:', e);
+    logClientError('fetchMissingCarriedMasters', e);
+    return 0;
+  } finally {
+    _topUpInFlight = false;
+  }
+}
+
 let _reconcileInFlight = false;
 function reconcileCarriedAgainstMaster() {
   if (_reconcileInFlight) return;
@@ -3609,7 +3664,15 @@ function reconcileCarriedAgainstMaster() {
     loadItemMaster()
       .catch(function() {})
       .then(function() { _reconcileInFlight = false; });
+    return;
   }
+  // v2.18: resolution is fine overall, but ANY carried id still missing is a
+  // newly added item -- fetch just those (see fetchMissingCarriedMasters).
+  var missing = [];
+  carriedSet.forEach(function (id) {
+    if (!masterIds.has(id) && !_missingNotInScope.has(id)) missing.push(id);
+  });
+  if (missing.length > 0) fetchMissingCarriedMasters(missing);
 }
 
 /* Realtime subscription so admin toggles on the desktop Catalog screen land
