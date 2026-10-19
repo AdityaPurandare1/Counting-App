@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.16';
+const APP_VERSION = '2.17';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3829,6 +3829,28 @@ function searchItemMaster(query, limit) {
   if (q.length < 1) return [];
   const words = q.split(/\s+/).filter(function(w) { return w.length > 0; });
   if (words.length === 0) return [];
+  // v2.17 VINTAGE TOLERANCE. Vintage is baked into the item NAME in this
+  // catalog ("... Pfalz, DE 2023"), so a new vintage is effectively a new
+  // product that matches nothing. Little Luck's 10/18 count hit exactly that:
+  // a counter scanned "Von Winning - Forster Ungeheuer Riesling 2024 750ml"
+  // while the catalog held the 2023, every word had to match, so the search
+  // came back empty and the bottle fell through to an unlinked manual entry.
+  // Treat a 4-digit year as OPTIONAL: the non-year words still all have to
+  // match, but a year that disagrees no longer kills the hit -- it only ranks
+  // lower, and the year is visible in the name so the counter can judge.
+  const isYear = function (w) { return /^(19|20)\d{2}$/.test(w); };
+  const yearWords = words.filter(isYear);
+  const textWords = words.filter(function (w) { return !isYear(w); });
+  // A query that is ONLY a year keeps the strict rule -- otherwise typing
+  // "2021" would match the entire catalog.
+  const relaxYears = textWords.length > 0;
+  const required = relaxYears ? textWords : words;
+  function matchesYear(item) {
+    if (!relaxYears || yearWords.length === 0) return true;
+    const h = ((item && item.name) || '').toLowerCase();
+    for (let i = 0; i < yearWords.length; i++) if (!h.includes(yearWords[i])) return false;
+    return true;
+  }
   function match(item) {
     if (!item) return false;
     // Defense in depth: itemMaster is already filtered at load time
@@ -3844,7 +3866,7 @@ function searchItemMaster(query, limit) {
       (item.subcategory || '')
     ).toLowerCase();
     if (!hay.trim()) return false;
-    for (let i = 0; i < words.length; i++) if (!hay.includes(words[i])) return false;
+    for (let i = 0; i < required.length; i++) if (!hay.includes(required[i])) return false;
     return true;
   }
   // Counter feedback: when both "Komos Reserva Anejo" and "Komos Reserva
@@ -3862,7 +3884,7 @@ function searchItemMaster(query, limit) {
   const have = new Set();
   const useCarried = carriedSet.size > 0;
 
-  function pushFiltered(carriedWanted, sizedWanted) {
+  function pushFiltered(carriedWanted, sizedWanted, yearWanted) {
     // Search the DEDUPED display catalog so bare-name twins of size-suffixed
     // products don't surface as separate hits. Id-based lookups elsewhere
     // still use the full itemMaster.
@@ -3873,6 +3895,7 @@ function searchItemMaster(query, limit) {
       const isCarried = useCarried && carriedSet.has(String(item.id));
       if (carriedWanted !== null && isCarried !== carriedWanted) continue;
       if (hasSize(item) !== sizedWanted) continue;
+      if (yearWanted !== undefined && matchesYear(item) !== yearWanted) continue;
       if (!match(item)) continue;
       results.push(item);
       have.add(item.id);
@@ -3886,18 +3909,28 @@ function searchItemMaster(query, limit) {
     // the same sized-first ordering. Callers draw a "Not in your inventory
     // list" divider on carriedSet membership so the two groups stay
     // visually distinct regardless of this internal ordering.
-    pushFiltered(true,  true);
-    pushFiltered(true,  false);
-    pushFiltered(false, true);
-    pushFiltered(false, false);
+    // v2.17: within each carried/non-carried tier the EXACT vintage comes
+    // first; a vintage mismatch still appears, just below. When the query
+    // carries no year these second passes match nothing, so behaviour for
+    // every non-vintage search is byte-for-byte what it was.
+    pushFiltered(true,  true,  true);
+    pushFiltered(true,  false, true);
+    pushFiltered(true,  true,  false);
+    pushFiltered(true,  false, false);
+    pushFiltered(false, true,  true);
+    pushFiltered(false, false, true);
+    pushFiltered(false, true,  false);
+    pushFiltered(false, false, false);
     return results;
   }
 
   // Fallback — only reached when this venue has no carried set at all
   // (carriedSet.size === 0). Searches the full master so a brand-new
   // venue with nothing uploaded yet can still count. Same sized-first rule.
-  pushFiltered(null, true);
-  pushFiltered(null, false);
+  pushFiltered(null, true,  true);
+  pushFiltered(null, false, true);
+  pushFiltered(null, true,  false);
+  pushFiltered(null, false, false);
   return results;
 }
 
