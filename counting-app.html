@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.20';
+const APP_VERSION = '2.21';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4125,11 +4125,36 @@ async function loadVenuesFromSupabase() {
 
     appState.venues = resp.data.map(function(r) {
       var prev = prevById[r.id];
+      var zones = (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev.zones ? prev.zones.slice() : []);
+      // v2.21: KEEP the counter-added zones (kount_venue_zones). This rebuild
+      // used to reset zones to the admin defaults alone, and it runs far more
+      // often than a venue pick: on ANY kount_venues change (realtime), on
+      // every offline->online flip, and on session restore. Each one silently
+      // hid every counter-added zone until the counter re-joined -- at Little
+      // Luck on 10/19 a counter lost "Wine Room" mid-count (signal drops in
+      // the cellar) and created a second "Wine room". Customs come from the
+      // previous object; a zone the admin REMOVED from the defaults was in
+      // prev._defaultZones, so it is not carried over.
+      if (prev && prev.zones) {
+        var prevDefaults = prev._defaultZones || [];
+        prev.zones.forEach(function(z) {
+          if (prevDefaults.indexOf(z) === -1 && zones.indexOf(z) === -1) zones.push(z);
+        });
+      }
+      // A zone that holds counts in the live audit is never hidden, even if
+      // the admin just removed it: its counts would drop out of every total
+      // on this phone (same rule removeCustomZone enforces).
+      if (appState.currentVenue && appState.currentVenue.id === r.id &&
+          appState.audit && appState.audit.counts) {
+        Object.keys(appState.audit.counts).forEach(function(z) {
+          if ((appState.audit.counts[z] || []).length > 0 && zones.indexOf(z) === -1) zones.push(z);
+        });
+      }
       return {
         id: r.id,
         name: r.name,
         address: r.address || '',
-        zones: (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev.zones ? prev.zones.slice() : []),
+        zones: zones,
         // Snapshot of the immutable defaults so the zone-tab UI can tell
         // which zones are admin-default vs counter-added (kount_venue_zones).
         _defaultZones: (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev._defaultZones ? prev._defaultZones.slice() : []),
@@ -4143,8 +4168,13 @@ async function loadVenuesFromSupabase() {
     // selection — counters will be sent back to the venue picker.
     if (appState.currentVenue) {
       var fresh = appState.venues.find(function(v) { return v.id === appState.currentVenue.id; });
-      if (fresh) appState.currentVenue = fresh;
-      else {
+      if (fresh) {
+        appState.currentVenue = fresh;
+        // v2.21: re-sync the counter-added zones from the server too. Covers
+        // a cold open (the boot-time zone read races the login and comes back
+        // empty) and any zone another phone added while realtime was down.
+        loadVenueZonesFromSupabase(fresh.id).catch(function() {});
+      } else {
         showToast('The venue you were on was removed by an admin', 'warn');
         appState.currentVenue = null;
         appState.currentZone = null;
@@ -9193,8 +9223,12 @@ async function loadVenueZonesFromSupabase(venueId) {
     'venue_id=eq.' + encodeURIComponent(venueId) + '&order=created_at.asc'
   );
   if (error) { console.warn('[zones] load failed', error); return; }
+  // v2.21: this now also runs after every venue-list reload, so only redraw
+  // the count screen when a zone was actually added -- never jolt a counter's
+  // screen (scroll, open recount card) when nothing changed.
+  let added = 0;
   (data || []).forEach(row => {
-    if (!venue.zones.includes(row.zone_name)) venue.zones.push(row.zone_name);
+    if (!venue.zones.includes(row.zone_name)) { venue.zones.push(row.zone_name); added++; }
   });
   // One-time backfill: push any localStorage zones not yet in Supabase.
   try {
@@ -9206,10 +9240,10 @@ async function loadVenueZonesFromSupabase(venueId) {
         venue_id: venueId, zone_name: z,
         created_by: (appState.user && appState.user.email) || null,
       });
-      if (!insErr && !venue.zones.includes(z)) venue.zones.push(z);
+      if (!insErr && !venue.zones.includes(z)) { venue.zones.push(z); added++; }
     }
   } catch (e) { /* backfill is best-effort */ }
-  if (document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
+  if (added && document.querySelector('.page:not(.hide)')?.id === 'page-count') renderCountPage();
 }
 
 // Realtime — propagate zone INSERT/DELETE across devices for the
