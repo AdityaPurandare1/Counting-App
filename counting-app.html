@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.19';
+const APP_VERSION = '2.20';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -7356,7 +7356,10 @@ function pendingUploadsBlockClose() {
   if (!appState.audit || !appState.audit.supabaseId) return false;
   const q = (typeof pendingMutations !== 'undefined' && pendingMutations) || [];
   const n = q.filter(function (op) {
-    return op.kind === 'entry-sync' || (op.args && op.args.table === 'kount_entries');
+    // v2.20: queued new-product stores count too -- the count-close step
+    // (0089) can only create a product that has reached kount_pending_items.
+    return op.kind === 'entry-sync' ||
+      (op.args && (op.args.table === 'kount_entries' || op.args.table === 'kount_pending_items'));
   }).length;
   if (n === 0) return false;
   const what = n + ' count change' + (n === 1 ? '' : 's');
@@ -7686,6 +7689,46 @@ async function createMasterItemFromApp(payload) {
    asks admin to permanently add the item to the shared catalog so other
    counters and other audits see it without re-typing.
    ================================================================ */
+/* v2.20: store a photographed NEW product, silently.
+   Same table as the manual "Suggest" path (kount_pending_items), but no tap,
+   no toast, and it survives being offline: a transient failure goes into the
+   durable retry queue. A duplicate-key error is SUCCESS here -- migration
+   0010 keeps one pending row per name, so the product is already stored, and
+   the count-close step (0089) links this count's entries to it by name. */
+async function autoStoreNewProduct(p) {
+  if (!appState.audit || !appState.audit.supabaseId) return;   // solo audits never close on the server
+  if (!p || !p.name || !String(p.name).trim()) return;
+  const row = {
+    name:        String(p.name).trim(),
+    brand:       null,                         // already part of the name
+    category:    masterCategoryForCreate(p.category),
+    subcategory: null,
+    size:        (p.size || '').trim() || null,
+    upc:         String(p.upc || '').replace(/\D/g, '') || null,
+    notes:       (p.notes || '').trim() || null,
+    submitted_by_email: (appState.user && appState.user.email) || 'unknown',
+    submitted_by_name:  (appState.user && appState.user.name)  || 'Unknown',
+    audit_id:    appState.audit.supabaseId,
+    status:      'pending',
+  };
+  const queue = function () {
+    enqueuePendingMutation('rest-insert', { table: 'kount_pending_items', body: row },
+      { label: 'new product (' + row.name + ')' });
+  };
+  if (navigator.onLine === false) { queue(); return; }
+  try {
+    const { error } = await supabaseRest.insert('kount_pending_items', row);
+    if (!error) return;
+    if (/duplicate key|23505/i.test(error.message || '')) return;   // already stored
+    if (isRetryableError(error)) { queue(); return; }
+    console.warn('[photo] could not store new product:', error);
+    logClientError('autoStoreNewProduct', error);
+  } catch (e) {
+    if (isRetryableError(e)) { queue(); return; }
+    logClientError('autoStoreNewProduct', e);
+  }
+}
+
 async function submitPendingItem(payload) {
   if (!supabaseLoaded) {
     showToast('Catalog suggestion unavailable offline \u2014 counted locally for now', 'warn');
@@ -12701,6 +12744,21 @@ async function submitPhotoEntry() {
     addCountEntryToZone(zone, name, category, extraQty, 'photo', upc, issueNotes, issue, photoId, null, masterId);
   });
 
+  // v2.20: a NEW product the AI read -> store it automatically (no "Suggest"
+  // tap). Only when the AI produced the details and the counter did not pick
+  // an existing catalog item instead (that sets masterId). Fire-and-forget:
+  // storing must never slow or block the count itself.
+  const nameElForStore = document.getElementById('photoName');
+  if (!masterId && nameElForStore.dataset.aiNew === '1') {
+    autoStoreNewProduct({
+      name: name,
+      category: category,
+      size: nameElForStore.dataset.aiSize || '',
+      upc: upc || '',
+      notes: details,
+    });
+  }
+
   closePhotoReview();
   renderCountPage();
   } finally {
@@ -16681,6 +16739,9 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
   var nameInput = document.getElementById('photoName');
   var catSelect = document.getElementById('photoCategory');
   var detailsInput = document.getElementById('photoDetails');
+  // v2.20: reset the new-product markers for every photo.
+  delete nameInput.dataset.aiNew;
+  delete nameInput.dataset.aiSize;
 
   // Normalize UTF-8 double-encode artifacts (U+00C2 U+00B7 rendering as
   // "A-circumflex + middot" instead of a bare middot, and U+00C2 U+00A0
@@ -16749,12 +16810,33 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
       });
     }
   } else {
-    var displayName = parsed.name || '';
-    if (parsed.brand && parsed.brand.toLowerCase() !== (parsed.name || '').toLowerCase()) {
-      displayName = (parsed.brand + ' ' + (parsed.name || '')).trim();
+    // v2.20 PHOTO NEW-PRODUCT RULE: the AI read the label but the bottle is
+    // not in the catalog. Fill the name with the FULL product identity --
+    // Brand Name Vintage Size -- the same shape the catalog already uses
+    // ("Domaine des Justices, Bordeaux Superieur 2020 750ml"). Previously the
+    // vintage went only into Details, so two vintages of one wine collapsed
+    // onto a single product, and the brand was prefixed even when the AI's
+    // name already contained it ("Clase Azul Clase Azul Reposado").
+    // The entry is then stored as a new product on save (submitPhotoEntry)
+    // and created in the catalog when the count closes (migration 0089).
+    var baseName = String(parsed.name || '').trim();
+    var aiBrand = String(parsed.brand || '').trim();
+    if (aiBrand && baseName.toLowerCase().indexOf(aiBrand.toLowerCase()) === -1) {
+      baseName = (aiBrand + ' ' + baseName).trim();
     }
+    var displayName = baseName;
+    var aiVintage = String(parsed.vintage || '').trim();
+    if (aiVintage && displayName.indexOf(aiVintage) === -1) displayName += ' ' + aiVintage;
+    var aiSize = String(parsed.size || '').trim();
+    if (aiSize && displayName.replace(/\s+/g, '').toLowerCase()
+          .indexOf(aiSize.replace(/\s+/g, '').toLowerCase()) === -1) {
+      displayName += ' ' + aiSize;
+    }
+    displayName = displayName.replace(/\s+/g, ' ').trim();
     nameInput.value = displayName;
     delete nameInput.dataset.masterId;
+    if (displayName) nameInput.dataset.aiNew = '1';
+    if (aiSize) nameInput.dataset.aiSize = aiSize;
     if (resolvedUpc) nameInput.dataset.upc = resolvedUpc;
     else delete nameInput.dataset.upc;
     if (parsed.category) catSelect.value = parsed.category;
@@ -16764,12 +16846,12 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
     if (parsed.details) bits2.push(parsed.details);
     detailsInput.value = deMoji(bits2.join(' \u00B7 '));
 
-    statusEl.textContent = 'AI extracted \u2014 no exact catalog match. Edit/search below.' + (resolvedUpc ? ' UPC: ' + resolvedUpc : '');
+    statusEl.textContent = 'New product \u2014 counted now, added to the catalog when the count closes. Already in the catalog? Pick it below.' + (resolvedUpc ? ' UPC: ' + resolvedUpc : '');
     statusEl.style.animation = 'none';
     statusEl.style.color = 'var(--warning)';
 
-    if (displayName && typeof onPhotoSearch === 'function') {
-      try { onPhotoSearch(displayName); } catch (e) {}
+    if (baseName && typeof onPhotoSearch === 'function') {
+      try { onPhotoSearch(baseName); } catch (e) {}
     }
 
     // No exact catalog match. Per counter feedback we no longer auto-select
