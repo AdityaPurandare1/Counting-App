@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.18';
+const APP_VERSION = '2.19';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3534,6 +3534,71 @@ async function loadSupabaseItems() {
    searches the full catalog as before.
    ================================================================ */
 let carriedSet = new Set();
+
+/* v2.19: the VENUE's own items, to put in front of Claude's photo matcher.
+   kount_carried_items is GLOBAL (~5.7k rows, every venue's stock), and the
+   photo payload is capped at 250 per list, alphabetically. On Little Luck's
+   10/18 count only 4 of the 143 wine/sake items fell inside that window, so
+   Claude was never even shown the bottles it was being asked to recognise.
+   Two venue-scoped signals, both readable by that venue's counters under RLS
+   (kount_is_corporate() OR kount_can_see_venue(venue_id)):
+     - kount_venue_cost_overrides -> items this venue has a price for
+     - kount_entries of its recent audits -> items it has actually counted
+   Loaded on join/start and cached 10 minutes; refreshed lazily at photo time
+   rather than on the 60s ticker, because the entries read can run to
+   thousands of rows and should not repeat every minute on cellular.
+   Every failure path just leaves the set smaller -- it can never break the
+   photo flow, only make it less targeted. */
+let venueItemIds = new Set();
+let _venueItemIdsFor = null;
+let _venueItemIdsAt = 0;
+const VENUE_ITEMS_TTL_MS = 10 * 60 * 1000;
+async function loadVenueItemIds(venueId) {
+  if (!venueId) return venueItemIds;
+  const fresh = _venueItemIdsFor === venueId && (Date.now() - _venueItemIdsAt) < VENUE_ITEMS_TTL_MS;
+  if (fresh) return venueItemIds;
+  const ids = new Set();
+  const v = encodeURIComponent(venueId);
+  try {
+    const c = await supabaseRest.query('kount_venue_cost_overrides',
+      'venue_id=eq.' + v + '&select=master_item_id&limit=5000');
+    if (!c.error && Array.isArray(c.data)) {
+      c.data.forEach(function (r) { if (r && r.master_item_id) ids.add(String(r.master_item_id)); });
+    }
+  } catch (e) {}
+  try {
+    const a = await supabaseRest.query('kount_audits',
+      'venue_id=eq.' + v + '&select=id&order=started_at.desc&limit=5');
+    const auditIds = (!a.error && Array.isArray(a.data)) ? a.data.map(function (r) { return r.id; }) : [];
+    if (auditIds.length) {
+      const e = await supabaseRest.query('kount_entries',
+        'audit_id=in.(' + auditIds.map(encodeURIComponent).join(',') + ')' +
+        '&master_item_id=not.is.null&select=master_item_id&limit=10000');
+      if (!e.error && Array.isArray(e.data)) {
+        e.data.forEach(function (r) { if (r && r.master_item_id) ids.add(String(r.master_item_id)); });
+      }
+    }
+  } catch (e) {}
+  if (ids.size > 0) {
+    venueItemIds = ids;
+    _venueItemIdsFor = venueId;
+    _venueItemIdsAt = Date.now();
+  } else if (_venueItemIdsFor !== venueId) {
+    // Switched to a venue that has nothing yet. Reset, but do NOT stamp it
+    // fresh: a list loaded at audit start -- before anything is counted --
+    // is legitimately empty, and caching that as fresh would deny the photo
+    // matcher the venue's items for the next 10 minutes of its first count.
+    venueItemIds = ids;
+    _venueItemIdsFor = venueId;
+    _venueItemIdsAt = 0;
+  }
+  // else: same venue, transient empty/failed read -- keep the good list we
+  // already had rather than wiping it mid-count.
+  return venueItemIds;
+}
+function currentVenueIdForPhoto() {
+  return (appState.audit && appState.audit.venueId) || appState.currentVenueId || null;
+}
 
 async function loadCarriedItemsFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
@@ -6158,6 +6223,7 @@ async function joinNetworkedAudit(rawCode) {
   // app therefore searched the Apr-2026 items.json and scanned against an
   // empty barcode cache until the 60s periodic retry. Same refresh here.
   loadItemMaster().catch(function() {});
+  loadVenueItemIds(currentVenueIdForPhoto()).catch(function() {});
   loadCarriedItemsFromSupabase().catch(function() {});
   loadApprovedUpcMappings(true).catch(function() {});
   showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
@@ -8812,6 +8878,7 @@ function createAndStartAudit(venue, opts) {
   // begins, so a stale localStorage cache from days ago can never silently
   // drive search/scan against out-of-date inventory.
   loadItemMaster().catch(function() {});
+  loadVenueItemIds(currentVenueIdForPhoto()).catch(function() {});
   loadCarriedItemsFromSupabase().catch(function() {});
   loadApprovedUpcMappings(true).catch(function() {});
 
@@ -16753,15 +16820,37 @@ async function parseLabelWithClaude(imageDataUrl) {
   };
 
   const carriedSetRef = (typeof carriedSet !== 'undefined' && carriedSet) ? carriedSet : new Set();
+  // v2.19: put THIS venue's items in front of Claude. Await only when the
+  // cache is empty (first photo of a session); otherwise refresh in the
+  // background so the photo path gains no latency.
+  const photoVenue = currentVenueIdForPhoto();
+  let venueRef = venueItemIds;
+  if (photoVenue && (!venueRef || venueRef.size === 0 || _venueItemIdsFor !== photoVenue)) {
+    try { venueRef = await loadVenueItemIds(photoVenue); } catch (e) {}
+  } else if (photoVenue) {
+    loadVenueItemIds(photoVenue).catch(function () {});
+  }
+  venueRef = venueRef || new Set();
   const allItems = (itemMaster || []).slice();
+  const venue = [];
   const carried = [];
   const other = [];
   for (const it of allItems) {
-    if (carriedSetRef.has(String(it.id))) carried.push(it);
+    const id = String(it.id);
+    if (venueRef.has(id)) venue.push(it);
+    else if (carriedSetRef.has(id)) carried.push(it);
     else other.push(it);
   }
-  const carriedPayload = carried.sort(sortByName).slice(0, 250).map(toPayload);
-  const otherPayload   = other.sort(sortByName).slice(0, 250).map(toPayload);
+  venue.sort(sortByName);
+  carried.sort(sortByName);
+  other.sort(sortByName);
+  // The first list is the one the Edge Function tells Claude to try first, so
+  // the venue's own items lead it; any venue overflow beyond 250 leads the
+  // second list, so up to 500 venue items reach Claude before anything else.
+  // Still deterministic per venue (sorted within each group), so the Edge
+  // Function's prompt cache keeps hitting within a session.
+  const carriedPayload = venue.concat(carried).slice(0, 250).map(toPayload);
+  const otherPayload   = venue.slice(250).concat(other).slice(0, 250).map(toPayload);
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
   const res = await fetch(url, {
