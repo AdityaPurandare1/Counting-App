@@ -3183,7 +3183,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.21';
+const APP_VERSION = '2.24';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -14338,6 +14338,9 @@ function closeCount1() {
               weeksActive: item.weeksActive || 0,
               actual: item.avt.actual,
               theo: item.avt.theo,
+              start: item.avt.start,
+              purchases: item.avt.purchases,
+              depletions: item.avt.depletions,
               count1Qty: qty,                  // per-zone qty
               recountQty: null,                // per-zone recount qty
               status: 'pending',
@@ -14674,6 +14677,62 @@ function setRecountFilter(filter, element) {
   renderRecountPage();
 }
 
+/* Item-level facts for a recount card (variance, expected qty and its parts,
+   weeks flagged).
+
+   The recount list is created on the MANAGER's phone from the computed AVT and
+   stored with these facts. Every other phone loads the list from kount_recounts,
+   which has no theo / start / purchases / depletions / weeks columns and gets
+   variance_qty only when a recount is recorded — so refreshRecountsFromSupabase
+   rebuilds those rows with variance 0, theo 0 and no weeksActive. Reading them
+   as-is told counters "No change this count" and "System expects 0" for items
+   that were actually short. Treat such rows as UNKNOWN and look the item up in
+   this venue's AVT rows (every phone loads them); if that fails too, say
+   nothing rather than something false. */
+function recountItemFacts(rec) {
+  const num = function (v) { const n = Number(v); return isFinite(n) ? n : 0; };
+  // Built by closeCount1 on this phone: weeksActive is always a number there.
+  if (rec.weeksActive !== undefined) {
+    return { known: true, variance: num(rec.variance), theo: num(rec.theo),
+      start: rec.start, purchases: rec.purchases, depletions: rec.depletions,
+      weeksActive: num(rec.weeksActive) };
+  }
+  const name = rec.itemName || (rec.avtItem && rec.avtItem.itemName);
+  const vid = appState.currentVenue && appState.currentVenue.id;
+  const avt = (appState.avtData || []).find(function (a) {
+    return a.itemName === name && (!vid || a.venueId === vid);
+  });
+  if (avt) {
+    return { known: true, variance: num(avt.variance), theo: num(avt.theo),
+      start: avt.start, purchases: avt.purchases, depletions: avt.depletions,
+      weeksActive: num(getWeeksFlaggedFor(name, avt.venueId)) };
+  }
+  return { known: false };
+}
+
+/* "System expects N (A at last count + B received − C used)". The sum is the
+   compute_avt_for_audit formula (theo = start + purchases − depletions, start =
+   the previous submitted audit's counts). Omitted when there is no baseline
+   (a first count has start = purchases = depletions = 0, so "expects 0" would
+   mean nothing) and the parts are only shown when they add up to theo. */
+function recountExpectedHtml(f) {
+  if (!f.known) return '';
+  const fmt = function (v) { return Number(Number(v).toFixed(1)); };
+  const hasParts = [f.start, f.purchases, f.depletions].every(function (v) {
+    return v != null && isFinite(Number(v));
+  });
+  // Nothing to say when the expected qty is 0 and no part explains it (a first
+  // count). Expected 0 that IS explained (5 at last count − 5 used) is shown.
+  const anyPart = hasParts && (Number(f.start) || Number(f.purchases) || Number(f.depletions));
+  if (!Number(f.theo) && !anyPart) return '';
+  let h = '<span>System expects <strong style="color:var(--text)">' + fmt(f.theo) + '</strong>';
+  if (hasParts && Math.abs(Number(f.start) + Number(f.purchases) - Number(f.depletions) - Number(f.theo)) < 0.06) {
+    h += ' <span style="color:var(--text-dim,var(--text-muted))">(' + fmt(f.start) + ' at last count + ' +
+      fmt(f.purchases) + ' received − ' + fmt(f.depletions) + ' used)</span>';
+  }
+  return h + '</span>';
+}
+
 function renderRecountPage() {
   // Manager-only gate for the close-recount button. Re-evaluated on every
   // render so a role change pushed via realtime (kount_members) flips the
@@ -14799,32 +14858,26 @@ function renderRecountPage() {
     // GUARDRAIL: variance / varianceValue are ITEM-LEVEL values duplicated onto
     // every zone row (see closeCount1). Read from ONE row only - NEVER sum them
     // across zone rows or you multiply the variance by the zone count.
-    const bottleVar = rows[0][1].variance;
+    // Read via recountItemFacts: rows hydrated from kount_recounts on another
+    // phone carry variance 0 / theo 0 as 'unknown', not as real zeros.
+    const facts = recountItemFacts(rows[0][1]);
+    const bottleVar = facts.known ? facts.variance : 0;
     // Counter feedback @ Poppy: a card showing only "HIGH"/"CRITICAL" with no
-    // bottleVar line (this audit's own count matched theoretical exactly) left
-    // counters unable to tell why an item was flagged at all, let alone
-    // whether they were over or short. scoreSeverity can flag CRITICAL/HIGH
-    // purely on weeksActive (a chronic, multi-audit pattern) even when THIS
-    // audit's qty variance is exactly 0 — show that reason explicitly instead
-    // of leaving the card silent.
-    const weeksActive = rows[0][1].weeksActive || 0;
-    // scoreSeverity's only path to CRITICAL/HIGH with a zero $ variance is the
-    // weeksActive band (10+ / 5+ weeks respectively) — a zero qty variance
-    // forces a zero $ variance too (variance_value = (actual-theo)*cu_price),
-    // so weeksActive is the one honest explanation available here.
-    const flagReason = bottleVar
+    // over/short line left counters unable to tell why an item was flagged.
+    // scoreSeverity can flag CRITICAL/HIGH purely on weeksActive (a chronic,
+    // multi-audit pattern) even when THIS audit's qty variance is exactly 0 —
+    // say so. Only when the facts are KNOWN to be zero, never when unknown.
+    const weeksActive = facts.known ? facts.weeksActive : 0;
+    const flagReason = (!facts.known || bottleVar)
       ? ''
       : (weeksActive > 0
           ? '<span style="color:var(--warning)">No change this count — flagged for being off ' + weeksActive + ' week' + (weeksActive === 1 ? '' : 's') + ' running</span>'
           : '<span style="color:var(--warning)">No change this count — flagged by historical pattern</span>');
+    const varianceHtml = !facts.known ? '' : (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : flagReason);
     // Counter feedback @ Poppy: "unclear whether we're overstocked or missing
-    // items". The card only had the count they typed, never what the system
-    // expected, so there was nothing to compare it to. theo is item-level
-    // (duplicated onto every zone row), so read it from ONE row like bottleVar.
-    const theoRaw = rows[0][1].theo;
-    const expectedHtml = (theoRaw != null && isFinite(Number(theoRaw)))
-      ? '<span>System expects <strong style="color:var(--text)">' + Number(Number(theoRaw).toFixed(1)) + '</strong></span>'
-      : '';
+    // items" / "the variance doesn't make sense" — show what the system expects
+    // and where that number comes from.
+    const expectedHtml = recountExpectedHtml(facts);
     const zonesRecorded = rows.filter(function (pair) { return !!pair[1].auditResult; }).length;
     // Card "done" = every zone row in the group is done.
     const isDone = rows.every(function (pair) { return pair[1].status === 'done'; });
@@ -14877,7 +14930,7 @@ function renderRecountPage() {
         (group.category ? '<span>' + esc(group.category) + '</span>' : '') +
         // Bottles, not dollars, rendered ONCE from a single row. When there's
         // no qty variance to show, say why it's flagged instead of nothing.
-        (bottleVar ? '<span>' + fmtBottleVar(bottleVar) + '</span>' : flagReason) +
+        varianceHtml +
         expectedHtml +
         '<span><strong style="color:var(--text)">Count 1 total: ' + count1Total + ' across ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + '</strong></span>' +
         '<span>' + zonesRecorded + ' of ' + rows.length + ' zone' + (rows.length === 1 ? '' : 's') + ' recorded</span>' +
