@@ -9,13 +9,22 @@
  * Seeding mirrors 18-verify-total: the mock's compute_avt_for_audit flags
  * Belvedere 1L HIGH at -5 bottles; counting it in two zones yields two rows.
  */
-const { test, expect, startAuditAs, addManual, switchZone } = require('../fixtures');
+const { test, expect, startAuditAs } = require('../fixtures');
+
+/* Add an entry through the app's own addCountEntry (the function the Manual
+   modal calls), NOT by typing into the modal. The modal's delayed name-field
+   focus can swallow the qty keystroke ("Belvedere 1L3"), which made this
+   setup fail at random; the recount card is what these specs are about. */
+async function addEntry(page, zone, name, qty) {
+  await page.evaluate(([z, n, q]) => {
+    appState.currentZone = z;
+    addCountEntry(n, 'spirits', q, 'manual', '', '', 'none', null, null, null);
+  }, [zone, name, qty]);
+}
 
 async function seedTwoZoneRecount(page, db) {
-  await switchZone(page, 'Liquor Room');
-  await addManual(page, 'Belvedere 1L', 3);
-  await switchZone(page, 'Bar');
-  await addManual(page, 'Belvedere 1L', 2);
+  await addEntry(page, 'Liquor Room', 'Belvedere 1L', 3);
+  await addEntry(page, 'Bar', 'Belvedere 1L', 2);
 
   await page.evaluate(() => closeCount1());
   await page.locator('#confirmDialog').waitFor({ state: 'visible' });
