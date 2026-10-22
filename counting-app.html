@@ -2899,15 +2899,11 @@ html, body {
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>AI Settings <button class="close-x" onclick="closeAPIKeySettings()">X</button></h3>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
-      Two separate keys — OpenAI (GPT-4o mini) for label parsing, Anthropic (Claude) for the Ask AI assistant. Stored only on this device (localStorage).
+      Photo labels and Ask AI run on the server through the same AI router as KevaOS (OpenRouter, then Anthropic) &mdash; no key needed on this phone. Optional: an OpenAI key saved here is used for label photos only if the server cannot be reached.
     </div>
     <div class="form-group">
-      <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(for label parsing)</span></label>
+      <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(optional offline fallback)</span></label>
       <input class="form-input" id="openaiKeyInput" type="password" placeholder="sk-proj-... or sk-..." autocomplete="off" spellcheck="false">
-    </div>
-    <div class="form-group">
-      <label>Anthropic API key <span style="color:var(--text-dim);font-weight:400">(for Ask AI chat)</span></label>
-      <input class="form-input" id="apiKeyInput" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false">
     </div>
     <div style="display:flex;gap:8px">
       <button class="submit-btn" onclick="saveAPIKey()" style="flex:1">Save</button>
@@ -3183,7 +3179,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.21';
+const APP_VERSION = '2.22';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -16515,28 +16511,24 @@ function confirmAsync(message) {
 }
 
 /* ================================================================
-   AI INTEGRATION
-   - Two separate keys: OpenAI (image parsing) + Anthropic (chat)
-   - OpenAI GPT-4o mini → Vision for label/bottle parsing (cheap + fast)
-   - Anthropic Claude → Ask AI chat (better at long context)
-   - Both keys stored per-device in localStorage (user-provided)
+   AI INTEGRATION (v2.22)
+   - Label photos -> Edge Function parse-bottle-label; Ask AI -> Edge Function
+     ask-ai. Both route like KevaOS: OpenRouter first (pinned Claude,
+     data_collection=deny), Anthropic as the fallback. Keys live in Supabase
+     secrets, never on the phone.
+   - Optional legacy fallback: an OpenAI key pasted on this device, used for
+     label photos only when the Edge Function fails.
    ================================================================ */
-const AI_MODEL = 'claude-sonnet-4-5-20250929';          // chat model
-const AI_ENDPOINT = 'https://api.anthropic.com/v1/messages';
+// v2.22: the chat no longer uses a per-device Anthropic key -- drop any left
+// behind so a live key does not sit in localStorage on shared floor phones.
+try { localStorage.removeItem('hwood_anthropic_key'); } catch (e) {}
 const OPENAI_VISION_MODEL = 'gpt-4o-mini';              // vision model
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
 
-function getStoredAPIKey() {
-  try { return localStorage.getItem('hwood_anthropic_key') || ''; } catch (e) { return ''; }
-}
 function getStoredOpenAIKey() {
   try { return localStorage.getItem('hwood_openai_key') || ''; } catch (e) { return ''; }
 }
 
-function hasAPIKey() {
-  var k = getStoredAPIKey();
-  return !!(k && k.trim().length > 10);
-}
 function hasOpenAIKey() {
   var k = getStoredOpenAIKey();
   return !!(k && k.trim().length > 10);
@@ -16545,22 +16537,14 @@ function hasOpenAIKey() {
 function updateAPIKeyIndicator() {
   var dot = document.getElementById('headerAIKeyDot');
   if (!dot) return;
-  // Red dot if NEITHER key is set; hidden if at least one is set.
-  dot.style.display = (hasAPIKey() || hasOpenAIKey()) ? 'none' : 'inline-block';
+  // v2.22: AI runs on server-side keys, so there is nothing to nag about.
+  dot.style.display = 'none';
 }
 
 /* ---------- API KEY SETTINGS MODAL ---------- */
 function openAPIKeySettings() {
-  var anthInput = document.getElementById('apiKeyInput');
   var oaInput = document.getElementById('openaiKeyInput');
   var status = document.getElementById('apiKeyStatus');
-
-  // Anthropic field — masked placeholder if already saved
-  var anth = getStoredAPIKey();
-  anthInput.value = '';
-  anthInput.placeholder = anth
-    ? 'Saved (****' + anth.slice(-4) + ') \u2014 paste a new one to replace'
-    : 'sk-ant-api03-...';
 
   // OpenAI field
   var oa = getStoredOpenAIKey();
@@ -16570,20 +16554,10 @@ function openAPIKeySettings() {
     : 'sk-proj-... or sk-...';
 
   // Status line
-  var haveAnth = !!anth, haveOA = !!oa;
-  if (haveAnth && haveOA) {
-    status.textContent = 'Both keys active on this device.';
-    status.style.color = 'var(--success)';
-  } else if (haveOA) {
-    status.textContent = 'Label parsing active (OpenAI). Chat disabled until Anthropic key is saved.';
-    status.style.color = 'var(--warning)';
-  } else if (haveAnth) {
-    status.textContent = 'Chat active (Anthropic). Label parsing falls back to on-device OCR until OpenAI key is saved.';
-    status.style.color = 'var(--warning)';
-  } else {
-    status.textContent = 'No keys saved \u2014 AI features disabled.';
-    status.style.color = 'var(--text-muted)';
-  }
+  status.textContent = oa
+    ? 'AI runs on the server. OpenAI fallback key saved on this device.'
+    : 'AI runs on the server \u2014 nothing to set up.';
+  status.style.color = 'var(--text-muted)';
   document.getElementById('apiKeySettingsModal').classList.remove('hide');
 }
 
@@ -16593,15 +16567,13 @@ function closeAPIKeySettings(evt) {
 }
 
 function saveAPIKey() {
-  var anthInput = document.getElementById('apiKeyInput');
   var oaInput = document.getElementById('openaiKeyInput');
   var status = document.getElementById('apiKeyStatus');
 
-  var anthKey = (anthInput.value || '').trim();
   var oaKey = (oaInput.value || '').trim();
 
-  if (!anthKey && !oaKey) {
-    status.textContent = 'Paste at least one key, or tap Clear all to remove.';
+  if (!oaKey) {
+    status.textContent = 'Paste a key, or tap Clear all to remove.';
     status.style.color = 'var(--warning)';
     return;
   }
@@ -16609,14 +16581,6 @@ function saveAPIKey() {
   var saved = [];
   var errors = [];
 
-  if (anthKey) {
-    if (!anthKey.startsWith('sk-ant-')) {
-      errors.push("Anthropic key should start with sk-ant-.");
-    } else {
-      try { localStorage.setItem('hwood_anthropic_key', anthKey); saved.push('Anthropic'); }
-      catch (e) { errors.push('Could not save Anthropic key (localStorage blocked).'); }
-    }
-  }
   if (oaKey) {
     if (!oaKey.startsWith('sk-')) {
       errors.push("OpenAI key should start with sk-.");
@@ -16632,7 +16596,6 @@ function saveAPIKey() {
     return;
   }
 
-  anthInput.value = '';
   oaInput.value = '';
   status.textContent = 'Saved \u2713 ' + saved.join(' + ');
   status.style.color = 'var(--success)';
@@ -16655,45 +16618,35 @@ function clearAPIKey() {
   showToast('AI keys cleared', 'success');
 }
 
-/* ---------- LOW-LEVEL ANTHROPIC CALL ---------- */
-async function callAnthropic(messages, system, maxTokens) {
-  var apiKey = getStoredAPIKey();
-  if (!apiKey) throw new Error('No API key \u2014 open AI Settings and paste your Anthropic key.');
+/* ---------- ASK AI CALL (v2.22) ---------- */
+/* Server-side via the ask-ai Edge Function: it checks the caller is an active
+   app user (so it needs the signed-in user's JWT, not the anon key), routes
+   through OpenRouter -> Anthropic with the keys in Supabase secrets, and
+   returns the reply already flattened to { text }. */
+async function callAskAI(messages, system, maxTokens) {
+  if (typeof supabaseClient === 'undefined' || !supabaseClient) {
+    throw new Error('Not connected yet \u2014 try again in a moment.');
+  }
+  var sess = await supabaseClient.auth.getSession();
+  var tok = sess && sess.data && sess.data.session && sess.data.session.access_token;
+  if (!tok) throw new Error('Sign in to use Ask AI.');
 
-  var body = {
-    model: AI_MODEL,
-    max_tokens: maxTokens || 1024,
-    messages: messages,
-  };
+  var body = { messages: messages, max_tokens: maxTokens || 1024 };
   if (system) body.system = system;
 
-  var res = await fetch(AI_ENDPOINT, {
+  var res = await fetch(SUPABASE_URL + '/functions/v1/ask-ai', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': 'Bearer ' + tok,
     },
     body: JSON.stringify(body),
   });
-
-  if (!res.ok) {
-    var errTxt = '';
-    try { var j = await res.json(); errTxt = j.error && j.error.message ? j.error.message : JSON.stringify(j); }
-    catch (e) { errTxt = 'HTTP ' + res.status; }
-    throw new Error(errTxt);
-  }
-
-  var data = await res.json();
-  // Concatenate all text blocks from the response
-  var text = '';
-  if (data && Array.isArray(data.content)) {
-    for (var i = 0; i < data.content.length; i++) {
-      if (data.content[i].type === 'text') text += data.content[i].text;
-    }
-  }
-  return text;
+  var data = null;
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+  return (data && typeof data.text === 'string') ? data.text : '';
 }
 
 /* ---------- CLAUDE VISION: parse a photographed label ---------- */
@@ -17116,12 +17069,6 @@ async function sendAIMessage() {
 
   if (!text && !imgAttached) return;
 
-  if (!hasAPIKey()) {
-    appendChatBubble('assistant',
-      '<span style="color:var(--warning)">I need an Anthropic API key to answer. Open the header menu \u2192 AI Settings and paste your key.</span>');
-    return;
-  }
-
   // Build the user bubble (with image if attached)
   var userHtml = esc(text || '(image)');
   if (imgAttached) {
@@ -17165,7 +17112,7 @@ async function sendAIMessage() {
     'If asked to find an item, remind them to use the in-app search \u2014 you cannot directly modify the count.';
 
   try {
-    var reply = await callAnthropic(aiChatHistory, system, 1024);
+    var reply = await callAskAI(aiChatHistory, system, 1024);
     aiChatHistory.push({ role: 'assistant', content: reply });
     // Replace typing indicator with real response
     thinking.innerHTML = esc(reply).replace(/\n/g, '<br>');

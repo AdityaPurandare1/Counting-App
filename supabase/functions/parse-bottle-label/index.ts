@@ -4,9 +4,11 @@
 // structured JSON the mobile app can drop straight into the photo-entry form.
 //
 // Replaces the on-device Tesseract path AND the browser-side OpenAI path.
-// The Anthropic key never leaves Supabase secrets — set it once via:
+// Routed like KevaOS (../_shared/ai-router.ts): OpenRouter first on a pinned
+// Claude model with data_collection=deny, Anthropic direct as the fallback,
+// every call logged to platform_ai_usage_events. Keys stay in Supabase secrets:
 //
-//   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+//   supabase secrets set OPENROUTER_API_KEY=...   ANTHROPIC_API_KEY=...
 //
 // Why Sonnet 4.6: tradeoff chosen in favor of accuracy on harder labels
 // (faded print, partial views, ambiguous catalog matches) where Haiku 4.5
@@ -21,8 +23,8 @@
 // crossing Sonnet 4.6's 1024-token cache minimum.
 
 import { corsHeaders } from '../_shared/cors.ts';
+import { AiRouterError, routeClaude } from '../_shared/ai-router.ts';
 
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-sonnet-4-6';
 
 // Structured output schema. Mirrors the field shape the mobile app's
@@ -183,14 +185,6 @@ Deno.serve(async (req) => {
     return new Response('Method not allowed', { status: 405, headers: corsHeaders });
   }
 
-  const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
-  if (!apiKey) {
-    return new Response(
-      JSON.stringify({ error: 'ANTHROPIC_API_KEY not set in Edge Function secrets' }),
-      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-    );
-  }
-
   let body: RequestBody;
   try {
     body = await req.json();
@@ -211,118 +205,54 @@ Deno.serve(async (req) => {
   const { mediaType, data } = parseImage(body.image);
   const catalogText = buildCatalogText(body.carried, body.catalog);
 
-  // Cache placement: render order is tools → system → messages. We put the
-  // system prompt + catalog both in the system array, and put the
-  // cache_control marker on the LAST system block (the catalog). Because
-  // caching matches a prefix, this caches both blocks together using one
-  // breakpoint. The image lives in messages — outside the cached prefix —
-  // so it can change every call without invalidating anything.
-  const requestBody = {
-    model: MODEL,
-    max_tokens: 1024,
-    system: [
-      { type: 'text', text: SYSTEM_PROMPT },
-      {
-        type: 'text',
-        text: catalogText,
-        cache_control: { type: 'ephemeral' },
-      },
-    ],
-    output_config: {
-      format: {
-        type: 'json_schema',
-        schema: RESPONSE_SCHEMA,
-      },
-    },
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType, data },
-          },
-          {
-            type: 'text',
-            text: 'Analyze this label and return JSON matching the schema. Use the catalog above to set matchedId when confident.',
-          },
-        ],
-      },
-    ],
-  };
-
-  let upstream: Response;
+  // Cache placement: the system prompt + catalog are the stable prefix; the
+  // breakpoint sits on the catalog (the last system part), so both are cached
+  // together. The image lives in the message -- outside the cached prefix -- so
+  // it can change every call without invalidating anything.
+  let result;
   try {
-    upstream = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        // structured-outputs feature flag. The Anthropic SDKs (Python/TS)
-        // add this implicitly when output_config is present; raw HTTP
-        // needs to send it manually or the API rejects output_config.
-        'anthropic-beta': 'structured-outputs-2025-11-13',
-      },
-      body: JSON.stringify(requestBody),
+    result = await routeClaude({
+      flow: 'counting-photo-label',
+      model: MODEL,
+      maxTokens: 1024,
+      system: [{ text: SYSTEM_PROMPT }, { text: catalogText, cache: true }],
+      jsonSchema: { name: 'bottle_label', schema: RESPONSE_SCHEMA },
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: mediaType, data } },
+            {
+              type: 'text',
+              text: 'Analyze this label and return JSON matching the schema. Use the catalog above to set matchedId when confident.',
+            },
+          ],
+        },
+      ],
     });
   } catch (e) {
-    console.error('[parse-bottle-label] fetch failed', e);
-    return new Response(JSON.stringify({ error: 'Upstream request failed: ' + (e as Error).message }), {
-      status: 502,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  }
-
-  if (!upstream.ok) {
-    const errText = await upstream.text();
-    console.error('[parse-bottle-label] upstream', upstream.status, errText);
+    const status = e instanceof AiRouterError ? e.status : 0;
+    console.error('[parse-bottle-label] AI failed', status, (e as Error).message);
     return new Response(
-      JSON.stringify({ error: 'Anthropic API error', status: upstream.status, detail: errText.slice(0, 500) }),
-      { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+      JSON.stringify({ error: (e as Error).message, status }),
+      { status: status === 500 ? 500 : 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     );
   }
 
-  const data_resp = await upstream.json();
-
-  // The first text block holds the JSON when output_config.format is set.
-  // We log cache hits/misses so the caller (or supabase logs) can verify
-  // caching is actually working — if cache_read_input_tokens is zero on
-  // repeat calls, a silent invalidator is in the prefix.
-  const usage = data_resp.usage || {};
-  console.log('[parse-bottle-label] usage', JSON.stringify({
-    input: usage.input_tokens,
-    cache_read: usage.cache_read_input_tokens,
-    cache_creation: usage.cache_creation_input_tokens,
-    output: usage.output_tokens,
-  }));
-
-  const textBlock = (data_resp.content || []).find((b: { type: string }) => b.type === 'text');
-  if (!textBlock) {
-    return new Response(JSON.stringify({ error: 'No text block in Anthropic response', raw: data_resp }), {
-      status: 502,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    });
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(textBlock.text);
-  } catch {
-    return new Response(
-      JSON.stringify({ error: 'Anthropic returned non-JSON text', text: String(textBlock.text).slice(0, 500) }),
-      { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
-    );
-  }
+  // Log cache hits/misses so supabase logs show whether caching works -- if
+  // cache_read stays zero on repeat calls, a silent invalidator is in the prefix.
+  const usage = result.usage;
+  console.log('[parse-bottle-label] usage', JSON.stringify({ route: result.route, ...usage }));
 
   return new Response(
     JSON.stringify({
-      ...(parsed as Record<string, unknown>),
+      ...(result.json as Record<string, unknown>),
       _usage: {
-        input_tokens: usage.input_tokens,
-        cache_read_input_tokens: usage.cache_read_input_tokens,
-        cache_creation_input_tokens: usage.cache_creation_input_tokens,
-        output_tokens: usage.output_tokens,
+        route: result.route,
+        input_tokens: usage.inputTokens,
+        cache_read_input_tokens: usage.cacheReadTokens,
+        cache_creation_input_tokens: usage.cacheWriteTokens,
+        output_tokens: usage.outputTokens,
       },
     }),
     { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },

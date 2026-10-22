@@ -355,6 +355,16 @@ class MockDB {
       // "no match → create/suggest" path deterministically.
       return { status: 200, body: { name: 'Clase Azul Reposado', brand: 'Clase Azul', category: 'spirits', size: '750ml', vintage: '', details: '', confidence: 0.9 } };
     }
+    if (fn === 'ask-ai') {
+      // v2.22: like the real function, refuse the anon key -- only a signed-in
+      // user's JWT (the fixture's 'mocktok.<email>') gets an answer.
+      const auth = String((headers && (headers.authorization || headers.Authorization)) || '');
+      if (!/^Bearer mocktok\./.test(auth)) return { status: 401, body: { error: 'Invalid or expired JWT' } };
+      const msgs = (body && body.messages) || [];
+      const last = msgs[msgs.length - 1];
+      const said = last && typeof last.content === 'string' ? last.content : '(image)';
+      return { status: 200, body: { text: 'Mock answer to: ' + said, model: 'claude-sonnet-4-6' } };
+    }
     return { status: 200, body: {} };
   }
 

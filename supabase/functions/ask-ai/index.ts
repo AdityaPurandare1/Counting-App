@@ -17,10 +17,12 @@
 //
 // Photo parsing already solved this properly — parse-bottle-label holds
 // ANTHROPIC_API_KEY in Supabase secrets and the key never leaves the server.
-// This function puts the chat on that same footing, so both AI features run
-// off the one key:
+// This function puts the chat on that same footing. Both AI features route
+// like KevaOS (../_shared/ai-router.ts): OpenRouter first, data_collection=deny,
+// Anthropic direct as the fallback, every call logged to
+// platform_ai_usage_events:
 //
-//   supabase secrets set ANTHROPIC_API_KEY=sk-ant-...
+//   supabase secrets set OPENROUTER_API_KEY=...   ANTHROPIC_API_KEY=...
 //
 // AUTH MODEL — deliberately stricter than parse-bottle-label
 // Supabase's default verify_jwt accepts the ANON key, which is public (it
@@ -37,8 +39,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
-
-const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+import { AiRouterError, type ChatMessage, type ClaudeModel, routeClaude } from '../_shared/ai-router.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
 const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
@@ -47,8 +48,8 @@ const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '
 // Allowlist rather than passing the client's model straight through: the
 // caller is a browser, and an unbounded model string would let anyone select
 // the most expensive model available on the account.
-const DEFAULT_MODEL = 'claude-sonnet-4-6';
-const ALLOWED_MODELS = new Set([
+const DEFAULT_MODEL: ClaudeModel = 'claude-sonnet-4-6';
+const ALLOWED_MODELS = new Set<string>([
   'claude-sonnet-4-6',
   'claude-haiku-4-5',
 ]);
@@ -80,13 +81,6 @@ interface RequestBody {
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return reject(405, 'Method not allowed');
-
-  const apiKey = Deno.env.get('ANTHROPIC_API_KEY');
-  if (!apiKey) {
-    // Same failure text as parse-bottle-label so one missing secret reads the
-    // same way whichever AI feature surfaces it first.
-    return reject(500, 'ANTHROPIC_API_KEY not set in Edge Function secrets');
-  }
 
   // --- 1. Caller must present their OWN JWT, not just the anon key. ---
   const authHeader = req.headers.get('Authorization') || '';
@@ -162,54 +156,31 @@ Deno.serve(async (req) => {
     : 1024;
 
   const requestedModel = typeof body.model === 'string' ? body.model : '';
-  const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : DEFAULT_MODEL;
+  const model = (ALLOWED_MODELS.has(requestedModel) ? requestedModel : DEFAULT_MODEL) as ClaudeModel;
 
-  // --- 4. Proxy to Anthropic. The key stays here. ---
-  const payload: Record<string, unknown> = { model, max_tokens: maxTokens, messages };
-  if (system) payload.system = system;
-
-  let res: Response;
+  // --- 4. Route the call. The keys stay here. ---
+  let result;
   try {
-    res = await fetch(ANTHROPIC_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(payload),
+    result = await routeClaude({
+      flow: 'counting-ask-ai',
+      model,
+      maxTokens,
+      system: system ? [{ text: system }] : undefined,
+      messages: messages as ChatMessage[],
+      actorId: userResp.user.id,
+      metadata: { role: profile.role },
     });
   } catch (e) {
-    console.error('[ask-ai] upstream fetch failed:', e);
-    return reject(502, 'Could not reach the AI service — try again');
-  }
-
-  if (!res.ok) {
-    // Log the upstream detail server-side; return something safe. Upstream
-    // errors can echo request content, and a 401 here means OUR key is bad —
-    // not something to explain to a counter on the floor.
-    let detail = '';
-    try { detail = await res.text(); } catch { /* ignore */ }
-    console.error('[ask-ai] anthropic error', res.status, detail.slice(0, 500));
-    if (res.status === 429) return reject(429, 'AI is busy right now — try again in a moment');
-    if (res.status >= 500) return reject(502, 'The AI service is having trouble — try again');
+    // Upstream detail is logged server-side by the router; return something
+    // safe. A 401 here means OUR key is bad -- not something to explain to a
+    // counter on the floor.
+    const status = e instanceof AiRouterError ? e.status : 0;
+    if (status === 429) return reject(429, 'AI is busy right now — try again in a moment');
+    if (status === 500) return reject(500, (e as Error).message);
+    if (status >= 500 || status === 0) return reject(502, 'The AI service is having trouble — try again');
     return reject(502, 'AI request failed');
   }
 
-  let data: { content?: Array<{ type?: string; text?: string }> };
-  try {
-    data = await res.json();
-  } catch {
-    return reject(502, 'AI returned a malformed response');
-  }
-
-  // Flatten content blocks exactly as the old browser-side callAnthropic did.
-  let text = '';
-  if (Array.isArray(data.content)) {
-    for (const block of data.content) {
-      if (block && block.type === 'text' && typeof block.text === 'string') text += block.text;
-    }
-  }
-
-  return jsonResponse(200, { text, model });
+  // Already flattened to text, as the old browser-side callAnthropic did.
+  return jsonResponse(200, { text: result.text, model });
 });
