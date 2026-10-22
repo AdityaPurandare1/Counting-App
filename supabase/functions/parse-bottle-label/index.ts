@@ -4,11 +4,11 @@
 // structured JSON the mobile app can drop straight into the photo-entry form.
 //
 // Replaces the on-device Tesseract path AND the browser-side OpenAI path.
-// Routed like KevaOS (../_shared/ai-router.ts): OpenRouter first on a pinned
-// Claude model with data_collection=deny, Anthropic direct as the fallback,
-// every call logged to platform_ai_usage_events. Keys stay in Supabase secrets:
+// Routed through KevaOS's central AI connection (../_shared/ai-router.ts:
+// OpenRouter on a pinned model, data_collection=deny, usage logged), with
+// Anthropic direct as the fallback. Keys stay in Supabase secrets:
 //
-//   supabase secrets set OPENROUTER_API_KEY=...   ANTHROPIC_API_KEY=...
+//   supabase secrets set KEVAOS_COUNTING_AI_KEY=...   ANTHROPIC_API_KEY=...
 //
 // Why Sonnet 4.6: tradeoff chosen in favor of accuracy on harder labels
 // (faded print, partial views, ambiguous catalog matches) where Haiku 4.5
@@ -213,6 +213,7 @@ Deno.serve(async (req) => {
   try {
     result = await routeClaude({
       flow: 'counting-photo-label',
+      kevaosFlow: 'photo-label',
       model: MODEL,
       maxTokens: 1024,
       system: [{ text: SYSTEM_PROMPT }, { text: catalogText, cache: true }],

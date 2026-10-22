@@ -18,11 +18,11 @@
 // Photo parsing already solved this properly — parse-bottle-label holds
 // ANTHROPIC_API_KEY in Supabase secrets and the key never leaves the server.
 // This function puts the chat on that same footing. Both AI features route
-// like KevaOS (../_shared/ai-router.ts): OpenRouter first, data_collection=deny,
-// Anthropic direct as the fallback, every call logged to
-// platform_ai_usage_events:
+// through KevaOS's central AI connection (../_shared/ai-router.ts: OpenRouter
+// on a pinned model, data_collection=deny, usage logged), with Anthropic
+// direct as the fallback:
 //
-//   supabase secrets set OPENROUTER_API_KEY=...   ANTHROPIC_API_KEY=...
+//   supabase secrets set KEVAOS_COUNTING_AI_KEY=...   ANTHROPIC_API_KEY=...
 //
 // AUTH MODEL — deliberately stricter than parse-bottle-label
 // Supabase's default verify_jwt accepts the ANON key, which is public (it
@@ -163,6 +163,7 @@ Deno.serve(async (req) => {
   try {
     result = await routeClaude({
       flow: 'counting-ask-ai',
+      kevaosFlow: 'ask',
       model,
       maxTokens,
       system: system ? [{ text: system }] : undefined,

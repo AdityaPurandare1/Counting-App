@@ -2899,7 +2899,7 @@ html, body {
   <div class="modal-sheet" onclick="event.stopPropagation()">
     <h3>AI Settings <button class="close-x" onclick="closeAPIKeySettings()">X</button></h3>
     <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
-      Photo labels and Ask AI run on the server through the same AI router as KevaOS (OpenRouter, then Anthropic) &mdash; no key needed on this phone. Optional: an OpenAI key saved here is used for label photos only if the server cannot be reached.
+      Photo labels and Ask AI run on the server through KevaOS's AI connection &mdash; no key needed on this phone. Optional: an OpenAI key saved here is used for label photos only if the server cannot be reached.
     </div>
     <div class="form-group">
       <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(optional offline fallback)</span></label>
@@ -16513,9 +16513,9 @@ function confirmAsync(message) {
 /* ================================================================
    AI INTEGRATION (v2.22)
    - Label photos -> Edge Function parse-bottle-label; Ask AI -> Edge Function
-     ask-ai. Both route like KevaOS: OpenRouter first (pinned Claude,
-     data_collection=deny), Anthropic as the fallback. Keys live in Supabase
-     secrets, never on the phone.
+     ask-ai. Both go through KevaOS's central AI connection (OpenRouter,
+     data_collection=deny), with Anthropic direct as the fallback. Keys live
+     in server secrets, never on the phone.
    - Optional legacy fallback: an OpenAI key pasted on this device, used for
      label photos only when the Edge Function fails.
    ================================================================ */
@@ -16621,7 +16621,7 @@ function clearAPIKey() {
 /* ---------- ASK AI CALL (v2.22) ---------- */
 /* Server-side via the ask-ai Edge Function: it checks the caller is an active
    app user (so it needs the signed-in user's JWT, not the anon key), routes
-   through OpenRouter -> Anthropic with the keys in Supabase secrets, and
+   through KevaOS's AI connection (Anthropic fallback) with server-side keys, and
    returns the reply already flattened to { text }. */
 async function callAskAI(messages, system, maxTokens) {
   if (typeof supabaseClient === 'undefined' || !supabaseClient) {
