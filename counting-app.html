@@ -3179,7 +3179,7 @@ const REFERENCE_RENDER_CAP = 150;
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.22';
+const APP_VERSION = '2.23';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3596,6 +3596,65 @@ function currentVenueIdForPhoto() {
   return (appState.audit && appState.audit.venueId) || appState.currentVenueId || null;
 }
 
+/* v2.23 VENUE CATALOG. A venue whose kount_venues.catalog_mode is 'invoiced'
+   (Alphabet, from 10/26) counts from ITS OWN product list only:
+   kount_venue_catalog, built from its invoices + its invoice-based price list
+   + its house-made batches, with raw-invoice twins hidden (migrations 0109,
+   0110). Robert at Alphabet was offered four Krugs from the GLOBAL carried
+   list (every venue's stock), picked a twin, and variance read the real one
+   as missing. In this mode search, manual-entry suggestions, the List tab and
+   the photo matcher see only the catalog -- no carried tiers, no "Not in your
+   inventory list" fallback.
+   Every other venue is untouched ('all' mode = today's behaviour).
+   Fail-open: if the catalog cannot be loaded and nothing is cached, the
+   venue behaves as 'all' rather than leaving counters with an empty search.
+   Cached per venue in localStorage so offline counting keeps the same list. */
+let venueCatalogIds = null;
+let _venueCatalogFor = null;
+const VENUE_CATALOG_CACHE_KEY = 'hwood_venue_catalog_v1';
+function venueCatalogModeFor(venueId) {
+  const v = (appState.venues || []).find(function (x) { return x && x.id === venueId; });
+  return (v && v.catalogMode) || 'all';
+}
+function activeVenueCatalog() {
+  const vid = currentVenueIdForPhoto();
+  if (!vid || venueCatalogModeFor(vid) !== 'invoiced') return null;
+  if (_venueCatalogFor !== vid || !venueCatalogIds || venueCatalogIds.size === 0) return null;
+  return venueCatalogIds;
+}
+async function loadVenueCatalog(venueId) {
+  if (!venueId || venueCatalogModeFor(venueId) !== 'invoiced') return null;
+  if (_venueCatalogFor !== venueId) {
+    venueCatalogIds = null;
+    try {
+      const cache = JSON.parse(localStorage.getItem(VENUE_CATALOG_CACHE_KEY) || '{}');
+      if (Array.isArray(cache[venueId]) && cache[venueId].length) {
+        venueCatalogIds = new Set(cache[venueId].map(String));
+        _venueCatalogFor = venueId;
+      }
+    } catch (e) {}
+  }
+  try {
+    const r = await supabaseRest.query('kount_venue_catalog',
+      'venue_id=eq.' + encodeURIComponent(venueId) + '&hidden=eq.false&select=master_item_id&limit=10000');
+    if (!r.error && Array.isArray(r.data) && r.data.length > 0) {
+      const ids = r.data.map(function (x) { return String(x.master_item_id); });
+      venueCatalogIds = new Set(ids);
+      _venueCatalogFor = venueId;
+      try {
+        const cache = JSON.parse(localStorage.getItem(VENUE_CATALOG_CACHE_KEY) || '{}');
+        cache[venueId] = ids;
+        localStorage.setItem(VENUE_CATALOG_CACHE_KEY, JSON.stringify(cache));
+      } catch (e) {}
+    }
+  } catch (e) { /* keep the cached list, if any */ }
+  return activeVenueCatalog();
+}
+function refreshCountPageAfterCatalog() {
+  const page = document.querySelector('.page:not(.hide)');
+  if (page && page.id === 'page-count' && appState.audit) renderCountPage();
+}
+
 async function loadCarriedItemsFromSupabase() {
   if (SUPABASE_ANON_KEY === 'REPLACE_WITH_YOUR_ANON_KEY') return false;
   {
@@ -4008,6 +4067,30 @@ function searchItemMaster(query, limit) {
   const have = new Set();
   const useCarried = carriedSet.size > 0;
 
+  const cat = activeVenueCatalog();
+  if (cat) {
+    // v2.23: this venue is offered its own catalog only (see activeVenueCatalog).
+    // Searched over the full itemMaster, not the deduped display list: the
+    // catalog is already one row per product, and the display dedupe could
+    // hide the very row the catalog names.
+    const pushCat = function (sizedWanted, yearWanted) {
+      for (let i = 0; i < itemMaster.length && results.length < limit; i++) {
+        const item = itemMaster[i];
+        if (!item || have.has(item.id) || !cat.has(String(item.id))) continue;
+        if (hasSize(item) !== sizedWanted) continue;
+        if (matchesYear(item) !== yearWanted) continue;
+        if (!match(item)) continue;
+        results.push(item);
+        have.add(item.id);
+      }
+    };
+    pushCat(true, true);
+    pushCat(false, true);
+    pushCat(true, false);
+    pushCat(false, false);
+    return results;
+  }
+
   function pushFiltered(carriedWanted, sizedWanted, yearWanted) {
     // Search the DEDUPED display catalog so bare-name twins of size-suffixed
     // products don't surface as separate hits. Id-based lookups elsewhere
@@ -4097,7 +4180,7 @@ async function loadVenuesFromSupabase() {
     }
     const resp = await supabaseRest.query(
       'kount_venues',
-      'select=id,name,address,default_zones,store_aliases,ordinal,is_active'
+      'select=id,name,address,default_zones,store_aliases,ordinal,is_active,catalog_mode'
         + '&is_active=eq.true&order=ordinal'
     );
     if (resp.error || !resp.data) {
@@ -4155,6 +4238,8 @@ async function loadVenuesFromSupabase() {
         // which zones are admin-default vs counter-added (kount_venue_zones).
         _defaultZones: (r.default_zones && r.default_zones.length) ? r.default_zones.slice() : (prev && prev._defaultZones ? prev._defaultZones.slice() : []),
         _storeAliases: r.store_aliases || [],
+        // v2.23: 'invoiced' = count from kount_venue_catalog only (Alphabet).
+        catalogMode: r.catalog_mode || (prev && prev.catalogMode) || 'all',
       };
     });
 
@@ -4170,6 +4255,9 @@ async function loadVenuesFromSupabase() {
         // a cold open (the boot-time zone read races the login and comes back
         // empty) and any zone another phone added while realtime was down.
         loadVenueZonesFromSupabase(fresh.id).catch(function() {});
+        // v2.23: the venue may have just switched catalog mode (or this is the
+        // first venue read after a cold open).
+        loadVenueCatalog(fresh.id).then(refreshCountPageAfterCatalog).catch(function() {});
       } else {
         showToast('The venue you were on was removed by an admin', 'warn');
         appState.currentVenue = null;
@@ -6250,6 +6338,7 @@ async function joinNetworkedAudit(rawCode) {
   // empty barcode cache until the 60s periodic retry. Same refresh here.
   loadItemMaster().catch(function() {});
   loadVenueItemIds(currentVenueIdForPhoto()).catch(function() {});
+  loadVenueCatalog(currentVenueIdForPhoto()).then(refreshCountPageAfterCatalog).catch(function() {});
   loadCarriedItemsFromSupabase().catch(function() {});
   loadApprovedUpcMappings(true).catch(function() {});
   showToast('Joined audit ' + audit.join_code + ' at ' + audit.venue_name, 'success');
@@ -8948,6 +9037,7 @@ function createAndStartAudit(venue, opts) {
   // drive search/scan against out-of-date inventory.
   loadItemMaster().catch(function() {});
   loadVenueItemIds(currentVenueIdForPhoto()).catch(function() {});
+  loadVenueCatalog(currentVenueIdForPhoto()).then(refreshCountPageAfterCatalog).catch(function() {});
   loadCarriedItemsFromSupabase().catch(function() {});
   loadApprovedUpcMappings(true).catch(function() {});
 
@@ -9350,6 +9440,12 @@ function setCountView(v) {
    is empty (no admin curation yet) we fall back to the whole catalog so the
    list is never blank. */
 function getCarriedMasterItems() {
+  // v2.23: a venue on its own catalog lists exactly that catalog.
+  const cat = activeVenueCatalog();
+  if (cat) {
+    return itemMaster.filter(function (i) { return i && cat.has(String(i.id)); })
+      .sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+  }
   // Derive from the DEDUPED display catalog so the List tab and zone reference
   // show one row per product (the properly-sized variant), not the bare-name
   // twin too. Full itemMaster stays the source for id-based lookups.
@@ -9646,7 +9742,8 @@ function renderGuidedMode() {
   // (+/-, qty edit, move, scan/photo/manual add, tap-to-count) is suppressed.
   const isViewer = isCountReadOnly();
   const isLocked = appState.audit.status === 'submitted' || isViewer;
-  const totalItems = itemMaster.length;
+  const _venueCat = activeVenueCatalog();
+  const totalItems = _venueCat ? _venueCat.size : itemMaster.length;
   const countedCount = countedIds.size;
 
   let html = '';
@@ -9858,7 +9955,7 @@ function doGuidedSearch(value) {
     return;
   }
 
-  const showDivider = carriedSet.size > 0;
+  const showDivider = carriedSet.size > 0 && !activeVenueCatalog();
   let lastCarried = null;
   resultsEl.innerHTML = matches.map(item => {
     const carried = carriedSet.has(String(item.id));
@@ -12842,7 +12939,7 @@ function onManualSearch(value) {
   // Carried items first, then a divider + non-carried catalog matches so
   // countable variants that aren't flagged "carried" still surface.
   const matches = searchItemMaster(value, 8);
-  const showDivider = carriedSet.size > 0;
+  const showDivider = carriedSet.size > 0 && !activeVenueCatalog();
   let lastCarried = null;
   document.getElementById('manualSuggestions').innerHTML = matches.map(item => {
     const carried = carriedSet.has(String(item.id));
@@ -16918,8 +17015,16 @@ async function parseLabelWithClaude(imageDataUrl) {
   // second list, so up to 500 venue items reach Claude before anything else.
   // Still deterministic per venue (sorted within each group), so the Edge
   // Function's prompt cache keeps hitting within a session.
-  const carriedPayload = venue.concat(carried).slice(0, 250).map(toPayload);
-  const otherPayload   = venue.slice(250).concat(other).slice(0, 250).map(toPayload);
+  let carriedPayload = venue.concat(carried).slice(0, 250).map(toPayload);
+  let otherPayload   = venue.slice(250).concat(other).slice(0, 250).map(toPayload);
+  // v2.23: a venue on its own catalog lets Claude match ONLY that catalog, so a
+  // photo can no longer land on a twin from another venue's stock.
+  const catalogRef = activeVenueCatalog();
+  if (catalogRef) {
+    const inCat = allItems.filter(function (it) { return catalogRef.has(String(it.id)); }).sort(sortByName);
+    carriedPayload = inCat.slice(0, 250).map(toPayload);
+    otherPayload = inCat.slice(250, 500).map(toPayload);
+  }
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
   const res = await fetch(url, {
