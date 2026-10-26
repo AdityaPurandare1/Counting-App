@@ -11,12 +11,19 @@
 //        KEVAOS_COUNTING_AI_KEY   (required for this step; unset = skipped)
 //        KEVAOS_AI_URL            (optional, default https://kevaos.ai/api/external/counting/ai)
 //
-//   2. Anthropic direct with our own key (ANTHROPIC_API_KEY) when KevaOS is not
-//      configured, unreachable, refuses, or returns unusable output. Structured
-//      output is enforced natively on this path.
+//   2. OpenRouter direct with the OpenRouter key held in this project's Edge
+//      Function secrets (OPENROUTER_API_KEY), when KevaOS is not configured or
+//      fails. Same Claude models (anthropic/claude-sonnet-4.6 / haiku-4.5),
+//      structured output via response_format json_schema, and KevaOS's policy
+//      provider.data_collection = 'deny'. Added 2026-10-26: the Anthropic
+//      account ran out of credits and photo labels fell back to on-device OCR.
+//
+//   3. Anthropic direct with our own key (ANTHROPIC_API_KEY) when neither of
+//      the above is configured or both fail. Structured output is enforced
+//      natively on this path.
 //
 // KevaOS logs the calls it serves; this module logs only what KevaOS did not:
-// a failed KevaOS attempt, and every Anthropic-direct call.
+// a failed KevaOS attempt, and every OpenRouter / Anthropic-direct call.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
@@ -24,6 +31,13 @@ export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5';
 
 const KEVAOS_DEFAULT_URL = 'https://kevaos.ai/api/external/counting/ai';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+
+// The same models, by OpenRouter's ids (both take images and structured output).
+const OPENROUTER_MODEL: Record<ClaudeModel, string> = {
+  'claude-sonnet-4-6': 'anthropic/claude-sonnet-4.6',
+  'claude-haiku-4-5': 'anthropic/claude-haiku-4.5',
+};
 
 // $ per million tokens, for the Anthropic-direct usage rows (Anthropic does not report cost).
 const PRICE: Record<ClaudeModel, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
@@ -34,6 +48,7 @@ const PRICE: Record<ClaudeModel, { input: number; output: number; cacheRead: num
 // KevaOS gets a shorter leash so a slow attempt still leaves time for the
 // Anthropic fallback inside the Edge Function's wall clock.
 const KEVAOS_TIMEOUT_MS = 45_000;
+const OPENROUTER_TIMEOUT_MS = 50_000;
 const ANTHROPIC_TIMEOUT_MS = 60_000;
 
 export type TextBlock = { type: 'text'; text: string };
@@ -72,12 +87,14 @@ export interface AiResult {
   text: string;
   /** Parsed reply, present when jsonSchema was given. */
   json?: unknown;
-  route: 'kevaos' | 'anthropic';
+  route: Route;
   /** The model that answered (KevaOS reports the one its gateway used). */
   model: string;
   /** Token usage of the Anthropic-direct path; zero when KevaOS served the call (it logs its own). */
   usage: AiUsage;
 }
+
+export type Route = 'kevaos' | 'openrouter' | 'anthropic';
 
 export class AiRouterError extends Error {
   constructor(message: string, readonly status: number) {
@@ -94,6 +111,8 @@ interface Attempt {
   usage: AiUsage;
   requestId?: string | null;
   error?: string;
+  /** Provider-reported cost (OpenRouter returns it with usage.include). */
+  costUsd?: number;
 }
 
 const ZERO_USAGE: AiUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
@@ -240,6 +259,123 @@ async function callAnthropic(req: AiRequest, key: string): Promise<Attempt> {
   return attempt;
 }
 
+/** One Anthropic-style content block in OpenRouter's (OpenAI chat) shape. */
+function toOpenRouterPart(b: ContentBlock): Record<string, unknown> {
+  if (b.type === 'image') {
+    return { type: 'image_url', image_url: { url: 'data:' + b.source.media_type + ';base64,' + b.source.data } };
+  }
+  return { type: 'text', text: b.text };
+}
+
+/**
+ * The OpenRouter request body. System parts become one system message whose
+ * cached part carries cache_control (OpenRouter passes it through to Anthropic,
+ * so the long catalog prefix is still prompt-cached). Structured output uses
+ * response_format json_schema; require_parameters keeps the request off any
+ * provider that cannot honour it, and data_collection 'deny' matches KevaOS.
+ */
+export function buildOpenRouterBody(req: AiRequest): Record<string, unknown> {
+  const messages: Array<Record<string, unknown>> = [];
+  if (req.system && req.system.length > 0) {
+    messages.push({
+      role: 'system',
+      content: req.system.map((s) =>
+        s.cache ? { type: 'text', text: s.text, cache_control: { type: 'ephemeral' } } : { type: 'text', text: s.text }
+      ),
+    });
+  }
+  for (const m of req.messages) {
+    messages.push({
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : m.content.map(toOpenRouterPart),
+    });
+  }
+  const body: Record<string, unknown> = {
+    model: OPENROUTER_MODEL[req.model],
+    max_tokens: req.maxTokens,
+    messages,
+    provider: { data_collection: 'deny', require_parameters: !!req.jsonSchema },
+    usage: { include: true },
+  };
+  if (req.jsonSchema) {
+    body.response_format = {
+      type: 'json_schema',
+      json_schema: { name: req.jsonSchema.name, strict: true, schema: req.jsonSchema.schema },
+    };
+  }
+  return body;
+}
+
+async function callOpenRouter(req: AiRequest, key: string): Promise<Attempt> {
+  const model = OPENROUTER_MODEL[req.model];
+  let res: Response;
+  try {
+    res = await fetch(OPENROUTER_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + key,
+        'HTTP-Referer': 'https://adityapurandare1.github.io/Counting-App/',
+        'X-Title': 'kOunt counting',
+      },
+      body: JSON.stringify(buildOpenRouterBody(req)),
+      signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { ok: false, status: 0, model, usage: { ...ZERO_USAGE }, error: 'fetch: ' + (e as Error).message };
+  }
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+    return { ok: false, status: res.status, model, usage: { ...ZERO_USAGE }, error: detail.slice(0, 300) };
+  }
+  let data: Record<string, unknown>;
+  try {
+    data = await res.json();
+  } catch {
+    return { ok: false, status: res.status, model, usage: { ...ZERO_USAGE }, error: 'non-JSON response' };
+  }
+  // OpenRouter can answer 200 with an error object (e.g. a provider failure mid-stream).
+  if (data.error) {
+    const err = data.error as Record<string, unknown>;
+    return { ok: false, status: num(err.code) || 502, model, usage: { ...ZERO_USAGE }, error: String(err.message || 'error').slice(0, 300) };
+  }
+  const u = (data.usage || {}) as Record<string, unknown>;
+  const details = (u.prompt_tokens_details || {}) as Record<string, unknown>;
+  const cached = num(details.cached_tokens);
+  const usage: AiUsage = {
+    // prompt_tokens includes the cached part; keep the two apart like the Anthropic path.
+    inputTokens: Math.max(0, num(u.prompt_tokens) - cached),
+    outputTokens: num(u.completion_tokens),
+    cacheReadTokens: cached,
+    cacheWriteTokens: num(details.cache_write_tokens),
+  };
+  const choices = Array.isArray(data.choices) ? data.choices as Array<Record<string, unknown>> : [];
+  const msg = (choices[0]?.message || {}) as Record<string, unknown>;
+  let text = '';
+  if (typeof msg.content === 'string') text = msg.content;
+  else if (Array.isArray(msg.content)) {
+    for (const p of msg.content as Array<{ type?: string; text?: string }>) {
+      if (p && p.type === 'text' && typeof p.text === 'string') text += p.text;
+    }
+  }
+  const answeredBy = typeof data.model === 'string' && data.model ? data.model : model;
+  if (!text) return { ok: false, status: 200, model: answeredBy, usage, error: 'empty reply' };
+  const cost = Number(u.cost);
+  const attempt: Attempt = {
+    ok: true, status: 200, text, model: answeredBy, usage,
+    requestId: (data.id as string) || null,
+    costUsd: Number.isFinite(cost) && cost >= 0 ? cost : undefined,
+  };
+  if (req.jsonSchema) {
+    try {
+      attempt.json = parseJsonReply(text);
+    } catch {
+      return { ...attempt, ok: false, error: 'reply was not valid JSON' };
+    }
+  }
+  return attempt;
+}
+
 /** Business date as KevaOS buckets it: before 5 AM UTC-shifted counts as the previous day. */
 function businessDate(d = new Date()): string {
   return new Date(d.getTime() - 5 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -248,11 +384,12 @@ function businessDate(d = new Date()): string {
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
 /** Fire-and-forget usage row. Never throws into the caller. */
-function logAttempt(req: AiRequest, route: 'kevaos' | 'anthropic', a: Attempt, latencyMs: number, extra: Record<string, unknown>) {
+function logAttempt(req: AiRequest, route: Route, a: Attempt, latencyMs: number, extra: Record<string, unknown>) {
   const url = Deno.env.get('SUPABASE_URL');
   const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
   if (!url || !key) return;
-  const costUsd = route === 'anthropic' ? estimateCost(req.model, a.usage) : 0;
+  const costUsd = route === 'anthropic' ? estimateCost(req.model, a.usage)
+    : route === 'openrouter' ? (a.costUsd ?? estimateCost(req.model, a.usage)) : 0;
   const row = {
     business_date: businessDate(),
     actor_id: req.actorId ?? null,
@@ -290,17 +427,22 @@ function logAttempt(req: AiRequest, route: 'kevaos' | 'anthropic', a: Attempt, l
 }
 
 /**
- * Run one Claude request: KevaOS's central AI connection first, Anthropic
- * direct on any failure. Throws AiRouterError (with the last upstream status)
- * only when every configured path fails.
+ * Run one Claude request: KevaOS's central AI connection first, then OpenRouter
+ * direct, then Anthropic direct -- each tried only when its secret is set, and
+ * the next one on any failure. Throws AiRouterError (with the last upstream
+ * status) only when every configured path fails.
  */
 export async function routeClaude(req: AiRequest): Promise<AiResult> {
   const kvKey = (Deno.env.get('KEVAOS_COUNTING_AI_KEY') || '').trim();
   const kvUrl = (Deno.env.get('KEVAOS_AI_URL') || '').trim() || KEVAOS_DEFAULT_URL;
+  const orKey = (Deno.env.get('OPENROUTER_API_KEY') || '').trim();
   const anKey = (Deno.env.get('ANTHROPIC_API_KEY') || '').trim();
-  if (!kvKey && !anKey) throw new AiRouterError('No AI configured in Edge Function secrets (KEVAOS_COUNTING_AI_KEY or ANTHROPIC_API_KEY)', 500);
+  if (!kvKey && !orKey && !anKey) {
+    throw new AiRouterError('No AI configured in Edge Function secrets (KEVAOS_COUNTING_AI_KEY, OPENROUTER_API_KEY or ANTHROPIC_API_KEY)', 500);
+  }
 
   let fellBackFrom: string | null = null;
+  let lastStatus = 502;
   if (kvKey) {
     const t0 = Date.now();
     const a = await callKevaos(req, kvKey, kvUrl);
@@ -309,10 +451,24 @@ export async function routeClaude(req: AiRequest): Promise<AiResult> {
       return { text: a.text || '', json: a.json, route: 'kevaos', model: a.model, usage: a.usage };
     }
     logAttempt(req, 'kevaos', a, Date.now() - t0, {});
-    console.warn('[ai-router] kevaos failed, falling back to anthropic:', a.status, a.error);
+    console.warn('[ai-router] kevaos failed, falling back:', a.status, a.error);
     fellBackFrom = 'kevaos ' + (a.status || 'network') + ': ' + (a.error || '').slice(0, 120);
-    if (!anKey) throw new AiRouterError('AI request failed', a.status || 502);
+    lastStatus = a.status || 502;
   }
+
+  if (orKey) {
+    const t0 = Date.now();
+    const o = await callOpenRouter(req, orKey);
+    logAttempt(req, 'openrouter', o, Date.now() - t0, fellBackFrom ? { fell_back_from: fellBackFrom } : {});
+    if (o.ok) {
+      return { text: o.text || '', json: o.json, route: 'openrouter', model: o.model, usage: o.usage };
+    }
+    console.warn('[ai-router] openrouter failed, falling back:', o.status, o.error);
+    fellBackFrom = 'openrouter ' + (o.status || 'network') + ': ' + (o.error || '').slice(0, 120);
+    lastStatus = o.status || 502;
+  }
+
+  if (!anKey) throw new AiRouterError('AI request failed', lastStatus);
 
   const t0 = Date.now();
   const b = await callAnthropic(req, anKey);
