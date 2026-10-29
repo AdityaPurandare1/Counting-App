@@ -168,11 +168,17 @@ test.describe('instant scan: known barcode opens the entry sheet (v1.97)', () =>
     await page.locator('#guidedWrongBarcodeBtn').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'hidden' });
 
-    // Tap the CORRECT bottle from search → opens its entry AND queues the fix.
+    // Tap the CORRECT bottle from search → opens its entry. The fix is queued
+    // when that count is CONFIRMED (opening alone used to file it against
+    // whatever was opened next).
     await page.fill('#guidedSearchInput', 'Campari');
     await page.locator('#guidedSearchResults .c-item').filter({ hasText: 'Campari 1L' }).first()
       .locator('.c-name').click();
     await page.locator('#guidedEntryModal').waitFor({ state: 'visible' });
+    await page.waitForTimeout(200);
+    expect(db.t.upc_mappings.filter(r => r.barcode_raw === KNOWN_UPC).length).toBe(0);
+    await page.fill('#guidedQty', '1');
+    await page.locator('#guidedConfirmBtn').click();
 
     // A pending barcode→Campari correction landed in the admin queue.
     await expect.poll(() => db.t.upc_mappings.filter(r => r.barcode_raw === KNOWN_UPC).length).toBeGreaterThan(0);

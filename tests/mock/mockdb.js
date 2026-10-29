@@ -16,6 +16,8 @@ function uuid() {
   });
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function err(status, code, message) {
   return { status, body: { code: code, message: message, details: null, hint: null } };
 }
@@ -178,6 +180,22 @@ class MockDB {
   insert(table, headers, body) {
     const rows = Array.isArray(body) ? body : [body];
     const inserted = [];
+
+    // kount_recounts: master_item_id is a uuid column, and the table has a
+    // unique index on (audit_id, coalesce(item_id::text, lower(item_name)),
+    // coalesce(zone,'')). Checked for every row up front so an array insert
+    // is all-or-nothing, as one INSERT statement is in Postgres.
+    if (table === 'kount_recounts') {
+      const rk = (r) => [r.audit_id, r.item_id != null ? String(r.item_id) : String(r.item_name || '').toLowerCase(), r.zone || ''].join('|');
+      const seen = new Set((this.t.kount_recounts || []).map(rk));
+      for (const r of rows) {
+        if (r.master_item_id != null && !UUID_RE.test(String(r.master_item_id)))
+          return err(400, '22P02', 'invalid input syntax for type uuid: "' + r.master_item_id + '"');
+        if (seen.has(rk(r)))
+          return err(409, '23505', 'duplicate key value violates unique constraint "kount_recounts_audit_item_zone_key"');
+        seen.add(rk(r));
+      }
+    }
     for (const raw of rows) {
       const row = Object.assign({}, raw);
 
@@ -247,6 +265,8 @@ class MockDB {
   }
 
   update(table, headers, qs, body) {
+    if (table === 'kount_recounts' && body && body.master_item_id != null && !UUID_RE.test(String(body.master_item_id)))
+      return err(400, '22P02', 'invalid input syntax for type uuid: "' + body.master_item_id + '"');
     const q = parseQuery(qs);
     const rows = this.t[table] || [];
     const hit = rows.filter(function (r) { return q.filters.every(function (f) { return matchFilter(r, f); }); });

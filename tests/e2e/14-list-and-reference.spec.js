@@ -74,6 +74,13 @@ test.describe('List tab + zone reference list (v1.72)', () => {
       const row = db.t.kount_entries.find(r => r.item_name === 'Belvedere 1L');
       return row ? row.issue : null;
     }).toBe('not-in-craftable');
+
+    // v2.24: the counted card's issue tag shows the label too, never the token.
+    const card = page.locator('#guidedContent .c-item', { hasText: 'Belvedere 1L' }).first();
+    await expect(card).toContainText('not in inventory');
+    await expect(card).not.toContainText('not-in-craftable');
+    expect(await page.evaluate(() => [issueLabel('not-in-craftable'), issueLabel('no-upc'), issueLabel('wrong-vintage'), issueLabel(null)]))
+      .toEqual(['not in inventory', 'no UPC', 'wrong vintage', '']);
   });
 
   test('This Zone shows a non-empty reference list when nothing is counted', async ({ page }) => {

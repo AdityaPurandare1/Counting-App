@@ -5,7 +5,10 @@ const { test, expect, startAuditAs, addManual, M } = require('../fixtures');
  * closeCount1() generates the recount list and syncRecountsToSupabase() writes
  * it to kount_recounts. M1 made those rows carry a master_item_id:
  *   - rows derived from counted catalog items carry the item's master id, and
- *   - rows derived from an AVT/name report carry null.
+ *   - rows derived from an AVT/name report carry the master id the AVT name
+ *     resolves to (they used to carry null, and compute_avt_for_audit ignores
+ *     recounts without a master_item_id, so a Count Corrected never reached
+ *     the final report).
  * The rest of the suite only proves the analogous kount_entries.master_item_id
  * path; these tests assert the kount_recounts path that M1 actually changed.
  */
@@ -42,15 +45,15 @@ test.describe('M1: kount_recounts.master_item_id', () => {
     expect(row.item_id).toBeNull();
   });
 
-  test('AVT/name-derived recount row carries master_item_id = null', async ({ page, db }) => {
+  test('AVT/name-derived recount row carries the resolved master id', async ({ page, db }) => {
     await startAuditAs(page, 'manager');
 
     // Count a catalog item so the audit is non-empty. v1.70: closeCount1
     // computes variance and builds the recount list purely from the AVT rows
     // (generateRecountFromAvt) — it does NOT fold in counted-derived rows. AVT
-    // rows are name-derived from the variance report and carry no master id, so
-    // the synced recount row must have master_item_id = null even though the
-    // counted entry it corresponds to DID link a master.
+    // rows are name-derived from the variance report; closeCount1 resolves the
+    // name to its master id (findMasterIdForAvtItem) so the synced row carries
+    // it — compute_avt_for_audit only applies recounts with a master_item_id.
     await addManual(page, 'Belvedere 1L', 3);
 
     // The mock's compute_avt_for_audit stub emits a HIGH-variance Belvedere row
@@ -65,8 +68,8 @@ test.describe('M1: kount_recounts.master_item_id', () => {
 
     const avtRow = db.t.kount_recounts.find(r => r.item_name === 'Belvedere 1L');
     expect(avtRow, 'the AVT-flagged item must produce a recount row').toBeTruthy();
-    // M1: AVT/name-derived rows legitimately carry null.
-    expect(avtRow.master_item_id).toBeNull();
+    // The AVT name resolves to its catalog master, which must ride along.
+    expect(avtRow.master_item_id).toBe(M.belv);
     expect(avtRow.item_id).toBeNull();
   });
 });
