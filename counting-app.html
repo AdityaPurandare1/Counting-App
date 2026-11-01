@@ -3195,15 +3195,15 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
    own limit (searchItemMaster's `limit`). */
 const REFERENCE_RENDER_CAP = 150;
 /* v2.26: venues whose List tab shows the WHOLE beverage catalog A-Z, every
-   row, instead of the first REFERENCE_RENDER_CAP carried items. Poppy only,
-   at Aditya's request (11/1, live count). Off-screen rows cost little thanks
-   to content-visibility on .full-list rows. */
-const FULL_CATALOG_LIST_VENUES = new Set(['v5']);
+   row, instead of the first REFERENCE_RENDER_CAP carried items. Poppy (v5)
+   and Little Luck (v11), at Aditya's request (11/1, live counts). Off-screen
+   rows cost little thanks to content-visibility on .full-list rows. */
+const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.26';
+const APP_VERSION = '2.27';
 
 /* ================================================================
    SUPABASE INTEGRATION

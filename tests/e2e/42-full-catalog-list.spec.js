@@ -1,6 +1,6 @@
 const { test, expect, startAuditAs } = require('../fixtures');
 
-/* v2.26: a venue in FULL_CATALOG_LIST_VENUES (Poppy, 'v5', in production)
+/* v2.26: a venue in FULL_CATALOG_LIST_VENUES (Poppy 'v5' and, from v2.27, Little Luck 'v11')
    lists the whole catalog on the List tab, every row, instead of the first
    REFERENCE_RENDER_CAP carried items. Other venues keep the carried list.
    The mock venue is 'v-delilah', so the specs add it to the set. */
@@ -46,6 +46,6 @@ test.describe('Full-catalog List tab (v2.26)', () => {
     await expect(page.locator('#guidedContent .list-header h3')).toHaveText('Carried items');
     await expect(page.locator('#guidedContent .full-list')).toHaveCount(0);
     await expect(page.locator('#guidedContent .c-item', { hasText: 'Don Julio 1942' })).toHaveCount(0);
-    expect(await page.evaluate(() => FULL_CATALOG_LIST_VENUES.has('v5') && FULL_CATALOG_LIST_VENUES.size === 1)).toBe(true);
+    expect(await page.evaluate(() => [...FULL_CATALOG_LIST_VENUES].sort())).toEqual(['v11', 'v5']);
   });
 });
