@@ -694,6 +694,12 @@ html, body {
 }
 
 /* ---------- COUNT ITEM ROW ---------- */
+/* Full-catalog List tab (FULL_CATALOG_LIST_VENUES): thousands of rows, so the
+   browser skips layout and paint for rows that are off screen. */
+.full-list .c-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 68px;
+}
 /* Count-list row — prototype's lighter card: 1px border, no drop shadow,
    14px radius, softer status indication (no gradient wash). */
 .c-item {
@@ -3188,11 +3194,16 @@ const PAR_LEVELS = { wine: 2, spirits: 3, beer: 6, food: 5, other: 2 };
    full; only the reference/browse lists are capped. Search results have their
    own limit (searchItemMaster's `limit`). */
 const REFERENCE_RENDER_CAP = 150;
+/* v2.26: venues whose List tab shows the WHOLE beverage catalog A-Z, every
+   row, instead of the first REFERENCE_RENDER_CAP carried items. Poppy only,
+   at Aditya's request (11/1, live count). Off-screen rows cost little thanks
+   to content-visibility on .full-list rows. */
+const FULL_CATALOG_LIST_VENUES = new Set(['v5']);
 
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.25';
+const APP_VERSION = '2.26';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -10103,10 +10114,20 @@ function renderReferenceRow(item, isLocked) {
     '</div>';
 }
 
+/* Every in-scope catalog item (deduped display catalog), A-Z. */
+function getFullCatalogItems() {
+  const source = (itemMasterDisplay && itemMasterDisplay.length) ? itemMasterDisplay : itemMaster;
+  return source.filter(function (i) { return i && i.id; })
+    .sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+}
+
 /* List tab (Task 3): the venue's carried items as full bottles, one row per
-   master, tap to start counting in the current zone. */
+   master, tap to start counting in the current zone. A FULL_CATALOG_LIST_VENUES
+   venue lists the whole catalog instead, uncapped. */
 function renderListTab() {
-  const items = getCarriedMasterItems();
+  const vid = currentVenueIdForPhoto();
+  const fullList = !!vid && FULL_CATALOG_LIST_VENUES.has(vid) && !activeVenueCatalog();
+  const items = fullList ? getFullCatalogItems() : getCarriedMasterItems();
   // venue_manager sees the read-only carried list (no add affordances).
   const isLocked = (appState.audit && appState.audit.status === 'submitted')
     || isCountReadOnly();
@@ -10115,7 +10136,12 @@ function renderListTab() {
       '<svg width="36" height="36" viewBox="0 0 36 36" fill="none" stroke="var(--text-dim)" stroke-width="1.5"><rect x="6" y="4" width="24" height="28" rx="3"/><path d="M12 12h12M12 18h12M12 24h6"/></svg>' +
       '<p>No carried items for this venue yet.</p></div>';
   }
-  let h = '<div class="list-header"><h3>Carried items</h3><span class="total">' + items.length + '</span></div>';
+  let h = '<div class="list-header"><h3>' + (fullList ? 'All items' : 'Carried items') +
+    '</h3><span class="total">' + items.length + '</span></div>';
+  if (fullList) {
+    return h + '<div class="full-list">' +
+      items.map(function (item) { return renderReferenceRow(item, isLocked); }).join('') + '</div>';
+  }
   // Cap the rendered rows — rendering the full carried catalog (hundreds–
   // thousands of rows) on every render was the live slowness complaint.
   const shown = items.slice(0, REFERENCE_RENDER_CAP);
