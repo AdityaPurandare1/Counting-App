@@ -1,7 +1,7 @@
 // Run: npx deno test --allow-env supabase/functions/_shared/ai-router.test.ts
 // The network is mocked; SUPABASE_URL is unset so no usage row is written.
 
-import { AiRouterError, buildKevaosBody, buildOpenRouterBody, jsonInstruction, parseJsonReply, routeClaude } from './ai-router.ts';
+import { AiRouterError, buildAnthropicBody, buildKevaosBody, buildOpenRouterBody, hasDocument, jsonInstruction, parseJsonReply, routeClaude } from './ai-router.ts';
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error('assertion failed: ' + msg);
@@ -293,4 +293,65 @@ Deno.test('buildOpenRouterBody: plain chat has no response_format and does not r
   eq(b.response_format, undefined, 'no response_format');
   eq(b.provider, { data_collection: 'deny', require_parameters: false }, 'provider');
   eq(b.usage, { include: true }, 'cost reported');
+});
+
+// ---- PDF documents + Opus 5.5 (kount-read-purchase-doc), added 2026-11-02 ----
+
+const pdfReq = {
+  flow: 'kount-read-purchase-doc', kevaosFlow: 'ask' as const, model: 'claude-opus-5-5' as const, maxTokens: 100,
+  messages: [{ role: 'user' as const, content: [
+    { type: 'document' as const, source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: 'JVBERi0x' }, title: 'INV-1.pdf' },
+    { type: 'text' as const, text: 'read it' },
+  ] }],
+  jsonSchema: schema,
+};
+
+Deno.test('hasDocument: only true when a document block is present', () => {
+  assert(hasDocument(pdfReq), 'pdf request');
+  assert(!hasDocument(chat), 'plain chat');
+});
+
+Deno.test('document: OpenRouter gets a file part with a pdf data URL, on the Opus 5.5 id', () => {
+  const b = buildOpenRouterBody(pdfReq);
+  eq(b.model, 'anthropic/claude-opus-5.5', 'model id');
+  const msg = (b.messages as Array<{ content: Array<Record<string, unknown>> }>)[0];
+  eq(msg.content[0], { type: 'file', file: { filename: 'INV-1.pdf', file_data: 'data:application/pdf;base64,JVBERi0x' } }, 'file part');
+  eq(msg.content[1], { type: 'text', text: 'read it' }, 'text kept');
+});
+
+Deno.test('document: Anthropic body keeps the native block, Opus 5.5 asks for the default fallback', () => {
+  const b = buildAnthropicBody(pdfReq);
+  eq((b.messages as Array<{ content: unknown[] }>)[0].content[0], pdfReq.messages[0].content[0], 'native document block');
+  eq(b.fallbacks, 'default', 'fallbacks');
+  eq(buildAnthropicBody(chat).fallbacks, undefined, 'no fallbacks for sonnet 4.6');
+});
+
+Deno.test('document: KevaOS is skipped even when configured; OpenRouter answers', async () => {
+  setKeys('kv-key', 'an-key', null, 'or-key');
+  const calls = mockFetch({ openrouter: orOk('{"a":"x"}') });
+  try {
+    const r = await routeClaude(pdfReq);
+    eq(r.route, 'openrouter', 'route');
+    eq(r.json, { a: 'x' }, 'json');
+    assert(!calls.some((c) => c.url.includes('/api/external/counting/ai')), 'no KevaOS call');
+  } finally { globalThis.fetch = realFetch; }
+});
+
+Deno.test('Opus 5.5 on Anthropic direct: both beta flags sent; a refusal is a failure, not an answer', async () => {
+  setKeys(null, 'an-key');
+  const calls = mockFetch({ anthropic: () => json({ id: 'msg_r', stop_reason: 'refusal', content: [{ type: 'text', text: '{"a":"nope"}' }], usage: {} }) });
+  let err: unknown;
+  try { await routeClaude(pdfReq); } catch (e) { err = e; } finally { globalThis.fetch = realFetch; }
+  eq(calls[0].headers['anthropic-beta'], 'structured-outputs-2025-11-13,server-side-fallback-2026-07-01', 'betas');
+  assert(err instanceof AiRouterError && err.status === 422, 'refusal surfaces as an error');
+});
+
+Deno.test('chat without a document still goes to KevaOS first', async () => {
+  setKeys('kv-key', null);
+  const calls = mockFetch({ kevaos: kvOk('hello') });
+  try {
+    const r = await routeClaude(chat);
+    eq(r.route, 'kevaos', 'route');
+    assert(calls.length === 1, 'one call');
+  } finally { globalThis.fetch = realFetch; }
 });

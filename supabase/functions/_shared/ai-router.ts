@@ -27,7 +27,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
-export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5';
+export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5' | 'claude-opus-5-5';
 
 const KEVAOS_DEFAULT_URL = 'https://kevaos.ai/api/external/counting/ai';
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
@@ -37,12 +37,14 @@ const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODEL: Record<ClaudeModel, string> = {
   'claude-sonnet-4-6': 'anthropic/claude-sonnet-4.6',
   'claude-haiku-4-5': 'anthropic/claude-haiku-4.5',
+  'claude-opus-5-5': 'anthropic/claude-opus-5.5',
 };
 
 // $ per million tokens, for the Anthropic-direct usage rows (Anthropic does not report cost).
 const PRICE: Record<ClaudeModel, { input: number; output: number; cacheRead: number; cacheWrite: number }> = {
   'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
   'claude-haiku-4-5': { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+  'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
 };
 
 // KevaOS gets a shorter leash so a slow attempt still leaves time for the
@@ -53,7 +55,10 @@ const ANTHROPIC_TIMEOUT_MS = 60_000;
 
 export type TextBlock = { type: 'text'; text: string };
 export type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
-export type ContentBlock = TextBlock | ImageBlock;
+/** A PDF, read natively by Claude. KevaOS's counting gateway does not take
+ *  documents, so a request carrying one skips straight to OpenRouter. */
+export type DocumentBlock = { type: 'document'; source: { type: 'base64'; media_type: 'application/pdf'; data: string }; title?: string };
+export type ContentBlock = TextBlock | ImageBlock | DocumentBlock;
 export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string | ContentBlock[];
@@ -142,7 +147,15 @@ export function buildAnthropicBody(req: AiRequest): Record<string, unknown> {
     );
   }
   if (req.jsonSchema) body.output_config = { format: { type: 'json_schema', schema: req.jsonSchema.schema } };
+  // Opus 5.5 can decline in its safety categories; let the server retry on its
+  // default fallback instead of returning a refusal (beta header added in callAnthropic).
+  if (req.model === 'claude-opus-5-5') body.fallbacks = 'default';
   return body;
+}
+
+/** True when any message carries a PDF document block. */
+export function hasDocument(req: AiRequest): boolean {
+  return req.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'document'));
 }
 
 function num(v: unknown): number {
@@ -212,8 +225,11 @@ async function callAnthropic(req: AiRequest, key: string): Promise<Attempt> {
     'x-api-key': key,
     'anthropic-version': '2023-06-01',
   };
-  // Raw HTTP needs the structured-outputs flag sent by hand (the SDKs add it).
-  if (req.jsonSchema) headers['anthropic-beta'] = 'structured-outputs-2025-11-13';
+  // Raw HTTP needs the beta flags sent by hand (the SDKs add them).
+  const betas: string[] = [];
+  if (req.jsonSchema) betas.push('structured-outputs-2025-11-13');
+  if (req.model === 'claude-opus-5-5') betas.push('server-side-fallback-2026-07-01');
+  if (betas.length) headers['anthropic-beta'] = betas.join(',');
   let res: Response;
   try {
     res = await fetch(ANTHROPIC_URL, {
@@ -242,6 +258,10 @@ async function callAnthropic(req: AiRequest, key: string): Promise<Attempt> {
     cacheReadTokens: num(u.cache_read_input_tokens),
     cacheWriteTokens: num(u.cache_creation_input_tokens),
   };
+  // A refusal is HTTP 200 with stop_reason 'refusal' -- never read its content as an answer.
+  if (data.stop_reason === 'refusal') {
+    return { ok: false, status: 422, model: req.model, usage, requestId: (data.id as string) || null, error: 'refusal' };
+  }
   let text = '';
   if (Array.isArray(data.content)) {
     for (const b of data.content as Array<{ type?: string; text?: string }>) {
@@ -263,6 +283,9 @@ async function callAnthropic(req: AiRequest, key: string): Promise<Attempt> {
 function toOpenRouterPart(b: ContentBlock): Record<string, unknown> {
   if (b.type === 'image') {
     return { type: 'image_url', image_url: { url: 'data:' + b.source.media_type + ';base64,' + b.source.data } };
+  }
+  if (b.type === 'document') {
+    return { type: 'file', file: { filename: b.title || 'document.pdf', file_data: 'data:application/pdf;base64,' + b.source.data } };
   }
   return { type: 'text', text: b.text };
 }
@@ -443,7 +466,7 @@ export async function routeClaude(req: AiRequest): Promise<AiResult> {
 
   let fellBackFrom: string | null = null;
   let lastStatus = 502;
-  if (kvKey) {
+  if (kvKey && !hasDocument(req)) {
     const t0 = Date.now();
     const a = await callKevaos(req, kvKey, kvUrl);
     if (a.ok) {
