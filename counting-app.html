@@ -3203,7 +3203,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.30';
+const APP_VERSION = '2.31';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -3508,13 +3508,16 @@ let itemMasterIsStaleFallback = false;
 // / wine / mixers + beer). Food, produce, supplies, services are excluded —
 // the phone should never show them. Includes the lowercase + capitalized
 // variants because the upstream catalog has casing inconsistencies.
+// v2.31: plus the all-lowercase / short spellings ('liquor cost', 'beverage',
+// 'bev', ...) some catalog rows carry — search never saw those bottles.
+// guessCategory already files each with its canonical form.
 const IN_SCOPE_CATEGORIES = [
-  'Wine Cost', 'wine', 'Wine',
-  'Liquor Cost', 'liquor', 'Liquor',
-  'Beer Cost', 'beer',
-  'N/A Beverage Cost', 'non_alcoholic_beverage',
-  'Bar Consumables', 'bar_consumable',
-  'Bar Supplies',
+  'Wine Cost', 'wine', 'Wine', 'wine cost',
+  'Liquor Cost', 'liquor', 'Liquor', 'liquor cost',
+  'Beer Cost', 'beer', 'beer cost',
+  'N/A Beverage Cost', 'non_alcoholic_beverage', 'n/a beverage cost', 'beverage', 'bev',
+  'Bar Consumables', 'bar_consumable', 'bar consumables',
+  'Bar Supplies', 'bar supplies',
 ];
 // PostgREST in.(...) needs quoted values for items with spaces / slashes.
 const IN_SCOPE_FILTER = 'category=in.(' + IN_SCOPE_CATEGORIES.map(function(c) { return '"' + c.replace(/"/g, '\\"') + '"'; }).join(',') + ')';
@@ -16969,6 +16972,8 @@ function exportCountCSV(countNumber) {
 
     // Check recount data if Count 2. Recount rows are per zone (key
     // "name|zone"), so sum the item's zone rows; dismissed rows are out.
+    // v2.31: a zone whose verified recount only repeats its Count-1 snapshot
+    // stands at its counted qty, as in the variance (recountConfirmsCount1).
     let recountQty = '';
     let status = '';
     if (countNumber === 2 && appState.audit.recounts) {
@@ -16976,7 +16981,14 @@ function exportCountCSV(countNumber) {
         .filter(r => r && r.itemName === avt.itemName);
       const active = zoneRows.filter(r => r.status !== 'dismissed');
       const recorded = active.filter(r => r.recountQty != null && Number.isFinite(Number(r.recountQty)));
-      if (recorded.length) recountQty = recorded.reduce((sum, r) => sum + Number(r.recountQty), 0);
+      // A zone-less (whole-item) confirming row stands at the item's full count.
+      const count1ByZone = {};
+      let count1Total = 0;
+      if (recorded.some(recountConfirmsCount1)) {
+        findCountedZonesForAvtItem(avt).forEach(z => { count1ByZone[z.zone] = z.qty; count1Total += z.qty; });
+      }
+      if (recorded.length) recountQty = recorded.reduce((sum, r) => sum +
+        (recountConfirmsCount1(r) ? (r.zone ? (count1ByZone[r.zone] || 0) : count1Total) : Number(r.recountQty)), 0);
       if (zoneRows.length && !active.length) status = 'Dismissed';
       else if (active.length) {
         status = recorded.length === active.length ? 'Recounted'
@@ -17737,14 +17749,27 @@ async function submitAudit() {
    UTILITY FUNCTIONS
    ================================================================ */
 
+/* v2.31 (0131): a 'verified' recount whose qty just repeats its own Count-1
+   snapshot overrides nothing — the entries stand. The manager "Verify all
+   zones" cascade copies a stale snapshot (A-595 Stony Hill verified 0/0
+   against 31 counted). A verified row with a new number is a real correction
+   (P-843 Volcan 23 -> 6), and an unknown count1 counts as "not equal", so
+   both still override, as do corrected and no-result rows. */
+function recountConfirmsCount1(r) {
+  if (!r || r.auditResult !== 'verified' || r.count1Qty == null || r.recountQty == null) return false;
+  const c1 = Number(r.count1Qty), c2 = Number(r.recountQty);
+  return Number.isFinite(c1) && Number.isFinite(c2) && c1 === c2;
+}
+
 /* Count-1 quantities with the recorded recount corrections applied — what a
    manager reads after a recount (Summary, the locked overlay, Past audits,
    the raw CSV). Follows compute_avt_for_audit's precedence: per item, a
    recount for a zone replaces that zone's Count-1 sum (a recounted zone with
    no Count-1 entry still counts) and a recount with no zone replaces the
    item's whole total; when several recount rows land on one item + zone the
-   latest wins (resolved/created time, then id). Dismissed rows and rows
-   without a recount qty change nothing.
+   latest wins (resolved/created time, then id). Dismissed rows, rows
+   without a recount qty and (v2.31) verified rows that only repeat their
+   Count 1 (recountConfirmsCount1) change nothing.
    One deliberate difference: compute only applies entries and recounts that
    carry a master id (it prices per master). This is the COUNT summary, so
    master-less ones (custom items, unresolved names) still count here, keyed
@@ -17784,6 +17809,7 @@ function getCorrectedTotals(audit) {
   };
   Object.values(audit.recounts || {}).forEach(r => {
     if (!r || r.status === 'dismissed' || r.recountQty == null || !Number.isFinite(Number(r.recountQty))) return;
+    if (recountConfirmsCount1(r)) return;
     const name = norm(r.itemName || (r.avtItem && r.avtItem.itemName));
     let k = r.masterId ? keyOf(r.masterId, null) : null;
     if (!k || !byItem[k]) k = nameKey[name] || k || keyOf(null, name);
