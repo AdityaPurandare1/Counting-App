@@ -3203,7 +3203,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.27';
+const APP_VERSION = '2.28';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -18328,7 +18328,15 @@ async function parseLabelWithClaude(imageDataUrl) {
   }
 
   const url = SUPABASE_URL + '/functions/v1/parse-bottle-label';
-  const res = await fetch(url, {
+  // v2.28: give up after PHOTO_AI_TIMEOUT_MS. With its AI keys failing the
+  // function hung ~160 s before a 504 (11/2), leaving counters on "Analyzing"
+  // mid-count; failing fast hands the photo to the on-device reader instead.
+  const ctrl = new AbortController();
+  const timer = setTimeout(function () { ctrl.abort(); }, PHOTO_AI_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(url, {
+    signal: ctrl.signal,
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -18344,12 +18352,20 @@ async function parseLabelWithClaude(imageDataUrl) {
       catalog: otherPayload,
     }),
   });
+  } catch (e) {
+    clearTimeout(timer);
+    throw new Error(ctrl.signal.aborted
+      ? 'parse-bottle-label timed out after ' + Math.round(PHOTO_AI_TIMEOUT_MS / 1000) + ' s'
+      : 'parse-bottle-label network error: ' + ((e && e.message) || e));
+  }
+  clearTimeout(timer);
   if (!res.ok) {
     const errText = await res.text().catch(function () { return ''; });
     throw new Error('parse-bottle-label ' + res.status + ': ' + errText.slice(0, 160));
   }
   return await res.json();
 }
+const PHOTO_AI_TIMEOUT_MS = 20000;
 
 /* ---------- parsePhotoLabel WRAPPER ---------- */
 /* Order of preference:
