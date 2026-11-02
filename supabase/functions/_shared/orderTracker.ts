@@ -1,0 +1,678 @@
+/* ───────────────────────────────────────────────────────────────────────
+   Order tracker (v0.79) — pure logic for the admin Purchasing > Order tracker
+   tab. Tables: kount_ot_* (migration 0132). No Supabase calls in here, so
+   every rule below is unit-tested (tests/orderTracker.test.ts).
+
+   LIFECYCLE (per order LINE, the same cycle the desktop Order Tracker used):
+     QUOTED → ORDERED → CONFIRMED → IN_PRODUCTION → SHIPPED → DELIVERED
+     → INVOICED → PAID          CANCELLED ends a line early.
+   An order is only as far along as its least-advanced line (the bottleneck).
+
+   WAREHOUSE STOCK (per item, in the item's unit — usually cases):
+     receipt +qty (a delivered line received into the warehouse)
+     release −qty (sent to a venue)
+     count   =qty (on hand as counted; later moves apply on top)
+   ─────────────────────────────────────────────────────────────────────── */
+
+export const STATUSES = ['QUOTED', 'ORDERED', 'CONFIRMED', 'IN_PRODUCTION', 'SHIPPED', 'DELIVERED', 'INVOICED', 'PAID'] as const;
+export type LineStatus = typeof STATUSES[number] | 'CANCELLED';
+export const ALL_STATUSES: readonly LineStatus[] = [...STATUSES, 'CANCELLED'];
+
+export const STATUS_LABEL: Record<LineStatus, string> = {
+  QUOTED: 'Quoted', ORDERED: 'Ordered', CONFIRMED: 'Confirmed', IN_PRODUCTION: 'In production',
+  SHIPPED: 'Shipped', DELIVERED: 'Delivered', INVOICED: 'Invoiced', PAID: 'Paid', CANCELLED: 'Cancelled',
+};
+
+/** Position in the cycle; CANCELLED sorts after PAID (it is terminal). */
+export function statusRank(s: LineStatus): number {
+  return s === 'CANCELLED' ? STATUSES.length : STATUSES.indexOf(s);
+}
+
+export interface OtItem {
+  id: string;
+  name: string;
+  sku: string | null;
+  vendor_name: string | null;
+  category: string | null;
+  unit: string;
+  pack_size: number | null;
+  lead_time_days: number | null;
+  reorder_point: number | null;
+  track_stock: boolean;
+  notes: string | null;
+  is_active: boolean;
+}
+
+export interface OtOrder {
+  id: string;
+  order_number: string | null;
+  vendor_name: string;
+  venue_id: string | null;
+  deliver_to: 'warehouse' | 'venue';
+  ordered_on: string | null;
+  expected_on: string | null;
+  notes: string | null;
+  completed_at: string | null;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OtLine {
+  id: string;
+  order_id: string;
+  item_id: string | null;
+  description: string;
+  sku: string | null;
+  qty: number;
+  unit: string | null;
+  unit_price: number | null;
+  status: LineStatus;
+  status_at: string;
+  quote_number: string | null;
+  invoice_number: string | null;
+  invoice_date: string | null;
+  tracking_number: string | null;
+  expected_on: string | null;
+  sort: number;
+  updated_at?: string;
+}
+
+export interface OtMove {
+  id: string;
+  item_id: string;
+  moved_on: string;           // YYYY-MM-DD
+  kind: 'receipt' | 'release' | 'count';
+  qty: number;
+  venue_id: string | null;
+  line_id: string | null;
+  note: string | null;
+  created_at: string;
+  created_by?: string | null;
+}
+
+export interface OtDocument {
+  id: string;
+  order_id: string | null;
+  kind: DocKind;
+  doc_number: string | null;
+  doc_date: string | null;
+  vendor_name: string | null;
+  total: number | null;
+  file_name: string | null;
+  storage_path: string | null;
+  created_at: string;
+  uploaded_by?: string | null;
+  source_conversation_id?: string | null;
+}
+
+export type DocKind = 'quote' | 'confirmation' | 'invoice' | 'shipping' | 'other';
+
+/* ── numbers / dates ──────────────────────────────────────────────────── */
+
+const n = (x: unknown): number => { const v = Number(x); return Number.isFinite(v) ? v : 0; };
+
+export function lineTotal(l: Pick<OtLine, 'qty' | 'unit_price'>): number {
+  return n(l.qty) * n(l.unit_price);
+}
+
+/** Local YYYY-MM-DD. */
+export function isoDay(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+export function addDays(day: string, days: number): string {
+  const [y, m, d] = day.split('-').map(Number);
+  return isoDay(new Date(y, m - 1, d + Math.round(days)));
+}
+
+function daysBetween(a: string, b: string): number {
+  const [y1, m1, d1] = a.split('-').map(Number);
+  const [y2, m2, d2] = b.split('-').map(Number);
+  return Math.round((new Date(y2, m2 - 1, d2).getTime() - new Date(y1, m1 - 1, d1).getTime()) / 86_400_000);
+}
+
+/* ── orders ───────────────────────────────────────────────────────────── */
+
+/** The order's status: its least-advanced live line. All cancelled → CANCELLED; no lines → null. */
+export function headlineStatus(lines: Pick<OtLine, 'status'>[]): LineStatus | null {
+  if (!lines.length) return null;
+  const live = lines.filter(l => l.status !== 'CANCELLED');
+  if (!live.length) return 'CANCELLED';
+  return live.reduce((m, l) => (statusRank(l.status) < statusRank(m) ? l.status : m), live[0].status);
+}
+
+export type OrderState = 'open' | 'completed' | 'archived';
+
+/** Archived (never a real order) > completed (finished by hand, or every live line paid) > open. */
+export function orderState(o: Pick<OtOrder, 'completed_at' | 'archived_at'>, lines: Pick<OtLine, 'status'>[]): OrderState {
+  if (o.archived_at) return 'archived';
+  if (o.completed_at) return 'completed';
+  const h = headlineStatus(lines);
+  if (h === 'PAID' || h === 'CANCELLED') return 'completed';
+  return 'open';
+}
+
+/** Count of lines per status, in cycle order (the order card's bar). */
+export function statusMix(lines: Pick<OtLine, 'status'>[]): Array<{ status: LineStatus; count: number }> {
+  return ALL_STATUSES.map(s => ({ status: s, count: lines.filter(l => l.status === s).length })).filter(x => x.count > 0);
+}
+
+/** A live line whose expected date has passed and that is not delivered yet.
+ *  `received` (warehouse receipts against the line): a fully received line is
+ *  not late even when nobody moved its status on. */
+export function isLate(l: Pick<OtLine, 'status' | 'expected_on' | 'qty'>, order: Pick<OtOrder, 'expected_on'>, today: string, received = 0): boolean {
+  if (l.status === 'CANCELLED' || statusRank(l.status) >= statusRank('DELIVERED')) return false;
+  if (n(l.qty) > 0 && received >= n(l.qty)) return false;
+  const due = l.expected_on || order.expected_on;
+  return !!due && due < today;
+}
+
+/* ── documents → line updates ─────────────────────────────────────────── */
+
+const DOC_STATUS: Record<DocKind, LineStatus | null> = {
+  quote: 'QUOTED', confirmation: 'CONFIRMED', invoice: 'INVOICED', shipping: 'SHIPPED', other: null,
+};
+
+/** The status a document moves a line to. Documents only move lines FORWARD:
+ *  an invoice arriving for a line already PAID, or a confirmation for a line
+ *  already shipped, leaves the status alone (it still records the numbers). */
+export function statusAfterDocument(current: LineStatus | null, kind: DocKind): LineStatus | null {
+  const target = DOC_STATUS[kind];
+  if (!target) return current;
+  if (current === null) return target;
+  if (current === 'CANCELLED') return current;
+  return statusRank(target) > statusRank(current) ? target : current;
+}
+
+/** Normalised text for matching ("Delilah To-Go Bag, 250/cs" ≈ "DELILAH TOGO BAG 250CS"). */
+export function normText(s: string | null | undefined): string {
+  return String(s ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function words(s: string): Set<string> { return new Set(normText(s).split(' ').filter(w => w.length > 1)); }
+
+/** Word-overlap similarity 0..1 (Jaccard). */
+export function similarity(a: string, b: string): number {
+  const A = words(a), B = words(b);
+  if (!A.size || !B.size) return 0;
+  let inter = 0;
+  A.forEach(w => { if (B.has(w)) inter++; });
+  return inter / (A.size + B.size - inter);
+}
+
+export interface DocLine {
+  line_kind: 'product' | 'freight' | 'tax' | 'fee' | 'discount';
+  description: string;
+  sku: string;
+  qty: number;
+  unit: string;
+  unit_price: number;
+  line_total: number;
+  pack_size: number;
+}
+
+/** The existing order line a document line most likely is: same SKU first,
+ *  then the closest description (≥ 0.5 word overlap). Each existing line is
+ *  matched at most once — two document lines never land on one order line. */
+export function matchDocLines(docLines: DocLine[], existing: OtLine[]): Array<OtLine | null> {
+  const used = new Set<string>();
+  return docLines.map(dl => {
+    const sku = normText(dl.sku);
+    if (sku) {
+      const bySku = existing.find(l => !used.has(l.id) && normText(l.sku) === sku);
+      if (bySku) { used.add(bySku.id); return bySku; }
+    }
+    let best: OtLine | null = null, bestScore = 0;
+    for (const l of existing) {
+      if (used.has(l.id)) continue;
+      const s = similarity(dl.description, l.description);
+      if (s > bestScore) { bestScore = s; best = l; }
+    }
+    if (best && bestScore >= 0.5) { used.add(best.id); return best; }
+    return null;
+  });
+}
+
+/** The catalog item a description / SKU belongs to: exact SKU, else exact name, else ≥ 0.6 overlap. */
+export function matchItem(items: OtItem[], description: string, sku: string | null): OtItem | null {
+  const s = normText(sku);
+  if (s) {
+    const bySku = items.find(i => i.is_active && normText(i.sku) === s);
+    if (bySku) return bySku;
+  }
+  const d = normText(description);
+  const byName = items.find(i => i.is_active && normText(i.name) === d);
+  if (byName) return byName;
+  let best: OtItem | null = null, bestScore = 0;
+  for (const i of items) {
+    if (!i.is_active) continue;
+    const sc = similarity(description, i.name);
+    if (sc > bestScore) { bestScore = sc; best = i; }
+  }
+  return best && bestScore >= 0.6 ? best : null;
+}
+
+/** Two vendor names for the same company ("Uline" ≈ "ULINE Inc."). A blank name never blocks a match. */
+export function sameVendor(a: string | null | undefined, b: string | null | undefined): boolean {
+  const x = normText(a), y = normText(b);
+  if (!x || !y) return true;
+  return x === y || x.includes(y) || y.includes(x) || similarity(x, y) >= 0.5;
+}
+
+/** The order a document belongs to: the order whose number equals the
+ *  document's order number, else one holding a line with that quote number
+ *  (or, for an invoice, that invoice number), else null (the reviewer picks,
+ *  or a new order is created). Only orders from the document's vendor count:
+ *  PO numbers like "1001" repeat across vendors. */
+export function matchOrder(orders: OtOrder[], lines: OtLine[], doc: { order_number: string; doc_number: string; kind: DocKind; vendor_name?: string }): OtOrder | null {
+  const fits = (o: OtOrder | undefined): o is OtOrder => !!o && !o.archived_at && sameVendor(o.vendor_name, doc.vendor_name);
+  const byId = new Map(orders.map(o => [o.id, o]));
+  const on = normText(doc.order_number);
+  if (on) {
+    const o = orders.find(x => normText(x.order_number) === on && fits(x));
+    if (o) return o;
+  }
+  const dn = normText(doc.doc_number);
+  if (dn) {
+    const withQuote = lines.find(l => normText(l.quote_number) === dn && fits(byId.get(l.order_id)));
+    if (withQuote) return byId.get(withQuote.order_id)!;
+    if (doc.kind === 'invoice') {
+      const withInvoice = lines.find(l => normText(l.invoice_number) === dn && fits(byId.get(l.order_id)));
+      if (withInvoice) return byId.get(withInvoice.order_id)!;
+    }
+  }
+  return null;
+}
+
+/* ── a reviewed document → one save ───────────────────────────────────── */
+
+export const DOC_KIND_LABEL: Record<DocKind, string> = { quote: 'Quote', confirmation: 'Order confirmation', invoice: 'Invoice', shipping: 'Shipping notice', other: 'Other' };
+
+/** One document line in the review: save it or not, onto which order line
+ *  ('new' = add it), and which catalog item it is. */
+export interface DocRowPlan {
+  doc: DocLine;
+  include: boolean;
+  target: string;
+  itemId: string;        // '' = none
+  addItem: boolean;      // create a catalog item from this line
+}
+
+const negative = (dl: DocLine) => dl.line_total < 0 || dl.unit_price < 0 || dl.qty < 0;
+
+/** The first plan for a document's lines. Ticked by default: products, and on
+ *  an invoice the non-tax charges (freight, fees). Never a negative line, and
+ *  nothing on a credit memo — a credit saved as order lines would count as new
+ *  spend (vendors print credits with positive amounts too). */
+export function planDocRows(docLines: DocLine[], orderLines: OtLine[], items: OtItem[], kind: DocKind, isCredit = false): DocRowPlan[] {
+  const matched = matchDocLines(docLines, orderLines);
+  return docLines.map((dl, i) => {
+    const existing = matched[i];
+    const item = existing?.item_id ? items.find(it => it.id === existing.item_id) ?? null : matchItem(items, dl.description, dl.sku || null);
+    return {
+      doc: dl,
+      include: !isCredit && !negative(dl) && (dl.line_kind === 'product' || (dl.line_kind !== 'tax' && kind === 'invoice' && Math.abs(dl.line_total) > 0)),
+      target: existing?.id ?? 'new',
+      itemId: item?.id ?? '',
+      addItem: false,
+    };
+  });
+}
+
+/** Everything a reviewed document changes, applied in ONE transaction by
+ *  kount_ot_apply_document (0132). `item_key` ties a line to one of
+ *  `new_items`; an update changes only the keys it carries. */
+export interface ApplyDocument {
+  note: string;
+  /** A PDF from the morning mail pull (kount_ot_inbox, 0135): closed in the same transaction. */
+  inbox_id?: string;
+  decision?: string;
+  order_id?: string;
+  order_patch?: { order_number?: string; expected_on?: string };
+  new_order?: { vendor_name: string; order_number: string | null; venue_id: string | null; deliver_to: 'warehouse' | 'venue'; ordered_on: string | null; expected_on: string | null };
+  new_items: Array<{ key: string; name: string; sku: string | null; vendor_name: string; unit: string; pack_size: number | null }>;
+  updates: Array<{ id: string; item_id?: string; item_key?: string } & Partial<Pick<OtLine, 'status' | 'unit_price' | 'quote_number' | 'invoice_number' | 'invoice_date' | 'tracking_number' | 'expected_on'>>>;
+  new_lines: Array<{
+    item_id: string | null; item_key?: string; description: string; sku: string | null; qty: number; unit: string | null; unit_price: number | null;
+    status: LineStatus; quote_number: string | null; invoice_number: string | null; invoice_date: string | null; tracking_number: string | null; expected_on: string | null;
+  }>;
+  document: {
+    id: string; kind: DocKind; doc_number: string | null; doc_date: string | null; vendor_name: string; total: number | null; file_name: string; storage_path: string; parsed: unknown;
+    /** the email it came from: a later document in the same thread finds this order */
+    source_message_id?: string | null; source_conversation_id?: string | null;
+  };
+}
+
+export interface DocReview {
+  docId: string; kind: DocKind; vendor: string; docNumber: string; docDate: string; orderNumber: string; expected: string; tracking: string;
+  /** null = a new order */
+  order: OtOrder | null; orderLines: OtLine[];
+  deliverTo: 'warehouse' | 'venue'; venueId: string;
+  rows: DocRowPlan[]; today: string; fileName: string; storagePath: string; total: number | null; parsed: unknown;
+}
+
+/** A line that already carries a DIFFERENT invoice number keeps it, and its
+ *  price: that number and price are the other invoice's price point. */
+const otherInvoice = (cur: OtLine, kind: DocKind, docNumber: string) =>
+  kind === 'invoice' && !!cur.invoice_number && !!docNumber.trim() && normText(cur.invoice_number) !== normText(docNumber);
+
+export function planDocumentSave(r: DocReview): ApplyDocument {
+  const vendor = r.vendor.trim(), docNumber = r.docNumber.trim();
+  const out: ApplyDocument = {
+    note: `${DOC_KIND_LABEL[r.kind]}${docNumber ? ' ' + docNumber : ''}`,
+    new_items: [], updates: [], new_lines: [],
+    document: { id: r.docId, kind: r.kind, doc_number: docNumber || null, doc_date: r.docDate || null, vendor_name: vendor,
+                total: r.total || null, file_name: r.fileName, storage_path: r.storagePath, parsed: r.parsed },
+  };
+  if (r.order) {
+    out.order_id = r.order.id;
+    const patch: ApplyDocument['order_patch'] = {};
+    if (!r.order.order_number && r.orderNumber.trim()) patch.order_number = r.orderNumber.trim();
+    if (r.expected && (r.kind === 'confirmation' || !r.order.expected_on)) patch.expected_on = r.expected;
+    if (Object.keys(patch).length) out.order_patch = patch;
+  } else {
+    out.new_order = {
+      vendor_name: vendor, order_number: r.orderNumber.trim() || null, venue_id: r.venueId || null, deliver_to: r.deliverTo,
+      ordered_on: r.kind === 'quote' ? null : (r.docDate || r.today), expected_on: r.expected || null,
+    };
+  }
+  r.rows.forEach((row, i) => {
+    if (!row.include) return;
+    const dl = row.doc;
+    let ref: { item_id: string } | { item_key: string } | null = null;
+    if (row.itemId) ref = { item_id: row.itemId };
+    else if (row.addItem) {
+      const key = 'n' + i;
+      out.new_items.push({ key, name: dl.description.trim(), sku: dl.sku.trim() || null, vendor_name: vendor,
+                           unit: dl.unit.trim() || 'case', pack_size: dl.pack_size > 0 ? dl.pack_size : null });
+      ref = { item_key: key };
+    }
+    const price = dl.unit_price > 0 ? dl.unit_price : null;
+    const cur = row.target !== 'new' ? r.orderLines.find(l => l.id === row.target) : undefined;
+    if (cur) {
+      const u: ApplyDocument['updates'][number] = { id: cur.id };
+      const next = statusAfterDocument(cur.status, r.kind);
+      if (next && next !== cur.status) u.status = next;
+      const keepInvoice = otherInvoice(cur, r.kind, docNumber);
+      if (price != null && !keepInvoice && (r.kind === 'quote' || r.kind === 'invoice' || cur.unit_price == null)) u.unit_price = price;
+      if (r.kind === 'quote' && docNumber) u.quote_number = docNumber;
+      if (r.kind === 'invoice' && docNumber && !keepInvoice) { u.invoice_number = docNumber; u.invoice_date = r.docDate || r.today; }
+      if (r.kind === 'shipping' && r.tracking) u.tracking_number = r.tracking;
+      if (r.expected && (r.kind === 'confirmation' || r.kind === 'shipping')) u.expected_on = r.expected;
+      if (ref && !cur.item_id) Object.assign(u, ref);
+      if (Object.keys(u).length > 1) out.updates.push(u);
+    } else {
+      out.new_lines.push({
+        item_id: ref && 'item_id' in ref ? ref.item_id : null, ...(ref && 'item_key' in ref ? { item_key: ref.item_key } : {}),
+        description: dl.description.trim() || dl.line_kind, sku: dl.sku.trim() || null, qty: dl.qty > 0 ? dl.qty : 1,
+        unit: dl.unit.trim() || null, unit_price: price ?? (dl.line_total > 0 && dl.qty <= 0 ? dl.line_total : null),
+        status: statusAfterDocument(null, r.kind) ?? 'ORDERED',
+        quote_number: r.kind === 'quote' ? docNumber || null : null,
+        invoice_number: r.kind === 'invoice' ? docNumber || null : null,
+        invoice_date: r.kind === 'invoice' ? r.docDate || r.today : null,
+        tracking_number: r.kind === 'shipping' ? r.tracking || null : null,
+        expected_on: r.expected || null,
+      });
+    }
+  });
+  return out;
+}
+
+/** What a person should see before saving a document. */
+export function documentChecks(r: Pick<DocReview, 'kind' | 'vendor' | 'docNumber' | 'order' | 'orderLines' | 'rows'>,
+                               printed: { subtotal: number; total: number; lines: DocLine[]; is_credit?: boolean },
+                               known: { documents: OtDocument[]; lines: OtLine[]; orders: OtOrder[] }, fmt: (x: number) => string): string[] {
+  const out: string[] = [];
+  const docNumber = r.docNumber.trim();
+  const sum = printed.lines.reduce((s, l) => s + (Number(l.line_total) || 0), 0);
+  const productSum = printed.lines.filter(l => l.line_kind === 'product').reduce((s, l) => s + (Number(l.line_total) || 0), 0);
+  // vendors print the subtotal over products only, products + freight / fees, or everything
+  const preTax = printed.lines.filter(l => l.line_kind !== 'tax').reduce((s, l) => s + (Number(l.line_total) || 0), 0);
+  if (printed.subtotal > 0 && [productSum, preTax, sum].every(x => Math.abs(x - printed.subtotal) > 0.05)) {
+    out.push(`Lines add up to ${fmt(productSum)} but the printed subtotal is ${fmt(printed.subtotal)} — a line may be misread or missing.`);
+  }
+  printed.lines.forEach(l => {
+    if (l.qty > 0 && l.unit_price > 0 && l.line_total > 0 && Math.abs(l.qty * l.unit_price - l.line_total) > Math.max(0.05, l.line_total * 0.01)) {
+      out.push(`"${l.description}": ${l.qty} × ${fmt(l.unit_price)} ≠ ${fmt(l.line_total)}.`);
+    }
+  });
+  if (printed.is_credit) {
+    out.push('This is a credit memo. Nothing on it is ticked: saved as order lines it would count as new spend.');
+  } else if (printed.total < 0 || printed.lines.some(negative)) {
+    out.push('This looks like a credit memo (negative amounts). Negative lines are left unticked: saved as order lines they would count as new spend.');
+  }
+  if (docNumber) {
+    const label = DOC_KIND_LABEL[r.kind].toLowerCase();
+    const dup = known.documents.find(d => d.kind === r.kind && normText(d.doc_number) === normText(docNumber) && sameVendor(d.vendor_name, r.vendor));
+    if (dup) out.push(`This ${label} (${docNumber}) from ${dup.vendor_name || r.vendor} was already added on ${dup.created_at.slice(0, 10)}. Saving it again counts it twice.`);
+    if (r.kind === 'invoice' && !dup) {
+      const orderById = new Map(known.orders.map(o => [o.id, o]));
+      const onLines = known.lines.filter(l => normText(l.invoice_number) === normText(docNumber) && sameVendor(orderById.get(l.order_id)?.vendor_name, r.vendor));
+      if (onLines.length) out.push(`Invoice ${docNumber} is already on ${onLines.length} line${onLines.length === 1 ? '' : 's'} of ${r.vendor || 'this vendor'}'s orders. Check it is not being entered twice.`);
+    }
+  }
+  if (r.order && !sameVendor(r.order.vendor_name, r.vendor)) {
+    out.push(`The chosen order is from ${r.order.vendor_name}, but the document says ${r.vendor}. Check it is the right order.`);
+  }
+  for (const row of r.rows) {
+    if (!row.include || row.target === 'new') continue;
+    const cur = r.orderLines.find(l => l.id === row.target);
+    if (!cur) continue;
+    if (otherInvoice(cur, r.kind, docNumber)) {
+      out.push(`"${cur.description}" is already on invoice ${cur.invoice_number}; it keeps that number and price. Choose "Add as a new line" if this is a separate invoice.`);
+    }
+    if (row.doc.line_kind === 'product' && row.doc.qty > 0 && Math.abs(row.doc.qty - cur.qty) > 1e-9) {
+      out.push(`"${cur.description}": the document says ${row.doc.qty}, the order line says ${cur.qty}. The line keeps ${cur.qty}; change it on the order if the quantity really changed.`);
+    }
+  }
+  return out;
+}
+
+/* ── the morning mail pull: apply it, or let a person look ────────────── */
+
+/** A document as the reader returns it (kount-read-purchase-doc / _shared/purchase-doc.ts). */
+export interface ReadDoc {
+  doc_kind: DocKind;
+  is_credit?: boolean;
+  vendor_name: string;
+  doc_number: string;
+  doc_date: string;
+  order_number: string;
+  expected_date: string;
+  tracking_numbers: string[];
+  subtotal: number;
+  total: number;
+  lines: DocLine[];
+}
+
+/** The email a PDF came in (kount_ot_inbox). */
+export interface MailSource { id: string; message_id: string; conversation_id: string | null; file_name: string | null; storage_path: string }
+
+export type MailDecision =
+  | { state: 'applied'; payload: ApplyDocument; reason: string }
+  | { state: 'pending'; reason: string; orderId: string | null }
+  | { state: 'ignored'; reason: string };
+
+const isoDate = (s: string | null | undefined) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s ?? '')) ? String(s) : '');
+
+/** What the morning pull does with one read PDF. It saves on its own ONLY
+ *  when the document clearly belongs to one existing order (an earlier
+ *  document in the same email thread, else the PO / quote / invoice number
+ *  from the same vendor), every product on it is already on that order, and
+ *  none of the review checks fire. Everything else waits for a person. */
+export function decideMailDocument(doc: ReadDoc, src: MailSource,
+                                   data: { orders: OtOrder[]; lines: OtLine[]; items: OtItem[]; documents: OtDocument[] },
+                                   today: string, fmt: (x: number) => string): MailDecision {
+  if (!doc || !Array.isArray(doc.lines)) return { state: 'pending', reason: 'The reader returned nothing usable — open the PDF.', orderId: null };
+  const docNumber = String(doc.doc_number ?? '').trim();
+  if (docNumber && doc.doc_kind !== 'other') {
+    const saved = data.documents.find(d => d.kind === doc.doc_kind && normText(d.doc_number) === normText(docNumber) && sameVendor(d.vendor_name, doc.vendor_name));
+    if (saved) return { state: 'ignored', reason: `Already saved on ${saved.created_at.slice(0, 10)} (${DOC_KIND_LABEL[doc.doc_kind].toLowerCase()} ${docNumber}).` };
+  }
+  if (doc.is_credit) return { state: 'pending', reason: 'A credit memo — check it against the order by hand.', orderId: null };
+  if (doc.doc_kind === 'other') return { state: 'ignored', reason: 'Not a quote, order confirmation, invoice or shipping notice.' };
+
+  const live = (id: string | null | undefined) => data.orders.find(o => o.id === id && !o.archived_at);
+  let order: OtOrder | null = null, how = '';
+  if (src.conversation_id) {
+    const sameThread = data.documents.filter(d => d.source_conversation_id === src.conversation_id && d.order_id)
+      .map(d => live(d.order_id)).filter((o): o is OtOrder => !!o && sameVendor(o.vendor_name, doc.vendor_name));
+    const ids = new Set(sameThread.map(o => o.id));
+    if (ids.size === 1) { order = sameThread[0]; how = 'same email thread'; }
+  }
+  if (!order) {
+    order = matchOrder(data.orders, data.lines, { order_number: doc.order_number, doc_number: docNumber, kind: doc.doc_kind, vendor_name: doc.vendor_name });
+    if (order) how = doc.order_number && normText(order.order_number) === normText(doc.order_number) ? 'PO #' : 'document #';
+  }
+  if (!order) return { state: 'pending', reason: 'No matching order yet — create one from it.', orderId: null };
+
+  const orderLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
+  const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false);
+  const included = rows.filter(r => r.include);
+  const label = order.order_number || `the ${order.vendor_name} order`;
+  if (!included.length) return { state: 'pending', reason: `Nothing on it to record automatically on ${label}.`, orderId: order.id };
+  const newProducts = included.filter(r => r.doc.line_kind === 'product' && r.target === 'new');
+  if (newProducts.length) {
+    return { state: 'pending', reason: `${newProducts.length} item${newProducts.length === 1 ? ' is' : 's are'} not on ${label} yet — check before adding.`, orderId: order.id };
+  }
+  const review = { kind: doc.doc_kind, vendor: doc.vendor_name, docNumber, order, orderLines, rows };
+  const checks = documentChecks(review, doc, data, fmt);
+  if (checks.length) return { state: 'pending', reason: checks.join(' '), orderId: order.id };
+
+  const payload = planDocumentSave({
+    ...review, docId: src.id, docDate: isoDate(doc.doc_date), orderNumber: doc.order_number || '', expected: isoDate(doc.expected_date),
+    tracking: (doc.tracking_numbers || []).join(', '), deliverTo: order.deliver_to, venueId: order.venue_id ?? '', today,
+    fileName: src.file_name || 'document.pdf', storagePath: src.storage_path, total: doc.total, parsed: doc,
+  });
+  if (!payload.updates.length && !payload.new_lines.length) return { state: 'pending', reason: `Nothing changes on ${label}.`, orderId: order.id };
+  const reason = `Applied to ${label} (${how}).`;
+  payload.note += ' — from email, applied automatically';
+  payload.inbox_id = src.id;
+  payload.decision = reason;
+  payload.document.source_message_id = src.message_id;
+  payload.document.source_conversation_id = src.conversation_id;
+  return { state: 'applied', payload, reason };
+}
+
+/* ── warehouse stock ──────────────────────────────────────────────────── */
+
+/** On hand after every move up to and including `asOf` (all moves when omitted).
+ *  Moves apply in date order, same-day in creation order; a count resets. */
+export function onHand(moves: OtMove[], asOf?: string): number {
+  const sorted = moves.filter(m => !asOf || m.moved_on <= asOf)
+    .sort((a, b) => (a.moved_on === b.moved_on ? a.created_at.localeCompare(b.created_at) : a.moved_on < b.moved_on ? -1 : 1));
+  let q = 0;
+  for (const m of sorted) {
+    if (m.kind === 'count') q = n(m.qty);
+    else if (m.kind === 'receipt') q += n(m.qty);
+    else q -= n(m.qty);
+  }
+  return q;
+}
+
+/** Units received into the warehouse against one order line. */
+export function receivedForLine(moves: OtMove[], lineId: string): number {
+  return moves.filter(m => m.kind === 'receipt' && m.line_id === lineId).reduce((s, m) => s + n(m.qty), 0);
+}
+
+export interface StockRow {
+  item: OtItem;
+  onHand: number;
+  /** Everything still to come into the warehouse: the unreceived qty of every
+   *  ordered (not quoted, not cancelled) line on an OPEN warehouse order. It
+   *  counts a line until its units are RECEIVED, whatever its status says, so
+   *  a line marked delivered or invoiced but not received yet stays in it. */
+  incoming: number;
+  /** The part of `incoming` whose line already says delivered (or later):
+   *  it is at the warehouse, waiting for someone to receive it. */
+  awaitingReceipt: number;
+  /** Average released per month over the last 90 days (or since the first release). */
+  monthlyUse: number;
+  monthsCover: number | null;
+  reorderPoint: number | null;
+  /** The day on-hand + incoming falls to the reorder point at the current rate. */
+  reorderBy: string | null;
+  stockOutBy: string | null;
+  lastCount: OtMove | null;
+  lastReceipt: OtMove | null;
+  state: 'reorder now' | 'reorder soon' | 'ok' | 'no usage yet';
+}
+
+const USE_WINDOW_DAYS = 90;
+const SAFETY = 1.25;   // reorder point = lead-time demand + 25%
+const SOON_DAYS = 30;
+
+export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], orders: OtOrder[], today: string): StockRow[] {
+  const linesByOrder = new Map<string, OtLine[]>();
+  for (const l of lines) (linesByOrder.get(l.order_id) ?? linesByOrder.set(l.order_id, []).get(l.order_id)!).push(l);
+  // open warehouse orders: completed (by hand, or every line paid) and archived ones bring nothing more
+  const openWarehouse = new Set(orders.filter(o => o.deliver_to !== 'venue' && orderState(o, linesByOrder.get(o.id) ?? []) === 'open').map(o => o.id));
+  return items.filter(i => i.is_active && i.track_stock).map(item => {
+    const mv = moves.filter(m => m.item_id === item.id);
+    const releases = mv.filter(m => m.kind === 'release');
+    const since = addDays(today, -USE_WINDOW_DAYS);
+    const firstRelease = releases.reduce<string | null>((f, m) => (f === null || m.moved_on < f ? m.moved_on : f), null);
+    // Days the rate is measured over: 90, or less when releases started more recently (min 30 so
+    // one early release does not read as a huge monthly rate).
+    const spanDays = firstRelease && firstRelease > since ? Math.max(30, daysBetween(firstRelease, today)) : USE_WINDOW_DAYS;
+    const released = releases.filter(m => m.moved_on > since).reduce((s, m) => s + n(m.qty), 0);
+    const dailyUse = released / spanDays;
+    const monthlyUse = dailyUse * 30;
+
+    const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'QUOTED' && openWarehouse.has(l.order_id));
+    const unreceived = (l: OtLine) => Math.max(0, n(l.qty) - receivedForLine(mv, l.id));
+    const incoming = itemLines.reduce((s, l) => s + unreceived(l), 0);
+    const awaitingReceipt = itemLines.filter(l => statusRank(l.status) >= statusRank('DELIVERED')).reduce((s, l) => s + unreceived(l), 0);
+
+    const qty = onHand(mv);
+    const rp = item.reorder_point ?? (dailyUse > 0 && item.lead_time_days != null ? dailyUse * item.lead_time_days * SAFETY : null);
+    let reorderBy: string | null = null, stockOutBy: string | null = null;
+    let state: StockRow['state'] = 'no usage yet';
+    if (dailyUse > 0) {
+      stockOutBy = addDays(today, Math.max(0, qty) / dailyUse);
+      if (rp != null) {
+        const headroom = qty + incoming - rp;
+        reorderBy = addDays(today, Math.max(0, headroom) / dailyUse);
+        state = headroom <= 0 ? 'reorder now' : daysBetween(today, reorderBy) <= SOON_DAYS ? 'reorder soon' : 'ok';
+      } else {
+        state = 'ok';
+      }
+    } else if (item.reorder_point != null && qty + incoming <= item.reorder_point) {
+      state = 'reorder now';
+    }
+    const latest = (k: OtMove['kind']) => mv.filter(m => m.kind === k)
+      .sort((a, b) => (a.moved_on === b.moved_on ? b.created_at.localeCompare(a.created_at) : a.moved_on < b.moved_on ? 1 : -1))[0] ?? null;
+    return {
+      item, onHand: qty, incoming, awaitingReceipt, monthlyUse,
+      monthsCover: monthlyUse > 0 ? qty / monthlyUse : null,
+      reorderPoint: rp, reorderBy, stockOutBy,
+      lastCount: latest('count'), lastReceipt: latest('receipt'), state,
+    };
+  });
+}
+
+/** Released per venue over the last `days` days (an item's draw-down by venue). */
+export function releasesByVenue(moves: OtMove[], itemId: string, today: string, days = 90): Array<{ venueId: string | null; qty: number }> {
+  const since = addDays(today, -days);
+  const m = new Map<string | null, number>();
+  for (const x of moves) if (x.item_id === itemId && x.kind === 'release' && x.moved_on > since) m.set(x.venue_id, (m.get(x.venue_id) ?? 0) + n(x.qty));
+  return [...m.entries()].map(([venueId, qty]) => ({ venueId, qty })).sort((a, b) => b.qty - a.qty);
+}
+
+/* ── validation ───────────────────────────────────────────────────────── */
+
+export interface DraftLine { key: number; itemId: string | null; description: string; sku: string; qty: string; unit: string; unitPrice: string }
+
+export function validateNewOrder(vendor: string, lines: DraftLine[]): string | null {
+  if (!vendor.trim()) return 'Enter the vendor.';
+  const used = lines.filter(l => l.description.trim() || l.qty.trim() || l.itemId);
+  if (!used.length) return 'Add at least one line.';
+  for (const l of used) {
+    if (!l.description.trim()) return 'Every line needs an item or a description.';
+    const q = Number(l.qty);
+    if (!Number.isFinite(q) || q <= 0) return `Enter a quantity above 0 for ${l.description.trim()}.`;
+    if (l.unitPrice.trim() && (!Number.isFinite(Number(l.unitPrice)) || Number(l.unitPrice) < 0)) return `The price for ${l.description.trim()} is not a number.`;
+  }
+  return null;
+}
