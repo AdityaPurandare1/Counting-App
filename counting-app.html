@@ -3203,7 +3203,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.28';
+const APP_VERSION = '2.29';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4788,7 +4788,24 @@ async function linkUPCToItem(barcode, item) {
     reviewed_at: approveNow ? nowIso : null,
   };
 
-  const { data, error } = await supabaseRest.insert('upc_mappings', payload);
+  let { data, error } = await supabaseRest.insert('upc_mappings', payload);
+
+  // v2.29: RLS only lets a non-corporate user auto-approve a barcode the
+  // database sees as brand new for that item. The phone can't always tell
+  // (the barcode may sit on an archived item the phone never loads, or the
+  // item may already have another barcode): on 11/2 that refused 24 links on
+  // one counter's phone with a red error. Send the same link for approval
+  // instead, which RLS always allows for the counter's own submission.
+  if (error && approveNow && /^HTTP 403/.test(String(error.message || '')) && /42501|row-level security/i.test(String(error.message || ''))) {
+    const pendingPayload = Object.assign({}, payload, { status: 'pending', reviewed_by_email: null, reviewed_by_name: null, reviewed_at: null });
+    const retry = await supabaseRest.insert('upc_mappings', pendingPayload);
+    if (!retry.error) {
+      showToast('Barcode ' + barcode + ' sent for approval → ' + item.name, 'info');
+      logActivity('UPC ' + barcode + ' ' + upcLinkReasonLabel(((appState.user && appState.user.role) || 'counter') + '-update') + ' for ' + item.name);
+      return;
+    }
+    error = retry.error;
+  }
 
   if (error) {
     // Distinguish a real network outage from a server-side rejection (RLS,
