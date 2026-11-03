@@ -378,25 +378,45 @@ export interface DocRowPlan {
   target: string;
   itemId: string;        // '' = none
   addItem: boolean;      // create a catalog item from this line
+  /** not in the printed subtotal — a price option or note ("Volume Pricing: 100C"), not bought */
+  outside?: boolean;
 }
 
 const negative = (dl: DocLine) => dl.line_total < 0 || dl.unit_price < 0 || dl.qty < 0;
+
+// vendors print the subtotal over products only, products + freight / fees, or everything
+function addsUpTo(lines: DocLine[], subtotal: number): boolean {
+  const sum = (f: (l: DocLine) => boolean) => lines.filter(f).reduce((s, l) => s + (Number(l.line_total) || 0), 0);
+  return [sum(l => l.line_kind === 'product'), sum(l => l.line_kind !== 'tax'), sum(() => true)].some(x => Math.abs(x - subtotal) <= 0.05);
+}
+
+/** The product line the printed subtotal leaves out: a price option or note printed like a line
+ *  ("Volume Pricing: 100C" under the air + sea lines it re-prices). Only when the lines don't add up
+ *  and taking out exactly ONE line makes them add up to the cent; otherwise none. */
+export function lineOutsideSubtotal(lines: DocLine[], subtotal: number): number | null {
+  if (!(subtotal > 0) || addsUpTo(lines, subtotal)) return null;
+  const hits = lines.map((_, i) => i).filter(i => lines[i].line_kind === 'product' && lines[i].line_total > 0
+    && addsUpTo(lines.filter((_, j) => j !== i), subtotal));
+  return hits.length === 1 ? hits[0] : null;
+}
 
 /** The first plan for a document's lines. Ticked by default: products, and on
  *  an invoice the non-tax charges (freight, fees). Never a negative line, and
  *  nothing on a credit memo — a credit saved as order lines would count as new
  *  spend (vendors print credits with positive amounts too). */
-export function planDocRows(docLines: DocLine[], orderLines: OtLine[], items: OtItem[], kind: DocKind, isCredit = false): DocRowPlan[] {
-  const matched = matchDocLines(docLines, orderLines);
+export function planDocRows(docLines: DocLine[], orderLines: OtLine[], items: OtItem[], kind: DocKind, isCredit = false, subtotal = 0): DocRowPlan[] {
+  const outside = lineOutsideSubtotal(docLines, subtotal);
+  const matched = matchDocLines(docLines.map((dl, i) => (i === outside ? { ...dl, description: '' } : dl)), orderLines);
   return docLines.map((dl, i) => {
     const existing = matched[i];
     const item = existing?.item_id ? items.find(it => it.id === existing.item_id) ?? null : matchItem(items, dl.description, dl.sku || null);
     return {
       doc: dl,
-      include: !isCredit && !negative(dl) && (dl.line_kind === 'product' || (dl.line_kind !== 'tax' && kind === 'invoice' && Math.abs(dl.line_total) > 0)),
+      include: i !== outside && !isCredit && !negative(dl) && (dl.line_kind === 'product' || (dl.line_kind !== 'tax' && kind === 'invoice' && Math.abs(dl.line_total) > 0)),
       target: existing?.id ?? 'new',
       itemId: item?.id ?? '',
       addItem: false,
+      ...(i === outside ? { outside: true } : {}),
     };
   });
 }
@@ -509,11 +529,10 @@ export function documentChecks(r: Pick<DocReview, 'kind' | 'vendor' | 'docNumber
                                known: { documents: OtDocument[]; lines: OtLine[]; orders: OtOrder[] }, fmt: (x: number) => string): string[] {
   const out: string[] = [];
   const docNumber = r.docNumber.trim();
-  const sum = printed.lines.reduce((s, l) => s + (Number(l.line_total) || 0), 0);
+  // a price option the subtotal leaves out (lineOutsideSubtotal) is not a missing line — it is shown unticked
+  const outside = lineOutsideSubtotal(printed.lines, printed.subtotal);
   const productSum = printed.lines.filter(l => l.line_kind === 'product').reduce((s, l) => s + (Number(l.line_total) || 0), 0);
-  // vendors print the subtotal over products only, products + freight / fees, or everything
-  const preTax = printed.lines.filter(l => l.line_kind !== 'tax').reduce((s, l) => s + (Number(l.line_total) || 0), 0);
-  if (printed.subtotal > 0 && [productSum, preTax, sum].every(x => Math.abs(x - printed.subtotal) > 0.05)) {
+  if (printed.subtotal > 0 && outside === null && !addsUpTo(printed.lines, printed.subtotal)) {
     out.push(`Lines add up to ${fmt(productSum)} but the printed subtotal is ${fmt(printed.subtotal)} — a line may be misread or missing.`);
   }
   printed.lines.forEach(l => {
@@ -623,6 +642,9 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   }
   if (doc.is_credit) return { state: 'pending', reason: 'A credit memo — check it against the order by hand.', orderId: null };
   if (doc.doc_kind === 'other') return { state: 'ignored', reason: 'Not a quote, order confirmation, invoice or shipping notice.' };
+  // a line the printed subtotal leaves out (a price option?) is never decided for the person
+  const outside = lineOutsideSubtotal(doc.lines, doc.subtotal);
+  if (outside !== null) return { state: 'pending', reason: `"${doc.lines[outside].description.slice(0, 80)}" is not in the printed subtotal (a price option?) — check it.`, orderId: null };
 
   const live = (id: string | null | undefined) => data.orders.find(o => o.id === id && !o.archived_at);
   let order: OtOrder | null = null, how = '';
@@ -649,7 +671,7 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   const venueOf = (l: OtLine) => l.venue_id ?? order!.venue_id;
   const orderLines = docVenue ? allLines.filter(l => !venueOf(l) || venueOf(l) === docVenue) : allLines;
   const appendToThread = how === 'same email thread' && !!opts.autoCreate;
-  const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false);
+  const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false, doc.subtotal);
   if (appendToThread) {
     // a second invoice of the request for an item already invoiced is another charge: its own line
     for (const r of rows) {
@@ -696,7 +718,7 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
 function newOrderFrom(doc: ReadDoc, src: MailSource, data: { orders: OtOrder[]; lines: OtLine[]; items: OtItem[]; documents: OtDocument[] },
                       today: string, fmt: (x: number) => string, venues: Array<{ id: string; name: string }>): MailDecision {
   const docNumber = String(doc.doc_number ?? '').trim();
-  const rows = planDocRows(doc.lines, [], data.items, doc.doc_kind, false);
+  const rows = planDocRows(doc.lines, [], data.items, doc.doc_kind, false, doc.subtotal);
   // a fee-only invoice (shipping fee, warehousing and delivery) is spend too: freight / fee lines start the order
   if (!rows.some(r => r.include)) {
     return { state: 'pending', reason: 'Nothing on it to start an order from — check the PDF.', orderId: null };
