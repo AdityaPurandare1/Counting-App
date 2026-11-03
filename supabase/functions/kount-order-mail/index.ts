@@ -23,7 +23,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import { decideMailDocument, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
-import { domainOf, fromBase64, isPdfAttachment, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, type GraphAttachment } from './rules.ts';
+import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, type GraphAttachment } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -118,8 +118,8 @@ Deno.serve(async (req) => {
       }
       const refresh = String(r.json.refresh_token ?? '');
       if (!refresh) return json(200, { state: 'failed', reason: 'Microsoft did not allow staying signed in (no refresh token).' });
-      const me = await graphGet<{ mail?: string; userPrincipalName?: string }>(String(r.json.access_token), '/me?$select=mail,userPrincipalName');
-      const mailbox = String(me.mail || me.userPrincipalName || '').toLowerCase();
+      // who signed in, from the id token (asking /me would need User.Read, which the app isn't granted)
+      const mailbox = idTokenMailbox(String(r.json.id_token ?? '')) || caller.email;
       const { error: setErr } = await sb.rpc('kount_ot_mail_token_set', { p_token: refresh, p_mailbox: mailbox, p_by: caller.email });
       if (setErr) throw setErr;
       // the first pull starts right away (the last 30 days)

@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, isPdfAttachment, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64 } from './rules.ts';
+import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64 } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -61,4 +61,14 @@ Deno.test('base64 round trip + sha256', async () => {
   const b64 = toBase64(bytes);
   assertEquals(fromBase64(b64), bytes);
   assertEquals(await sha256Hex(new TextEncoder().encode('abc') as Uint8Array<ArrayBuffer>), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+});
+
+Deno.test('mailbox from the sign-in id token', () => {
+  const b64url = (o: unknown) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const tok = (claims: unknown) => `${b64url({ alg: 'none' })}.${b64url(claims)}.sig`;
+  assertEquals(idTokenMailbox(tok({ preferred_username: 'APurandare@hwoodgroup.com', name: 'Aditya' })), 'apurandare@hwoodgroup.com');
+  assertEquals(idTokenMailbox(tok({ email: 'x@hwoodgroup.com' })), 'x@hwoodgroup.com');
+  assertEquals(idTokenMailbox(tok({ name: 'no address' })), '');
+  assertEquals(idTokenMailbox('not-a-jwt'), '');
+  assertEquals(idTokenMailbox(undefined), '');
 });

@@ -49,6 +49,20 @@ export function laParts(d: Date = new Date()): { hour: number; isoDate: string }
   return { hour: Number(get('hour')), isoDate: `${get('year')}-${get('month')}-${get('day')}` };
 }
 
+/** The signed-in mailbox from the id token Microsoft returned with the sign-in (straight from its
+ *  token endpoint over TLS, so the claims are read, not re-verified). '' when it carries none. */
+export function idTokenMailbox(idToken: string | null | undefined): string {
+  const part = String(idToken ?? '').split('.')[1];
+  if (!part) return '';
+  try {
+    const json = JSON.parse(new TextDecoder().decode(fromBase64(part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '='))));
+    const v = json.preferred_username || json.email || json.upn || '';
+    return /@/.test(String(v)) ? String(v).toLowerCase() : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Constant-time string compare (the cron secret). */
 export function safeEqual(a: string, b: string): boolean {
   if (!a || !b || a.length !== b.length) return false;

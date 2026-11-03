@@ -7,7 +7,11 @@
 
 export const TENANT_ID = '6711dee9-6622-4505-b955-381bfc5305cc';
 export const CLIENT_ID = 'acd56be2-30a1-4db9-b62d-5f2f9b6d6d85';
-export const SCOPE = 'offline_access openid email User.Read Mail.Read';
+// EXACTLY what the desktop Order Tracker asks for (MSAL ["Mail.Read"] + the sign-in scopes MSAL
+// adds). Anything more — User.Read, email — is a permission the user never consented to for this
+// app, and the tenant then sends the sign-in for admin approval. The mailbox address comes from
+// the sign-in's id token, not from /me (which would need User.Read).
+export const SCOPE = 'Mail.Read openid profile offline_access';
 const AUTH = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0`;
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 
