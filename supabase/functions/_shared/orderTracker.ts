@@ -710,6 +710,18 @@ function newOrderFrom(doc: ReadDoc, src: MailSource, data: { orders: OtOrder[]; 
     tracking: (doc.tracking_numbers || []).join(', '), deliverTo: venue ? 'venue' : 'warehouse', venueId: venue?.id ?? '', today,
     fileName: src.file_name || 'document.pdf', storagePath: src.storage_path, total: doc.total, parsed: doc,
   });
+  if (payload.new_order && !payload.new_order.order_number) payload.new_order.order_number = autoOrderNumber(payload.new_lines, doc.vendor_name, data);
+  // no venue on its Ship to / Bill to (E&E bills storage trips to h.wood): the venues its lines name — one,
+  // or several with each line's own ("BSC delivery" + "TNG delivery" on one invoice)
+  if (payload.new_order && !venue) {
+    const per = payload.new_lines.map(l => { const v = venuesNamed(l.description, venues); return v.length === 1 ? v[0].id : null; });
+    const ids = [...new Set(per.filter((x): x is string => !!x))];
+    if (ids.length === 1) { payload.new_order.venue_id = ids[0]; payload.new_order.deliver_to = 'venue'; }
+    else if (ids.length > 1) {
+      payload.new_order.venue_id = MULTIPLE_VENUES; payload.new_order.deliver_to = 'venue';
+      payload.new_lines.forEach((l, i) => { l.venue_id = per[i]; });
+    }
+  }
   const reason = `New order created from this ${DOC_KIND_LABEL[doc.doc_kind].toLowerCase()}${venue ? ` (for ${venue.name})` : ''}.`;
   payload.note += ' — from email, order created automatically';
   payload.inbox_id = src.id;
@@ -717,6 +729,26 @@ function newOrderFrom(doc: ReadDoc, src: MailSource, data: { orders: OtOrder[]; 
   payload.document.source_message_id = src.message_id;
   payload.document.source_conversation_id = src.conversation_id;
   return { state: 'applied', payload, reason };
+}
+
+/** The order # for an order the pull starts (the user's tracker numbers every order): WHS for E&E
+ *  storage deliveries, CUS when it is one of our custom (branded) stock items, else OSE — the next
+ *  free number of that series. Someone can still change it on the order. */
+export function autoOrderNumber(lines: Array<{ description: string; sku: string | null; item_id: string | null }>, vendor: string,
+                                data: { orders: Array<Pick<OtOrder, 'order_number'>>; items: OtItem[] }): string {
+  const custom = data.items.filter(i => i.is_active && brandKey(i.category) && brandKey(i.category) !== GENERAL_BRAND);
+  // a venue / brand named on it, print work, or one of our custom stock items (on the 11/2 orders this
+  // agreed with the user's own CUS / OSE split ~85% of the time — their numbering is the judge)
+  const brands = [...new Set([...custom.map(i => normText(i.category)), ...Object.values(VENUE_SHORT).flat()])].filter(Boolean);
+  const isCustom = (l: { description: string; sku: string | null; item_id: string | null }) => {
+    const t = ` ${normText(`${l.description} ${l.sku ?? ''}`)} `;
+    return /(custom|logo|printed|printing|branded|foil|stamping|embossed)/i.test(t) || brands.some(b => t.includes(` ${b} `))
+      || (!!l.item_id && custom.some(i => i.id === l.item_id)) || custom.some(i => !!i.sku && compactSku(i.sku) === compactSku(l.sku))
+      || !!matchItem(custom, l.description, l.sku);
+  };
+  const prefix = lines.length && lines.every(l => isStorageLine(l, vendor)) ? 'WHS' : lines.some(isCustom) ? 'CUS' : 'OSE';
+  const used = data.orders.map(o => o.order_number?.match(new RegExp(`^${prefix}-(\\d+)`))?.[1]).filter(Boolean).map(Number);
+  return `${prefix}-${String((used.length ? Math.max(...used) : 0) + 1).padStart(4, '0')}`;
 }
 
 /* ── tracking numbers in vendor emails ────────────────────────────────── */
@@ -897,6 +929,7 @@ export function releasesByVenue(moves: OtMove[], itemId: string, today: string, 
 // no quote, no product invoice, no tracking: "TNG delivery - 10/12/2026 - 3 CASES TNG-EURO / 2 CASES
 // TNG-PIZZAB", "BSC delivery - 10/22/2026 - 2cs taco wrap". Stock coming in is "Receiving and
 // Warehousing - TNG napkins - 1pallet"; a venue sending stock back is "Delilah Miami UPS returns CS 1".
+// Also "BSC - delivery 10/28/2026 SKU: BS-EUROTTE (2) SKU: BS-FOILLOGO (2)": one part per SKU, cases in brackets.
 const STORAGE_HEAD = /\b(?:delivery|deliveries|returns?|receiving and warehousing)\b/i;
 
 /** What became of a storage line (kount_ot_lines.stock_draw, 0141); null = not done yet. */
@@ -910,6 +943,12 @@ const VENUE_SHORT: Record<string, string[]> = {
   'Lady Delilah': ['delilah nyc', 'delilah ny'],
 };
 const venueAliases = (v: { name: string }) => [normText(v.name), ...(VENUE_SHORT[v.name] ?? [])].filter(Boolean);
+
+/** The venues a line names by name or short name ("TNG delivery", "Delilah Miami UPS returns"). */
+export function venuesNamed(text: string, venues: Array<{ id: string; name: string }>): Array<{ id: string; name: string }> {
+  const t = ` ${normText(text)} `;
+  return venues.filter(v => venueAliases(v).some(a => t.includes(` ${a} `)));
+}
 
 export const isEeVendor = (vendor: string | null | undefined) => /^e\s*&?\s*e(\s|$)/i.test(String(vendor ?? '').trim());
 
@@ -926,9 +965,21 @@ function brandServes(category: string | null, venueName: string): boolean {
   return b.length > 2 && b !== GENERAL_BRAND && brandKey(venueName).includes(b);
 }
 const stem = (w: string) => (w.length > 4 && /(ches|shes|xes)$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
-const PART_STOP = new Set('of shipped ship via ups fedex uber pick picked pickup up delivery delivered cs case cases ctn ctns carton cartons pallet pallets pc pcs the and to for by from'.split(' '));
+const PART_STOP = new Set('sku of shipped ship via ups fedex uber pick picked pickup up delivery delivered cs case cases ctn ctns carton cartons pallet pallets pc pcs the and to for by from'.split(' '));
 const wordsOf = (s: string, drop: Set<string>) => normText(s).split(' ').filter(w => w.length > 1 && !/^\d+$/.test(w) && !drop.has(w)).map(stem);
-const wordHit = (w: string, iw: string) => w === iw || (w.length >= 4 && iw.length >= 4 && (iw.startsWith(w) || w.startsWith(iw)));
+// one letter dropped, added or changed ("EUROTTE" = eurotote) still counts in words of 5+ letters
+function oneEditApart(a: string, b: string): boolean {
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0, j = 0, edits = 0;
+  while (i < a.length && j < b.length) {
+    if (a[i] === b[j]) { i++; j++; continue; }
+    if (++edits > 1) return false;
+    if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; }
+  }
+  return edits + (a.length - i) + (b.length - j) <= 1;
+}
+const wordHit = (w: string, iw: string) => w === iw || (w.length >= 4 && iw.length >= 4 && (iw.startsWith(w) || w.startsWith(iw)))
+  || (w.length >= 5 && iw.length >= 5 && oneEditApart(w, iw));
 const compactSku = (s: string | null | undefined) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
 export interface StoragePlan {
@@ -955,8 +1006,7 @@ export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, ord
   const plan: StoragePlan = { kind, day, venueId: null, draws: [], problem: null };
   const problems: string[] = [];
 
-  const t = ` ${normText(text)} `;
-  const named = venues.filter(v => venueAliases(v).some(a => t.includes(` ${a} `)));
+  const named = venuesNamed(text, venues);
   const fallback = l.venue_id ?? order.venue_id;
   if (named.length > 1) problems.push(`It names more than one venue (${named.map(v => v.name).join(', ')}).`);
   else plan.venueId = named[0]?.id ?? (fallback && fallback !== MULTIPLE_VENUES ? fallback : null);
@@ -969,9 +1019,10 @@ export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, ord
   const body = dm ? text.replace(dm[0], ' ') : text;
   const head = body.search(STORAGE_HEAD);
   const rest = head < 0 ? body : body.slice(head).replace(STORAGE_HEAD, ' ');
-  for (const raw of rest.split(/[\/;,+]| & /)) {
+  for (const raw of rest.split(/[\/;,+]| & |(?=\bSKU\s*:)/i)) {
     const part = raw.replace(/\s+-\s+|\s+-$|^-\s+/g, ' ').trim();
-    const qm = part.match(/(\d+(?:\.\d+)?)\s*(?:cases?|cs|ctns?|cartons?)\b/i) ?? part.match(/\b(?:cases?|cs)\s*(\d+(?:\.\d+)?)\b/i);
+    const qm = part.match(/(\d+(?:\.\d+)?)\s*(?:cases?|cs|ctns?|cartons?)\b/i) ?? part.match(/\b(?:cases?|cs)\s*(\d+(?:\.\d+)?)\b/i)
+      ?? part.match(/\((\d+(?:\.\d+)?)\s*(?:cases?|cs)?\)/i);
     const pallet = /\d+\s*pallets?\b/i.test(part);
     const ws = wordsOf(qm ? part.replace(qm[0], ' ') : part, drop);
     if (!qm && !ws.length && !pallet) continue;              // "UBER PICK UP", "via UPS"
