@@ -24,7 +24,7 @@ import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { decideMailDocument, extractTracking, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
-import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
+import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -188,6 +188,13 @@ Deno.serve(async (req) => {
       return json(200, { recorded: stats.storage ?? 0, review: stats.storage_review ?? 0, error: stats.storage_error ?? null });
     }
 
+    if (action === 'sent') {
+      // when each order went to the vendor, from its e-mail threads (0147)
+      const stats = blankStats(`sent dates by ${caller.email}`);
+      await sentPhase(sb, stats);
+      return json(200, { dated: stats.sent ?? 0, error: stats.sent_error ?? null });
+    }
+
     return reject(400, 'Unknown action');
   } catch (e) {
     console.error('[kount-order-mail]', action, msg(e));
@@ -204,6 +211,8 @@ interface Stats {
   storage?: number; storage_review?: number; storage_error?: string;
   /** other attachments (Excel, photos) kept on orders / with no known order yet / why the step failed */
   others?: number; others_unplaced?: number; others_error?: string;
+  /** orders dated by the e-mail that sent them to the vendor (0147) / why the step failed */
+  sent?: number; sent_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -232,6 +241,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     await r365PaidPhase(sb, stats);
     await storagePhase(sb, stats, 'morning mail pull');
     await otherPhase(sb, stats);
+    await sentPhase(sb, stats);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -799,6 +809,61 @@ async function storagePhase(sb: SupabaseClient, stats: Stats, who: string) {
   } catch (e) {
     stats.storage_error = msg(e).slice(0, 300);
     console.error('[kount-order-mail] storage draws failed:', stats.storage_error);
+  }
+}
+
+/** When each order went to the vendor (0147), from the e-mail threads its documents came in (sentToVendor: the
+ *  exchange that led to its first quote / invoice / confirmation). A day typed in the order panel is kept; the
+ *  sheet's Order Date and the PO date give way to the e-mail's. Never fails the pull. */
+async function sentPhase(sb: SupabaseClient, stats: Stats) {
+  try {
+    const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains').eq('id', 1).single();
+    if (error) throw error;
+    const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+    if (tErr) throw tErr;
+    if (!refresh) return;
+    const data = await loadTracker(sb);
+    const todo = new Set(data.orders.filter(o => o.sent_source !== 'email' && o.sent_source !== 'manual').map(o => o.id));
+    const threads = new Map<string, Set<string>>();
+    const docMessages = new Map<string, Set<string>>();          // the e-mails that brought each order's documents
+    const firstDoc = new Map<string, string>();                   // each order's first quote / invoice / confirmation day
+    const { data: docMsgs, error: mErr } = await sb.from('kount_ot_documents').select('order_id, source_message_id, kind, doc_date').not('order_id', 'is', null);
+    if (mErr) throw mErr;
+    for (const d of docMsgs ?? []) {
+      if (!todo.has(d.order_id) || !['quote', 'invoice', 'confirmation'].includes(d.kind)) continue;
+      if (d.source_message_id) (docMessages.get(d.order_id) ?? docMessages.set(d.order_id, new Set()).get(d.order_id)!).add(d.source_message_id);
+      if (d.doc_date && (!firstDoc.has(d.order_id) || d.doc_date < firstDoc.get(d.order_id)!)) firstDoc.set(d.order_id, d.doc_date);
+    }
+    for (const d of data.documents) {
+      if (!d.order_id || !d.source_conversation_id || !todo.has(d.order_id) || !['quote', 'invoice', 'confirmation'].includes(d.kind)) continue;
+      (threads.get(d.order_id) ?? threads.set(d.order_id, new Set()).get(d.order_id)!).add(d.source_conversation_id);
+    }
+    if (!threads.size) return;
+    const tok = await refreshAccess(String(refresh));
+    if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+    const domains: string[] = acct.vendor_domains ?? [];
+    const thread = new Map<string, ThreadMessage[]>();
+    for (const [orderId, convs] of threads) {
+      let first: string | null = null;
+      for (const c of convs) {
+        if (!thread.has(c)) {
+          const page = await graphGet<{ value?: ThreadMessage[] }>(tok.access_token, `/me/messages?$filter=${encodeURIComponent(`conversationId eq '${c.replace(/'/g, "''")}'`)}`
+            + '&$select=id,sentDateTime,receivedDateTime,isDraft,from,toRecipients,ccRecipients&$top=250');
+          thread.set(c, page.value ?? []);
+        }
+        const f = sentToVendor(thread.get(c)!, domains, docMessages.get(orderId) ?? new Set(), firstDoc.get(orderId) ?? null);
+        if (f && (!first || Date.parse(f) < Date.parse(first))) first = f;
+      }
+      const day = first ? laParts(new Date(first)).isoDate : null;
+      if (!takeEmailSentDay(day, data.orders.find(o => o.id === orderId)?.sent_on ?? null, firstDoc.get(orderId) ?? null)) continue;
+      const { data: upd, error: uErr } = await sb.from('kount_ot_orders').update({ sent_on: day, sent_source: 'email' })
+        .eq('id', orderId).or('sent_source.is.null,sent_source.in.(sheet,po_date)').select('id');
+      if (uErr) throw uErr;
+      if (upd?.length) stats.sent = (stats.sent ?? 0) + 1;
+    }
+  } catch (e) {
+    stats.sent_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] sent dates failed:', stats.sent_error);
   }
 }
 

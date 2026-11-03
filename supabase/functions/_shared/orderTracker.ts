@@ -66,6 +66,9 @@ export interface OtOrder {
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+  /** the day it went to the vendor (0147) and how that is known — the morning pull reads it from the e-mail */
+  sent_on?: string | null;
+  sent_source?: 'email' | 'sheet' | 'po_date' | 'manual' | null;
 }
 
 export interface OtLine {
@@ -92,6 +95,9 @@ export interface OtLine {
   stock_draw?: StockDraw | null;
   /** the R365 AP payment(s) that paid its invoice (0143), filled by the morning pull; null = not matched to one */
   r365_payments?: Array<{ number: string; date: string; amount: number }> | null;
+  /** the day it was delivered (0147): stamped when first marked Delivered / Received; 'eta' = estimated */
+  delivered_on?: string | null;
+  delivered_source?: 'app' | 'eta' | 'manual' | null;
 }
 
 export interface OtMove {
@@ -205,10 +211,10 @@ export function orderVenueIds(o: Pick<OtOrder, 'venue_id'>, lines: Array<Pick<Ot
   return [...ids];
 }
 
-export type OrderSort = 'newest' | 'oldest' | 'total-desc' | 'total-asc' | 'expected' | 'updated' | 'status' | 'number' | 'vendor' | 'venue';
+export type OrderSort = 'newest' | 'oldest' | 'total-desc' | 'total-asc' | 'expected' | 'sent' | 'updated' | 'status' | 'number' | 'vendor' | 'venue';
 export const ORDER_SORTS: Array<[OrderSort, string]> = [
   ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['total-desc', 'Total: high to low'], ['total-asc', 'Total: low to high'],
-  ['expected', 'Expected soonest'], ['updated', 'Last status change'], ['status', 'Status (earliest stage first)'],
+  ['expected', 'Expected soonest'], ['sent', 'Sent longest ago'], ['updated', 'Last status change'], ['status', 'Status (earliest stage first)'],
   ['number', 'Order #'], ['vendor', 'Vendor A–Z'], ['venue', 'Venue A–Z'],
 ];
 
@@ -232,6 +238,7 @@ export function sortOrders<T extends OrderRow>(rows: T[], sort: OrderSort, venue
     newest, oldest: (a, b) => -newest(a, b),
     'total-desc': (a, b) => orderTotal(b) - orderTotal(a), 'total-asc': (a, b) => orderTotal(a) - orderTotal(b),
     expected: (a, b) => lastIfEmpty(orderExpected(a), orderExpected(b)),
+    sent: (a, b) => lastIfEmpty(a.o.sent_on ?? null, b.o.sent_on ?? null),           // 0147: open longest first
     updated: (a, b) => orderUpdated(b).localeCompare(orderUpdated(a)),
     status: (a, b) => statusRank(headlineStatus(a.ls) ?? 'REQUESTED') - statusRank(headlineStatus(b.ls) ?? 'REQUESTED'),
     number: (a, b) => (a.o.order_number ?? '~').localeCompare(b.o.order_number ?? '~', undefined, { numeric: true }),

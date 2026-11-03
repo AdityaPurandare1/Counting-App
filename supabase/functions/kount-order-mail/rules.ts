@@ -18,6 +18,57 @@ export function onList(domain: string, list: readonly string[]): boolean {
   return !!d && list.some(x => d === x || d.endsWith('.' + x));
 }
 
+/** A message of an order's e-mail thread, as Graph lists it (0147). */
+export interface ThreadMessage {
+  id?: string; sentDateTime?: string; receivedDateTime?: string; isDraft?: boolean;
+  from?: { emailAddress?: { address?: string } };
+  toRecipients?: Array<{ emailAddress?: { address?: string } }>;
+  ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
+}
+
+/** An e-mail FROM h.wood TO a listed vendor (To or Cc) — not a forward to AP, a note between colleagues or a draft. */
+export function isToVendor(m: ThreadMessage, vendorDomains: readonly string[]): boolean {
+  if (m.isDraft || !onList(domainOf(m.from?.emailAddress?.address), OWN_DOMAINS)) return false;
+  return [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].some(r => onList(domainOf(r.emailAddress?.address), vendorDomains));
+}
+
+const EXCHANGE_GAP_MS = 21 * 86_400_000;
+
+/** When the order went to the vendor, from one of its e-mail threads. Start at the e-mail that brought the
+ *  order's first document (a quote / invoice / confirmation: `docMessageIds`, else the first document's day),
+ *  walk back through the thread while its messages are no more than 3 weeks apart, and take the first e-mail
+ *  h.wood sent the vendor in that exchange. So a thread reused for months starts at this order's request, not at
+ *  the first one in April; and nothing after the order's first document (asking for the invoices, a payment
+ *  note) is ever the day it was sent. Null when the exchange holds no e-mail to the vendor. */
+export function sentToVendor(messages: readonly ThreadMessage[], vendorDomains: readonly string[],
+                             docMessageIds: ReadonlySet<string>, firstDocDay: string | null): string | null {
+  const at = (m: ThreadMessage) => Date.parse(m.sentDateTime ?? m.receivedDateTime ?? '');
+  const live = messages.filter(m => !m.isDraft && Number.isFinite(at(m))).sort((a, b) => at(a) - at(b));
+  // the first document's day, in Los Angeles, ends at 08:00 UTC the next day at the latest (PST)
+  const dayLimit = firstDocDay ? Date.parse(firstDocDay + 'T00:00:00Z') + 32 * 3_600_000 : Infinity;
+  const docTimes = live.filter(m => m.id && docMessageIds.has(m.id)).map(at);
+  const anchor = Math.min(docTimes.length ? Math.min(...docTimes) : Infinity, dayLimit);
+  if (!Number.isFinite(anchor)) return null;
+  let end = -1;
+  live.forEach((m, i) => { if (at(m) <= anchor) end = i; });
+  // the exchange has to reach the document: an April thread is not the request for an order invoiced in August
+  if (end < 0 || anchor - at(live[end]) > EXCHANGE_GAP_MS) return null;
+  let start = end;
+  while (start > 0 && at(live[start]) - at(live[start - 1]) <= EXCHANGE_GAP_MS) start--;
+  const first = live.slice(start, end + 1).find(m => isToVendor(m, vendorDomains));
+  return first ? (first.sentDateTime ?? first.receivedDateTime ?? null) : null;
+}
+
+/** Whether the e-mail's day replaces the order's sent day: only an earlier one (the sheet's Order Date or the PO
+ *  date say it was ordered by then; a later e-mail is a follow-up in another exchange), and only within 60 days
+ *  of the order's first document (a thread busy since spring cannot say which request this order was). */
+export function takeEmailSentDay(emailDay: string | null, current: string | null, firstDocDay: string | null): boolean {
+  if (!emailDay) return false;
+  if (current && emailDay >= current) return false;
+  if (firstDocDay && (Date.parse(firstDocDay) - Date.parse(emailDay)) / 86_400_000 > 60) return false;
+  return true;
+}
+
 export interface GraphAttachment { '@odata.type'?: string; id: string; name?: string; contentType?: string; size?: number; isInline?: boolean }
 
 export const MAX_PDF_BYTES = 10 * 1024 * 1024;

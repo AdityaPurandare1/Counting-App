@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
+import { domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -145,4 +145,35 @@ Deno.test('check stubs: which files, which invoices', () => {
   assertEquals(isStubAttachment(att({ name: 'stub.docx', contentType: 'application/msword' })), null);
   assertEquals(stubInvoices('Please find the attached paystub for the invoices INV-2026-569180, INV-2026-466262 and inv-2026-280644.'), ['INV-2026-569180', 'INV-2026-466262', 'INV-2026-280644']);
   assertEquals(stubInvoices('Please find the attached paystub for this invoice. Let us know the ETA'), []);
+});
+
+Deno.test('sent to the vendor: the exchange that led to the order's first document', () => {
+  const at = (id: string, iso: string, from: string, to: string[], cc: string[] = [], draft = false) => ({
+    id, sentDateTime: iso, isDraft: draft, from: { emailAddress: { address: from } },
+    toRecipients: to.map(address => ({ emailAddress: { address } })), ccRecipients: cc.map(address => ({ emailAddress: { address } })),
+  });
+  const v = ['eemercantile.co'];
+  const thread = [
+    at('a', '2026-04-21T17:00:00Z', 'apurandare@hwoodgroup.com', ['jemma@eemercantile.co']),               // an April order, same thread
+    at('b', '2026-04-23T17:00:00Z', 'jemma@eemercantile.co', ['apurandare@hwoodgroup.com']),
+    at('c', '2026-09-30T16:00:00Z', 'apurandare@hwoodgroup.com', ['hursh@hwoodgroup.com'], ['jemma@eemercantile.co']), // this order's request (vendor on Cc)
+    at('d', '2026-10-01T09:00:00Z', 'apurandare@hwoodgroup.com', ['jemma@eemercantile.co'], [], true),       // a draft
+    at('e', '2026-10-02T15:00:00Z', 'apurandare@hwoodgroup.com', ['ap@hwoodgroup.com']),                     // a note to AP
+    at('f', '2026-10-03T18:00:00Z', 'jemma@eemercantile.co', ['apurandare@hwoodgroup.com']),                 // the quote: the order's first document
+    at('g', '2026-10-15T18:00:00Z', 'apurandare@hwoodgroup.com', ['jemma@eemercantile.co']),                 // later: "please send the invoice"
+  ];
+  assertEquals(sentToVendor(thread, v, new Set(['f']), '2026-10-03'), '2026-09-30T16:00:00Z', 'starts at this order, not April');
+  assertEquals(sentToVendor(thread, v, new Set(), '2026-10-03'), '2026-09-30T16:00:00Z', 'the first document by its day when its e-mail is not in the thread');
+  assertEquals(sentToVendor(thread.filter(m => m.id !== 'c'), v, new Set(['f']), '2026-10-03'), null, 'nothing from h.wood to the vendor before the quote: not known');
+  assertEquals(sentToVendor(thread, v, new Set(['g']), '2026-08-31'), null, 'never after the first document (an invoice dated 8/31)');
+  assertEquals(sentToVendor(thread, v, new Set(), null), null, 'no document, no anchor');
+  assert(isToVendor(thread[2], v) && !isToVendor(thread[3], v) && !isToVendor(thread[4], v) && !isToVendor(thread[1], v));
+});
+
+Deno.test('the e-mail day replaces the sheet / PO day only when earlier and near the first document', () => {
+  assert(takeEmailSentDay('2026-09-28', '2026-10-05', '2026-10-05'), 'the request a week before the PO date');
+  assert(takeEmailSentDay('2026-10-06', null, '2026-10-21'), 'no day yet');
+  assert(!takeEmailSentDay('2026-10-12', '2026-09-28', '2026-10-13'), 'later than the sheet: a follow-up');
+  assert(!takeEmailSentDay('2026-04-21', '2026-08-16', '2026-08-16'), 'four months before the invoice: a thread busy since spring');
+  assert(!takeEmailSentDay(null, '2026-08-16', '2026-08-16'));
 });
