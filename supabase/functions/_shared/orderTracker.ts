@@ -835,6 +835,101 @@ export function extractTracking(text: string | null | undefined): TrackingHit[] 
   return [...out.values()];
 }
 
+/* E&E's "Delivery Status" sheets: one row per item — its qty, qty delivered, ETA, tracking # and a remark
+   ("Complete", "BO: 5 case", "ETA to follow"), sometimes under section rows (DELIVERED / IN TRANSIT) and with
+   the header repeated per section. Each row is matched to ONE line of the order and moves only that line. */
+export interface SheetLineUpdate { lineId: string; status: LineStatus | null; tracking: string | null; eta: string | null; note: string }
+export interface SheetRead { updates: SheetLineUpdate[]; tracking: TrackingHit[]; rows: number; matched: number }
+
+const cellText = (c: unknown) => String(c ?? '').replace(/\s+/g, ' ').trim();
+function sheetDate(s: string): string | null {
+  const iso = s.match(/\b(20\d\d)-(\d\d)-(\d\d)\b/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const us = s.match(/\b(\d{1,2})\/(\d{1,2})\/(20\d\d|\d\d)\b/);
+  return us && +us[1] <= 12 && +us[2] <= 31 ? `${us[3].length === 2 ? '20' + us[3] : us[3]}-${us[1].padStart(2, '0')}-${us[2].padStart(2, '0')}` : null;
+}
+
+export function sheetUpdates(grid: unknown[][], lines: OtLine[], fileName: string): SheetRead {
+  const live = lines.filter(l => l.status !== 'CANCELLED');
+  const out = new Map<string, SheetLineUpdate>();
+  const tracking = new Map<string, TrackingHit>();
+  let cols: { sku: number[]; desc: number; qty: number; del: number; eta: number; track: number; remark: number } | null = null;
+  let section = '', rows = 0, matched = 0;
+  for (const raw of grid) {
+    const r = (raw ?? []).map(cellText);
+    const filled = r.filter(Boolean);
+    if (!filled.length) continue;
+    const low = r.map(c => c.toLowerCase());
+    if (low.some(c => /track/.test(c)) && low.some(c => /\bqty\b|quantity/.test(c))) {          // a header row
+      const find = (re: RegExp, not?: RegExp) => low.findIndex(c => re.test(c) && !(not && not.test(c)));
+      cols = {
+        sku: low.map((c, i) => (/model|sku|item\s*#|item\s*no|mfr\s*#|part\s*#/.test(c) ? i : -1)).filter(i => i >= 0),
+        // "Qty Delievered" is spelled so on E&E's TNG sheet
+        desc: find(/desc/), qty: find(/\bqty\b|quantity/, /del[ie]*ver|ship/), del: find(/del[ie]*ver|shipped/, /date/), eta: find(/\beta\b|ship date|delivery date/),
+        track: find(/track/), remark: find(/remark|status|note|comment/),
+      };
+      continue;
+    }
+    if (filled.length === 1 && /^[A-Z][A-Z\s/&-]{3,}$/.test(filled[0])) { section = filled[0]; continue; }     // DELIVERED / IN TRANSIT
+    if (!cols || filled.length < 3) continue;
+    rows++;
+    const at = (i: number) => (i >= 0 ? r[i] ?? '' : '');
+    // the description: its column, else the longest text the header left unnamed
+    const roles = new Set([...cols.sku, cols.qty, cols.del, cols.eta, cols.track, cols.remark]);
+    const desc = cols.desc >= 0 ? at(cols.desc) : r.filter((_, i) => !roles.has(i)).sort((a, b) => b.length - a.length)[0] ?? '';
+    const skus = cols.sku.map(at).filter(s => s.length >= 3 && /[a-z0-9]/i.test(s));
+    // the line: its SKU, else a SKU written in its description, else clearly the most similar description
+    let line = live.find(l => l.sku && skus.some(s => compactSku(s) === compactSku(l.sku))) ?? null;
+    if (!line) {
+      const inDesc = live.filter(l => skus.some(s => s.length >= 4 && /\d/.test(s) && new RegExp(`(^|[^a-z0-9])${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`, 'i').test(l.description)));
+      if (inDesc.length === 1) line = inDesc[0];
+    }
+    if (!line && desc) {
+      const scored = live.map(l => ({ l, s: similarity(desc, l.description) })).sort((a, b) => b.s - a.s);
+      if (scored[0] && scored[0].s >= 0.5 && (!scored[1] || scored[0].s - scored[1].s >= 0.15)) line = scored[0].l;
+    }
+    if (!line) continue;
+    matched++;
+    const remark = at(cols.remark), trackCell = at(cols.track);
+    const qty = Number(at(cols.qty)) || 0, del = Number(at(cols.del)) || 0;
+    const hits = trackCell ? extractTracking(`tracking ${trackCell}`) : [];
+    for (const h of hits) tracking.set(h.number, h);
+    const backorder = /\bb\/?o\b|back\s*order/i.test(remark);
+    const delivered = /complete|delivered/i.test(remark) || (/deliver/i.test(section) && !backorder) || (qty > 0 && del >= qty && !backorder && !/transit/i.test(section));
+    const moving = !delivered && (/transit|shipped|on the way/i.test(`${section} ${remark}`) || (!!trackCell && !/to follow|pending/i.test(remark)) || del > 0);
+    const status: LineStatus | null = delivered ? 'DELIVERED' : moving ? 'SHIPPED' : null;
+    if (!status && !trackCell && !sheetDate(at(cols.eta))) continue;               // "ETA to follow": nothing to change
+    const prev = out.get(line.id);
+    // the same line twice (two shipments): the further status, the first tracking / ETA
+    if (prev && prev.status && (!status || statusRank(prev.status) >= statusRank(status))) continue;
+    out.set(line.id, {
+      lineId: line.id, status, tracking: trackCell && !/^(n\/?a|-|tbd)$/i.test(trackCell) ? trackCell.slice(0, 120) : prev?.tracking ?? null,
+      eta: delivered ? null : sheetDate(at(cols.eta)) ?? prev?.eta ?? null,
+      note: `${fileName}: ${[remark || section || (status ? STATUS_LABEL[status] : 'listed'), del && qty ? `${del} of ${qty}` : ''].filter(Boolean).join(', ')}`.slice(0, 300),
+    });
+  }
+  return { updates: [...out.values()], tracking: [...tracking.values()], rows, matched };
+}
+
+// the attachments of an order's e-mails kept as 'other' documents (0142), by extension
+const OTHER_TYPES: Record<string, string> = {
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', xls: 'application/vnd.ms-excel', csv: 'text/csv',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', doc: 'application/msword', txt: 'text/plain',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', heic: 'image/heic',
+};
+/** The content type to keep a non-PDF attachment under, or null to leave it: inline pictures and the
+ *  small image001.png kind (e-mail signatures, logos) are not attachments of the order. */
+export function keepOtherAttachment(a: { name?: string | null; size?: number | null; isInline?: boolean | null }): string | null {
+  const name = String(a.name ?? '').trim();
+  const ext = name.toLowerCase().split('.').pop() ?? '';
+  const type = OTHER_TYPES[ext];
+  if (!type || a.isInline) return null;
+  if (type.startsWith('image/') && (/^(image|outlook|logo|signature)[-_ ]?\d*\./i.test(name) || (a.size ?? 0) < 30_000)) return null;
+  if ((a.size ?? 0) > 20 * 1024 * 1024) return null;
+  return type;
+}
+export const isSpreadsheet = (name: string | null | undefined) => /\.(xlsx|xls|csv)$/i.test(String(name ?? ''));
+
 export function trackingUrl(h: { number: string; carrier: string | null }): string {
   const n = encodeURIComponent(h.number);
   switch (h.carrier) {

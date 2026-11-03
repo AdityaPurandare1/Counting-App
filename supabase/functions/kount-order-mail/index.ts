@@ -21,7 +21,8 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
-import { decideMailDocument, extractTracking, isStorageLine, orderForEmail, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
+import { decideMailDocument, extractTracking, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
@@ -74,7 +75,7 @@ async function corporateCaller(req: Request, sb: SupabaseClient): Promise<{ emai
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return reject(405, 'Method not allowed');
-  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number; number?: string };
+  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number; number?: string; document_id?: string };
   const action = String(body.action ?? '');
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -153,15 +154,31 @@ Deno.serve(async (req) => {
       if (locked !== true) return json(200, { found: 0, reason: 'A pull is running — try again in a minute.' });
       const stats = blankStats(`find ${number} by ${caller.email}`);
       try {
-        const found = await findPhase(sb, number, stats);
+        const { seen: found, messages, token } = await findPhase(sb, number, stats);
         const { data: acct } = await sb.from('kount_ot_mail_account').select('doc_kinds').eq('id', 1).single();
         const kinds: string[] = Array.isArray(acct?.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
         if (stats.new_pdfs) await readPhase(sb, stats, Date.now() + 90_000, kinds);
         await r365PaidPhase(sb, stats);
-        return json(200, { found, new_pdfs: stats.new_pdfs, applied: stats.applied, pending: stats.pending, ignored: stats.ignored, failed: stats.failed, paid: stats.paid });
+        // their other attachments (an Excel of tracking numbers) onto the order the PDFs just went to
+        if (messages.length) await attachOthersOf(sb, token, messages, stats);
+        return json(200, { found, new_pdfs: stats.new_pdfs, applied: stats.applied, pending: stats.pending, ignored: stats.ignored, failed: stats.failed, paid: stats.paid, others: stats.others ?? 0 });
       } finally {
         await sb.from('kount_ot_mail_account').update({ running_since: null, updated_at: nowIso() }).eq('id', 1);
       }
+    }
+
+    if (action === 'sheet') {
+      // a delivery-status sheet attached by hand (or all of them, to re-read): each row moves its own line
+      let q = sb.from('kount_ot_documents').select('id, order_id, file_name, storage_path').eq('kind', 'other').not('order_id', 'is', null);
+      if (body.document_id) q = q.eq('id', String(body.document_id));
+      const { data: docs, error } = await q;
+      if (error) throw error;
+      const out = { sheets: 0, rows: 0, matched: 0, updated: 0, tracking: 0 };
+      for (const d of (docs ?? []).filter(x => isSpreadsheet(x.file_name)).sort((a, b) => String(a.file_name).localeCompare(String(b.file_name)))) {
+        const r = await applySheet(sb, d as SheetDoc);
+        out.sheets++; out.rows += r.rows; out.matched += r.matched; out.updated += r.updated; out.tracking += r.tracking;
+      }
+      return json(200, out);
     }
 
     if (action === 'storage') {
@@ -185,6 +202,8 @@ interface Stats {
   applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; stubs: number; remaining?: number; error: string | null; reconnect: boolean; r365_error?: string;
   /** E&E storage lines recorded as stock moves / left for a person / why the step failed */
   storage?: number; storage_review?: number; storage_error?: string;
+  /** other attachments (Excel, photos) kept on orders / with no known order yet / why the step failed */
+  others?: number; others_unplaced?: number; others_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -212,6 +231,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
     await r365PaidPhase(sb, stats);
     await storagePhase(sb, stats, 'morning mail pull');
+    await otherPhase(sb, stats);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -232,7 +252,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
 }
 
 interface Account { vendor_domains: string[] | null; doc_kinds?: string[] | null; suggested_domains: Record<string, number> | null; fetched_through: string | null }
-interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; hasAttachments?: boolean; from?: { emailAddress?: { address?: string; name?: string } } }
+interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; hasAttachments?: boolean; bodyPreview?: string; from?: { emailAddress?: { address?: string; name?: string } } }
 
 async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds: string[]) {
   const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
@@ -283,7 +303,7 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
 /** The listed vendors' e-mails that mention `number` (Outlook search: subject, body and attachment text),
  *  any age: their PDFs go into the Inbox like the morning pull's (a PDF already taken is skipped). Returns the
  *  PDFs seen. Only listed vendor senders, as in the pull — a colleague's forward is not read. */
-async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Promise<number> {
+async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Promise<{ seen: number; messages: GraphMessage[]; token: string }> {
   const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains, doc_kinds').eq('id', 1).single();
   if (error) throw error;
   const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
@@ -296,10 +316,12 @@ async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Prom
   const page = await graphGet<{ value?: GraphMessage[] }>(tok.access_token, `/me/messages?$search=${encodeURIComponent(`"${number.replace(/"/g, '')}"`)}`
     + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,hasAttachments&$top=25');
   let seen = 0;
+  const messages: GraphMessage[] = [];
   for (const m of page.value ?? []) {
     stats.messages++;
     const domain = domainOf(m.from?.emailAddress?.address);
     if (!m.hasAttachments || !domain || !onList(domain, domains)) continue;
+    messages.push(m);
     const atts = await graphGet<{ value?: GraphAttachment[] }>(tok.access_token,
       `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
     for (const p of (atts.value ?? []).filter(isPdfAttachment)) {
@@ -308,7 +330,119 @@ async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Prom
       await takePdf(sb, tok.access_token, m, p, stats);
     }
   }
-  return seen;
+  return { seen, messages, token: tok.access_token };
+}
+
+/** The listed vendors' e-mails of the last 30 days: their non-PDF attachments (an Excel of tracking numbers,
+ *  photos, a Word spec) go onto the order the e-mail belongs to — its thread, else an INV / quote # in it — as
+ *  'other' documents (0142), and a spreadsheet's tracking numbers onto that order too. An e-mail whose order
+ *  is not known yet is looked at again each morning while it is in the window. Never fails the pull. */
+const OTHER_DAYS = 30;
+async function otherPhase(sb: SupabaseClient, stats: Stats) {
+  try {
+    const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains').eq('id', 1).single();
+    if (error) throw error;
+    const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+    if (tErr) throw tErr;
+    if (!refresh) return;
+    const tok = await refreshAccess(String(refresh));
+    if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+    const domains: string[] = acct.vendor_domains ?? [];
+    const since = new Date(Date.now() - OTHER_DAYS * 86_400_000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    const messages: GraphMessage[] = [];
+    let url = `/me/messages?$filter=receivedDateTime ge ${since} and hasAttachments eq true&$orderby=receivedDateTime asc`
+      + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,bodyPreview&$top=50';
+    while (url) {
+      const page = await graphGet<{ value?: GraphMessage[]; '@odata.nextLink'?: string }>(tok.access_token, url);
+      for (const m of page.value ?? []) { const d = domainOf(m.from?.emailAddress?.address); if (d && onList(d, domains)) messages.push(m); }
+      url = page['@odata.nextLink'] ?? '';
+    }
+    await attachOthersOf(sb, tok.access_token, messages, stats);
+  } catch (e) {
+    stats.others_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] other attachments failed:', stats.others_error);
+  }
+}
+
+async function attachOthersOf(sb: SupabaseClient, accessToken: string, messages: GraphMessage[], stats: Stats) {
+  const data = await loadTracker(sb);
+  const { data: had, error } = await sb.from('kount_ot_documents').select('source_message_id, file_name').eq('kind', 'other');
+  if (error) throw error;
+  const seen = new Set((had ?? []).map(d => `${d.source_message_id}|${d.file_name}`));
+  for (const m of messages) {
+    const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken,
+      `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
+    const keep = (atts.value ?? []).filter(a => (!a['@odata.type'] || a['@odata.type'] === '#microsoft.graph.fileAttachment')
+      && !isPdfAttachment(a) && keepOtherAttachment(a) && !seen.has(`${m.id}|${(a.name ?? 'attachment').slice(0, 200)}`));
+    if (!keep.length) continue;
+    const order = orderForEmail(m.conversationId ?? null, `${m.subject ?? ''} ${m.bodyPreview ?? ''} ${keep.map(a => a.name ?? '').join(' ')}`, data);
+    if (!order) { stats.others_unplaced = (stats.others_unplaced ?? 0) + keep.length; continue; }
+    for (const a of keep) {
+      const name = (a.name ?? 'attachment').slice(0, 200);
+      const full = await graphGet<{ contentBytes?: string }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(a.id)}`);
+      const bytes = fromBase64(String(full.contentBytes ?? ''));
+      if (!bytes.length) continue;
+      const id = crypto.randomUUID();
+      const path = `other/${id}.${(name.split('.').pop() ?? 'bin').toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+      const up = await sb.storage.from(BUCKET).upload(path, bytes, { contentType: keepOtherAttachment(a)!, upsert: false });
+      if (up.error) throw up.error;
+      const { error: dErr } = await sb.from('kount_ot_documents').insert({
+        id, order_id: order.id, kind: 'other', doc_date: m.receivedDateTime.slice(0, 10), vendor_name: m.from?.emailAddress?.name ?? null,
+        file_name: name, storage_path: path, source_message_id: m.id, source_conversation_id: m.conversationId ?? null,
+        content_hash: await sha256Hex(bytes), uploaded_by: 'morning mail pull',
+      });
+      seen.add(`${m.id}|${name}`);
+      if (dErr) {
+        await sb.storage.from(BUCKET).remove([path]);
+        if (dErr.code === '23505') continue;                       // the same file is on the order already
+        throw dErr;
+      }
+      stats.others = (stats.others ?? 0) + 1;
+      // a delivery-status sheet: each row moves its own line (Complete = delivered, in transit = shipped, its ETA)
+      if (isSpreadsheet(name)) stats.tracking += (await applySheet(sb, { id, order_id: order.id, file_name: name, storage_path: path }, bytes)).tracking;
+    }
+  }
+}
+
+interface SheetDoc { id: string; order_id: string; file_name: string | null; storage_path: string }
+/** One spreadsheet on an order: sheetUpdates matches each row to one of its lines; a line only moves forward,
+ *  gets the row's tracking if it has none, and the row's ETA while not delivered. The carriers' numbers go on
+ *  the order's tracking list (straight in — the RPC would copy the whole list onto every line). */
+async function applySheet(sb: SupabaseClient, doc: SheetDoc, bytes?: Uint8Array) {
+  if (!bytes) {
+    const dl = await sb.storage.from(BUCKET).download(doc.storage_path);
+    if (dl.error || !dl.data) throw dl.error ?? new Error('sheet missing from storage');
+    bytes = new Uint8Array(await dl.data.arrayBuffer());
+  }
+  const wb = XLSX.read(bytes, { type: 'array' });
+  const grid = wb.SheetNames.flatMap(n => XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[n], { header: 1, raw: false, defval: '' }));
+  const { data: rows, error } = await sb.from('kount_ot_lines').select('*').eq('order_id', doc.order_id);
+  if (error) throw error;
+  const lines = ((rows ?? []) as OtLine[]).map(l => ({ ...l, qty: Number(l.qty) || 0 }));
+  const read = sheetUpdates(grid, lines, doc.file_name ?? 'sheet');
+  let updated = 0;
+  for (const u of read.updates) {
+    const l = lines.find(x => x.id === u.lineId)!;
+    const patch: Record<string, unknown> = {};
+    if (u.status && l.status !== 'CANCELLED' && l.status !== 'RECEIVED' && statusRank(u.status) > statusRank(l.status)) {
+      patch.status = u.status; patch.status_source = 'document'; patch.status_note = u.note;
+    }
+    if (u.tracking && !l.tracking_number) patch.tracking_number = u.tracking;
+    if (u.eta && l.expected_on !== u.eta && statusRank((patch.status as typeof l.status) ?? l.status) < statusRank('DELIVERED')) patch.expected_on = u.eta;
+    if (!Object.keys(patch).length) continue;
+    const { error: uErr } = await sb.from('kount_ot_lines').update(patch).eq('id', l.id);
+    if (uErr) throw uErr;
+    updated++;
+  }
+  let tracking = 0;
+  if (read.tracking.length) {
+    const { data: got, error: tErr } = await sb.from('kount_ot_tracking').upsert(read.tracking.map(h => ({
+      order_id: doc.order_id, tracking_number: h.number.toUpperCase(), carrier: h.carrier, source: 'email', note: `Tracking from ${doc.file_name ?? 'a sheet'}`.slice(0, 200),
+    })), { onConflict: 'order_id,tracking_number', ignoreDuplicates: true }).select('id');
+    if (tErr) throw tErr;
+    tracking = got?.length ?? 0;
+  }
+  return { rows: read.rows, matched: read.matched, updated, tracking };
 }
 
 interface BodyMessage extends GraphMessage { uniqueBody?: { content?: string } }
