@@ -593,7 +593,8 @@ export function extractTracking(text: string | null | undefined): TrackingHit[] 
   for (const w of t.matchAll(TRACK_WORD)) {
     const win = t.slice(w.index ?? 0, (w.index ?? 0) + 160);
     const usps = /usps/i.test(win), dhl = /\bdhl\b/i.test(win);
-    for (const m of win.matchAll(/(?<![\d\-./])(\d[\d ]{8,30}\d)(?![\d\-./])/g)) {
+    // never digits glued to letters or other digits: the tail of a UPS 1Z number is not a FedEx number
+    for (const m of win.matchAll(/(?<![0-9A-Za-z\-./])(\d[\d ]{8,30}\d)(?![0-9A-Za-z\-./])/g)) {
       // "1234 5678 9012" is one FedEx number; "879337642791 879337641177" is two
       for (const cand of [m[1].replace(/ /g, ''), ...m[1].split(' ')]) {
         let carrier: Carrier | null = null;
