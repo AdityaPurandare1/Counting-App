@@ -80,6 +80,8 @@ export interface OtLine {
   expected_on: string | null;
   sort: number;
   updated_at?: string;
+  /** this line's venue when the order serves several (0140); null = the order's venue */
+  venue_id?: string | null;
 }
 
 export interface OtMove {
@@ -118,6 +120,8 @@ export const ORDER_ONLY_VENUES: Array<{ id: string; name: string }> = [
   { id: 'x:Delilah Dallas', name: 'Delilah Dallas' },
   { id: 'x:h.wood Corporate', name: 'h.wood Corporate' },
 ];
+/** An order whose lines serve several venues (0140). */
+export const MULTIPLE_VENUES = 'x:Multiple venues';
 export const orderVenues = (counting: Array<{ id: string; name: string }>) => [...counting, ...ORDER_ONLY_VENUES.filter(x => !counting.some(v => v.name === x.name))];
 export function orderVenueName(id: string | null, counting: Array<{ id: string; name: string }>): string {
   if (!id) return 'Warehouse';
@@ -179,6 +183,52 @@ export function orderState(o: Pick<OtOrder, 'completed_at' | 'archived_at'>, lin
   const h = headlineStatus(lines);
   if (h === 'RECEIVED' || h === 'CANCELLED') return 'completed';
   return 'open';
+}
+
+/* ── the Orders list: venue filter + sorting ─────────────────────────── */
+
+/** The venues an order serves: its own, or each line's when it serves several. */
+export function orderVenueIds(o: Pick<OtOrder, 'venue_id'>, lines: Array<Pick<OtLine, 'venue_id'>>): string[] {
+  const ids = new Set<string>();
+  for (const l of lines) { const v = l.venue_id ?? o.venue_id; if (v && v !== MULTIPLE_VENUES) ids.add(v); }
+  if (!ids.size && o.venue_id && o.venue_id !== MULTIPLE_VENUES) ids.add(o.venue_id);
+  return [...ids];
+}
+
+export type OrderSort = 'newest' | 'oldest' | 'total-desc' | 'total-asc' | 'expected' | 'updated' | 'status' | 'number' | 'vendor' | 'venue';
+export const ORDER_SORTS: Array<[OrderSort, string]> = [
+  ['newest', 'Newest first'], ['oldest', 'Oldest first'], ['total-desc', 'Total: high to low'], ['total-asc', 'Total: low to high'],
+  ['expected', 'Expected soonest'], ['updated', 'Last status change'], ['status', 'Status (earliest stage first)'],
+  ['number', 'Order #'], ['vendor', 'Vendor A–Z'], ['venue', 'Venue A–Z'],
+];
+
+export interface OrderRow { o: OtOrder; ls: OtLine[] }
+const orderDay = (r: OrderRow) => r.o.ordered_on ?? r.o.created_at.slice(0, 10);
+const orderTotal = (r: OrderRow) => r.ls.filter(l => l.status !== 'CANCELLED').reduce((s, l) => s + lineTotal(l), 0);
+const orderExpected = (r: OrderRow) => [r.o.expected_on, ...r.ls.filter(l => l.status !== 'CANCELLED' && statusRank(l.status) < statusRank('DELIVERED')).map(l => l.expected_on)]
+  .filter((x): x is string => !!x).sort()[0] ?? null;
+const orderUpdated = (r: OrderRow) => r.ls.map(l => l.status_at).sort().slice(-1)[0] ?? r.o.created_at;
+
+/** Rows for one venue (an order matches when it, or any of its lines, is for that venue). */
+export function filterByVenue<T extends OrderRow>(rows: T[], venue: string): T[] {
+  return venue ? rows.filter(r => orderVenueIds(r.o, r.ls).includes(venue)) : rows;
+}
+
+/** A copy of the rows in the chosen order; ties fall back to newest first. Empty values sort last. */
+export function sortOrders<T extends OrderRow>(rows: T[], sort: OrderSort, venueName: (id: string | null) => string): T[] {
+  const newest = (a: T, b: T) => orderDay(b).localeCompare(orderDay(a));
+  const lastIfEmpty = (x: string | null, y: string | null) => (x === y ? 0 : x === null ? 1 : y === null ? -1 : x.localeCompare(y));
+  const by: Record<OrderSort, (a: T, b: T) => number> = {
+    newest, oldest: (a, b) => -newest(a, b),
+    'total-desc': (a, b) => orderTotal(b) - orderTotal(a), 'total-asc': (a, b) => orderTotal(a) - orderTotal(b),
+    expected: (a, b) => lastIfEmpty(orderExpected(a), orderExpected(b)),
+    updated: (a, b) => orderUpdated(b).localeCompare(orderUpdated(a)),
+    status: (a, b) => statusRank(headlineStatus(a.ls) ?? 'REQUESTED') - statusRank(headlineStatus(b.ls) ?? 'REQUESTED'),
+    number: (a, b) => (a.o.order_number ?? '~').localeCompare(b.o.order_number ?? '~', undefined, { numeric: true }),
+    vendor: (a, b) => a.o.vendor_name.localeCompare(b.o.vendor_name),
+    venue: (a, b) => lastIfEmpty(orderVenueIds(a.o, a.ls).map(v => venueName(v)).sort()[0] ?? null, orderVenueIds(b.o, b.ls).map(v => venueName(v)).sort()[0] ?? null),
+  };
+  return [...rows].sort((a, b) => by[sort](a, b) || newest(a, b));
 }
 
 /** Count of lines per status, in cycle order (the order card's bar). */
@@ -358,13 +408,14 @@ export interface ApplyDocument {
   inbox_id?: string;
   decision?: string;
   order_id?: string;
-  order_patch?: { order_number?: string; expected_on?: string };
+  order_patch?: { order_number?: string; expected_on?: string; venue_id?: string };
   new_order?: { vendor_name: string; order_number: string | null; venue_id: string | null; deliver_to: 'warehouse' | 'venue'; ordered_on: string | null; expected_on: string | null };
   new_items: Array<{ key: string; name: string; sku: string | null; vendor_name: string; unit: string; pack_size: number | null }>;
   updates: Array<{ id: string; item_id?: string; item_key?: string } & Partial<Pick<OtLine, 'status' | 'unit_price' | 'quote_number' | 'invoice_number' | 'invoice_date' | 'tracking_number' | 'expected_on'>>>;
   new_lines: Array<{
     item_id: string | null; item_key?: string; description: string; sku: string | null; qty: number; unit: string | null; unit_price: number | null;
     status: LineStatus; quote_number: string | null; invoice_number: string | null; invoice_date: string | null; tracking_number: string | null; expected_on: string | null;
+    venue_id?: string | null;
   }>;
   document: {
     id: string; kind: DocKind; doc_number: string | null; doc_date: string | null; vendor_name: string; total: number | null; file_name: string; storage_path: string; parsed: unknown;
@@ -479,7 +530,9 @@ export function documentChecks(r: Pick<DocReview, 'kind' | 'vendor' | 'docNumber
     if (dup) out.push(`This ${label} (${docNumber}) from ${dup.vendor_name || r.vendor} was already added on ${dup.created_at.slice(0, 10)}. Saving it again counts it twice.`);
     if (r.kind === 'invoice' && !dup) {
       const orderById = new Map(known.orders.map(o => [o.id, o]));
-      const onLines = known.lines.filter(l => normText(l.invoice_number) === normText(docNumber) && sameVendor(orderById.get(l.order_id)?.vendor_name, r.vendor));
+      // lines of the order it is being saved to don't count: saving updates those same lines
+      const onLines = known.lines.filter(l => normText(l.invoice_number) === normText(docNumber) && l.order_id !== r.order?.id
+        && sameVendor(orderById.get(l.order_id)?.vendor_name, r.vendor));
       if (onLines.length) out.push(`Invoice ${docNumber} is already on ${onLines.length} line${onLines.length === 1 ? '' : 's'} of ${r.vendor || 'this vendor'}'s orders. Check it is not being entered twice.`);
     }
   }
@@ -577,17 +630,6 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     const ids = new Set(sameThread.map(o => o.id));
     if (ids.size === 1) { order = sameThread[0]; how = 'same email thread'; }
   }
-  if (order && opts.autoCreate) {
-    // one email thread can carry several orders ("WAREHOUSING AND DELIVERY"): a document sharing no
-    // product with the thread's order starts its own
-    // — and so does an invoice whose items are all already on ANOTHER invoice of it (E&E invoices the same
-    // coaster per venue in one "Order Request" thread)
-    const threadLines = data.lines.filter(l => l.order_id === order!.id);
-    const byId = new Map(threadLines.map(l => [l.id, l]));
-    const products = planDocRows(doc.lines, threadLines, data.items, doc.doc_kind, false).filter(r => r.include && r.doc.line_kind === 'product');
-    const elsewhere = (target: string) => target === 'new' || (!!byId.get(target) && otherInvoice(byId.get(target)!, doc.doc_kind, docNumber));
-    if (products.length && products.every(r => elsewhere(r.target))) { order = null; how = ''; }
-  }
   if (!order) {
     order = matchOrder(data.orders, data.lines, { order_number: doc.order_number, doc_number: docNumber, kind: doc.doc_kind, vendor_name: doc.vendor_name });
     if (order) how = doc.order_number && normText(order.order_number) === normText(doc.order_number) ? 'PO #' : 'document #';
@@ -597,13 +639,27 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     return { state: 'pending', reason: 'No matching order yet — create one from it.', orderId: null };
   }
 
-  const orderLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
+  // One request = one order, even across venues (the user, 11/2): E&E answers a request in ONE thread and
+  // invoices each venue separately. So a document of the thread's order always goes onto it; its lines are
+  // matched only against that order's lines for the SAME venue, and anything new is added as new lines.
+  const docVenue = venueForDoc(doc, opts.venues ?? [])?.id ?? null;
+  const allLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
+  const venueOf = (l: OtLine) => l.venue_id ?? order!.venue_id;
+  const orderLines = docVenue ? allLines.filter(l => !venueOf(l) || venueOf(l) === docVenue) : allLines;
+  const appendToThread = how === 'same email thread' && !!opts.autoCreate;
   const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false);
+  if (appendToThread) {
+    // a second invoice of the request for an item already invoiced is another charge: its own line
+    for (const r of rows) {
+      const cur = r.target === 'new' ? undefined : orderLines.find(l => l.id === r.target);
+      if (cur && otherInvoice(cur, doc.doc_kind, docNumber)) r.target = 'new';
+    }
+  }
   const included = rows.filter(r => r.include);
   const label = order.order_number || `the ${order.vendor_name} order`;
   if (!included.length) return { state: 'pending', reason: `Nothing on it to record automatically on ${label}.`, orderId: order.id };
   const newProducts = included.filter(r => r.doc.line_kind === 'product' && r.target === 'new');
-  if (newProducts.length) {
+  if (newProducts.length && !appendToThread) {
     return { state: 'pending', reason: `${newProducts.length} item${newProducts.length === 1 ? ' is' : 's are'} not on ${label} yet — check before adding.`, orderId: order.id };
   }
   const review = { kind: doc.doc_kind, vendor: doc.vendor_name, docNumber, order, orderLines, rows };
@@ -616,7 +672,15 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     fileName: src.file_name || 'document.pdf', storagePath: src.storage_path, total: doc.total, parsed: doc,
   });
   if (!payload.updates.length && !payload.new_lines.length) return { state: 'pending', reason: `Nothing changes on ${label}.`, orderId: order.id };
-  const reason = `Applied to ${label} (${how}).`;
+  // lines for another venue of the request: they carry their venue, and the order now serves several
+  if (docVenue && order.venue_id !== docVenue && payload.new_lines.length) {
+    if (!order.venue_id) payload.order_patch = { ...(payload.order_patch ?? {}), venue_id: docVenue };
+    else {
+      for (const l of payload.new_lines) l.venue_id = docVenue;
+      if (order.venue_id !== MULTIPLE_VENUES) payload.order_patch = { ...(payload.order_patch ?? {}), venue_id: MULTIPLE_VENUES };
+    }
+  }
+  const reason = newProducts.length ? `Added to ${label} (${how}).` : `Applied to ${label} (${how}).`;
   payload.note += ' — from email, applied automatically';
   payload.inbox_id = src.id;
   payload.decision = reason;
