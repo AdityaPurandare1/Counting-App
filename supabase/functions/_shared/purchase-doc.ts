@@ -31,6 +31,7 @@ export const SCHEMA = {
     ship_to: { type: 'string', description: 'Name in the Ship To block (name only, e.g. a warehouse or venue). Empty string if none.' },
     expected_date: { type: 'string', description: 'Promised ship, delivery or ready date as YYYY-MM-DD if printed, else empty string.' },
     tracking_numbers: { type: 'array', items: { type: 'string' }, description: 'Carrier tracking numbers printed on the document; empty array if none.' },
+    refers_to: { type: 'array', items: { type: 'string' }, description: 'Numbers of OTHER invoices / quotes / orders this document says it belongs to, often in the notes near the bottom (e.g. "Shipping Fee - For Items Under INV-2026-368461", "Balance of INV-...", "Re: Quote Q-..."), exactly as printed. Never the document\'s own number or the PO number (order_number). Empty array if none.' },
     subtotal: { type: 'number', description: 'Subtotal before tax / freight exactly as printed; 0 if none printed.' },
     total: { type: 'number', description: 'Grand total exactly as printed; 0 if none printed.' },
     lines: {
@@ -53,7 +54,7 @@ export const SCHEMA = {
       },
     },
   },
-  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'subtotal', 'total', 'lines'],
+  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'refers_to', 'subtotal', 'total', 'lines'],
 } as const;
 
 export const SYSTEM =
@@ -62,7 +63,7 @@ export const SYSTEM =
   'printed, per the response schema. Report numbers as printed even when they do not add up -- a person reviews the result and ' +
   'checks it against the PDF, so a silently corrected number is worse than a visible mismatch. Numbers are plain (no currency ' +
   'symbols, no thousands separators). Keep the document\'s own number (doc_number) separate from the customer purchase order ' +
-  'number it references (order_number).';
+  'number it references (order_number), and from other invoices it says it is for (refers_to).';
 
 /** base64 of a PDF -> the document as SCHEMA describes it. Throws AiRouterError. */
 export async function readPurchasePdf(a: { pdf: string; fileName: string; flow: string; actorId?: string; metadata?: Record<string, unknown> }) {

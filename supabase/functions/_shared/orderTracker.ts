@@ -588,9 +588,31 @@ export interface ReadDoc {
   order_number: string;
   expected_date: string;
   tracking_numbers: string[];
+  /** other invoices / quotes it says it is for ("Shipping Fee - For Items Under INV-2026-368461"); absent on older reads */
+  refers_to?: string[];
   subtotal: number;
   total: number;
   lines: DocLine[];
+}
+
+/** The order holding the invoice / quote a document says it is for — E&E bills shipping separately and
+ *  notes "Shipping Fee - For Items Under INV-2026-368461" near the bottom. Exactly one live order, else
+ *  null; `venueId` = the venue of those lines when they are all one venue (a several-venue order). */
+export function orderForReferences(refs: string[] | null | undefined, ownNumber: string,
+                                   data: { orders: OtOrder[]; lines: OtLine[]; documents: OtDocument[] }): { order: OtOrder; ref: string; venueId: string | null } | null {
+  const own = normText(ownNumber);
+  const want = new Map((refs ?? []).map(r => [normText(r), String(r).trim()] as const).filter(([k]) => k && k !== own));
+  if (!want.size) return null;
+  const hitLines = data.lines.filter(l => want.has(normText(l.invoice_number)) || want.has(normText(l.quote_number)));
+  const ids = new Set([...hitLines.map(l => l.order_id), ...data.documents.filter(d => want.has(normText(d.doc_number))).map(d => d.order_id)]
+    .filter((x): x is string => !!x));
+  const live = [...ids].map(id => data.orders.find(o => o.id === id && !o.archived_at)).filter((o): o is OtOrder => !!o);
+  if (live.length !== 1) return null;
+  const order = live[0];
+  const ref = [...want.entries()].find(([k]) => hitLines.some(l => l.order_id === order.id && (normText(l.invoice_number) === k || normText(l.quote_number) === k)))?.[1]
+    ?? [...want.values()][0];
+  const venues = new Set(hitLines.filter(l => l.order_id === order.id).map(l => l.venue_id ?? order.venue_id).filter(v => v && v !== MULTIPLE_VENUES));
+  return { order, ref, venueId: venues.size === 1 ? [...venues][0]! : null };
 }
 
 /** The email a PDF came in (kount_ot_inbox). */
@@ -648,7 +670,10 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
 
   const live = (id: string | null | undefined) => data.orders.find(o => o.id === id && !o.archived_at);
   let order: OtOrder | null = null, how = '';
-  if (src.conversation_id) {
+  // it names the invoice it is for (a separate shipping-fee invoice): that invoice's order, whatever the thread
+  const referred = orderForReferences(doc.refers_to, docNumber, data);
+  if (referred && sameVendor(referred.order.vendor_name, doc.vendor_name)) { order = referred.order; how = `it is for ${referred.ref}`; }
+  if (!order && src.conversation_id) {
     const sameThread = data.documents.filter(d => d.source_conversation_id === src.conversation_id && d.order_id)
       .map(d => live(d.order_id)).filter((o): o is OtOrder => !!o && sameVendor(o.vendor_name, doc.vendor_name));
     const ids = new Set(sameThread.map(o => o.id));
@@ -659,6 +684,9 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     if (order) how = doc.order_number && normText(order.order_number) === normText(doc.order_number) ? 'PO #' : 'document #';
   }
   if (!order) {
+    // it names the invoice it is for, but that invoice is on no order yet: never a stray fee-only order
+    const refs = (doc.refers_to ?? []).map(r => String(r).trim()).filter(r => r && normText(r) !== normText(docNumber));
+    if (refs.length) return { state: 'pending', reason: `It is for ${refs.join(', ')}, which is not on any order yet — save it onto that order.`, orderId: null };
     if (opts.autoCreate && doc.doc_kind !== 'shipping') return newOrderFrom(doc, src, data, today, fmt, opts.venues ?? []);
     return { state: 'pending', reason: 'No matching order yet — create one from it.', orderId: null };
   }
@@ -666,7 +694,7 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   // One request = one order, even across venues (the user, 11/2): E&E answers a request in ONE thread and
   // invoices each venue separately. So a document of the thread's order always goes onto it; its lines are
   // matched only against that order's lines for the SAME venue, and anything new is added as new lines.
-  const docVenue = venueForDoc(doc, opts.venues ?? [])?.id ?? null;
+  const docVenue = venueForDoc(doc, opts.venues ?? [])?.id ?? (referred?.order.id === order.id ? referred.venueId : null);
   const allLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
   const venueOf = (l: OtLine) => l.venue_id ?? order!.venue_id;
   const orderLines = docVenue ? allLines.filter(l => !venueOf(l) || venueOf(l) === docVenue) : allLines;
