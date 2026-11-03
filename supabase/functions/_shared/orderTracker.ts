@@ -84,6 +84,8 @@ export interface OtLine {
   venue_id?: string | null;
   /** an E&E storage line: its stock draw recorded, or marked not one (0141) */
   stock_draw?: StockDraw | null;
+  /** the R365 AP payment(s) that paid its invoice (0143), filled by the morning pull; null = not matched to one */
+  r365_payments?: Array<{ number: string; date: string; amount: number }> | null;
 }
 
 export interface OtMove {

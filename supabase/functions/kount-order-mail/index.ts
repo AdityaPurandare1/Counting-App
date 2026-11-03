@@ -719,12 +719,20 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kin
 }
 
 /** Invoiced lines whose R365 AP invoice has been paid -> PAID (matchR365Payments: R365's payment rows
- *  don't name invoices, so vendor + company + amount; unsure = left alone). Never fails the pull. */
+ *  don't name invoices, so vendor + company + amount; unsure = left alone). Each line also keeps WHICH R365
+ *  payment paid it (r365_payments, 0143) — lines already past Paid too — so a missing check stub can be
+ *  reprinted from R365 by that payment. Never fails the pull. */
 const BEFORE_PAID = ['REQUESTED', 'ORDERED', 'QUOTED', 'INVOICED'];
+const PAID_ON = ['PAID', 'SHIPPED', 'DELIVERED', 'RECEIVED'];
 async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
   try {
-    const { data: lines, error } = await sb.from('kount_ot_lines').select('invoice_number').not('invoice_number', 'is', null).in('status', BEFORE_PAID);
+    const [{ data: open, error }, { data: noRef, error: nErr }] = await Promise.all([
+      sb.from('kount_ot_lines').select('invoice_number').not('invoice_number', 'is', null).in('status', BEFORE_PAID),
+      sb.from('kount_ot_lines').select('invoice_number').not('invoice_number', 'is', null).in('status', PAID_ON).is('r365_payments', null),
+    ]);
     if (error) throw error;
+    if (nErr) throw nErr;
+    const lines = [...(open ?? []), ...(noRef ?? [])];
     const originals = [...new Set((lines ?? []).map(l => String(l.invoice_number).trim()).filter(Boolean))];
     const numbers = [...new Set(originals.map(invoiceToken))];
     if (!numbers.length) return;
@@ -739,11 +747,16 @@ async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
       const pays = paid.get(invoiceToken(n));
       if (!pays?.length) continue;
       const note = `Paid in R365: ${pays.map(p => `${p.number} on ${p.date}`).join(', ')}`.slice(0, 300);
+      const refs = pays.map(p => ({ number: p.number, date: p.date, amount: Number(p.amount) }));
       const { data: upd, error: uErr } = await sb.from('kount_ot_lines')
-        .update({ status: 'PAID', status_source: 'document', status_note: note })
+        .update({ status: 'PAID', status_source: 'document', status_note: note, r365_payments: refs })
         .eq('invoice_number', n).in('status', BEFORE_PAID).select('id');
       if (uErr) throw uErr;
       if (upd?.length) stats.paid++;
+      // already past Paid (shipped, delivered — or paid per the sheet): only which payment it was
+      const { error: rErr2 } = await sb.from('kount_ot_lines').update({ r365_payments: refs })
+        .eq('invoice_number', n).in('status', PAID_ON).is('r365_payments', null);
+      if (rErr2) throw rErr2;
     }
   } catch (e) {
     stats.r365_error = msg(e).slice(0, 300);           // shown in the last run, never fails the pull
