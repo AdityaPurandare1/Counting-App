@@ -21,7 +21,7 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
-import { decideMailDocument, extractTracking, orderForEmail, orderVenues, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { decideMailDocument, extractTracking, isStorageLine, orderForEmail, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
@@ -140,7 +140,15 @@ Deno.serve(async (req) => {
       const stats = blankStats(`re-check by ${caller.email}`);
       await redecidePending(sb, stats, Date.now() + 40_000);
       await r365PaidPhase(sb, stats);
-      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, stubs: stats.stubs, r365_error: stats.r365_error ?? null });
+      await storagePhase(sb, stats, caller.email);
+      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, stubs: stats.stubs, r365_error: stats.r365_error ?? null, storage: stats.storage ?? 0 });
+    }
+
+    if (action === 'storage') {
+      // Warehouse: record the E&E deliveries / returns that can be read now
+      const stats = blankStats(`storage by ${caller.email}`);
+      await storagePhase(sb, stats, caller.email);
+      return json(200, { recorded: stats.storage ?? 0, review: stats.storage_review ?? 0, error: stats.storage_error ?? null });
     }
 
     return reject(400, 'Unknown action');
@@ -155,6 +163,8 @@ Deno.serve(async (req) => {
 interface Stats {
   trigger: string; started_at: string; messages: number; new_pdfs: number; read: number;
   applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; stubs: number; remaining?: number; error: string | null; reconnect: boolean; r365_error?: string;
+  /** E&E storage lines recorded as stock moves / left for a person / why the step failed */
+  storage?: number; storage_review?: number; storage_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -181,6 +191,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     await redecidePending(sb, stats, startedMs + READ_BUDGET_MS);
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
     await r365PaidPhase(sb, stats);
+    await storagePhase(sb, stats, 'morning mail pull');
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -552,6 +563,44 @@ async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
   } catch (e) {
     stats.r365_error = msg(e).slice(0, 300);           // shown in the last run, never fails the pull
     console.error('[kount-order-mail] R365 paid check failed:', stats.r365_error);
+  }
+}
+
+/** E&E delivery / return / receiving fee lines -> warehouse stock moves (planStorageLine). Each line is
+ *  claimed (stock_draw) before its moves are written, so it is recorded once even if two runs overlap;
+ *  a line it cannot read waits in Warehouse for a person. Never fails the pull. */
+async function storagePhase(sb: SupabaseClient, stats: Stats, who: string) {
+  try {
+    const data = await loadTracker(sb);
+    const orders = new Map(data.orders.map(o => [o.id, o]));
+    const todo = data.lines.filter(l => !l.stock_draw && orders.has(l.order_id) && isStorageLine(l, orders.get(l.order_id)!.vendor_name));
+    if (!todo.length) return;
+    const moves = (await selectAll<OtMove>(sb, 'kount_ot_stock_moves')).map(m => ({ ...m, qty: Number(m.qty) || 0 }));
+    const { venues = [] } = await decideOptions(sb);
+    const drawn = new Set(moves.map(m => m.line_id).filter(Boolean));
+    const claim = async (id: string) => {
+      const { data: got, error } = await sb.from('kount_ot_lines').update({ stock_draw: 'recorded' }).eq('id', id).is('stock_draw', null).select('id');
+      if (error) throw error;
+      return !!got?.length;
+    };
+    for (const l of todo) {
+      if (drawn.has(l.id)) { await claim(l.id); continue; }       // recorded by hand already
+      const o = orders.get(l.order_id)!;
+      const plan = planStorageLine(l, o, data.items, moves, venues);
+      if (plan.problem) { stats.storage_review = (stats.storage_review ?? 0) + 1; continue; }
+      if (!(await claim(l.id))) continue;
+      const rows = storageMoveRows(plan, l, l.invoice_date ?? o.ordered_on ?? laParts().isoDate).map(r => ({ ...r, created_by: who }));
+      const { error } = await sb.from('kount_ot_stock_moves').insert(rows);
+      if (error) {
+        await sb.from('kount_ot_lines').update({ stock_draw: null }).eq('id', l.id);
+        throw error;
+      }
+      moves.push(...rows.map(r => ({ ...r, id: '' })));
+      stats.storage = (stats.storage ?? 0) + 1;
+    }
+  } catch (e) {
+    stats.storage_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] storage draws failed:', stats.storage_error);
   }
 }
 

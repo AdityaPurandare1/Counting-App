@@ -82,6 +82,8 @@ export interface OtLine {
   updated_at?: string;
   /** this line's venue when the order serves several (0140); null = the order's venue */
   venue_id?: string | null;
+  /** an E&E storage line: its stock draw recorded, or marked not one (0141) */
+  stock_draw?: StockDraw | null;
 }
 
 export interface OtMove {
@@ -887,6 +889,130 @@ export function releasesByVenue(moves: OtMove[], itemId: string, today: string, 
   const m = new Map<string | null, number>();
   for (const x of moves) if (x.item_id === itemId && x.kind === 'release' && x.moved_on > since) m.set(x.venue_id, (m.get(x.venue_id) ?? 0) + n(x.qty));
   return [...m.entries()].map(([venueId, qty]) => ({ venueId, qty })).sort((a, b) => b.qty - a.qty);
+}
+
+/* ── E&E storage deliveries → stock draws ─────────────────────────────── */
+
+// E&E bills each trip out of its warehouse as a fee line on a "WAREHOUSING AND DELIVERY" invoice —
+// no quote, no product invoice, no tracking: "TNG delivery - 10/12/2026 - 3 CASES TNG-EURO / 2 CASES
+// TNG-PIZZAB", "BSC delivery - 10/22/2026 - 2cs taco wrap". Stock coming in is "Receiving and
+// Warehousing - TNG napkins - 1pallet"; a venue sending stock back is "Delilah Miami UPS returns CS 1".
+const STORAGE_HEAD = /\b(?:delivery|deliveries|returns?|receiving and warehousing)\b/i;
+
+/** What became of a storage line (kount_ot_lines.stock_draw, 0141); null = not done yet. */
+export type StockDraw = 'recorded' | 'none';
+
+/** Short names E&E writes for venues. */
+const VENUE_SHORT: Record<string, string[]> = {
+  'The Nice Guy': ['tng', 'nice guy'],
+  'The Birdstreet Club': ['bsc', 'bird streets', 'bird street', 'birdstreets'],
+  'Little Luck': ['ll'],
+  'Lady Delilah': ['delilah nyc', 'delilah ny'],
+};
+const venueAliases = (v: { name: string }) => [normText(v.name), ...(VENUE_SHORT[v.name] ?? [])].filter(Boolean);
+
+export const isEeVendor = (vendor: string | null | undefined) => /^e\s*&?\s*e(\s|$)/i.test(String(vendor ?? '').trim());
+
+/** A line that is E&E moving our stock in or out of its warehouse (not a product we bought). */
+export function isStorageLine(l: Pick<OtLine, 'description' | 'item_id'>, vendor: string): boolean {
+  return !l.item_id && isEeVendor(vendor) && STORAGE_HEAD.test(l.description);
+}
+
+// an item's category is its brand ("Delilah", "Bird Streets"); the brand serves the venues named for it
+const brandKey = (s: string | null | undefined) => normText(s).replace(/\b(the|club)\b/g, ' ').replace(/\s+/g, '').replace(/s$/, '');
+const GENERAL_BRAND = 'hwood';     // h.wood stock any venue can draw
+function brandServes(category: string | null, venueName: string): boolean {
+  const b = brandKey(category);
+  return b.length > 2 && b !== GENERAL_BRAND && brandKey(venueName).includes(b);
+}
+const stem = (w: string) => (w.length > 4 && /(ches|shes|xes)$/.test(w) ? w.slice(0, -2) : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
+const PART_STOP = new Set('of shipped ship via ups fedex uber pick picked pickup up delivery delivered cs case cases ctn ctns carton cartons pallet pallets pc pcs the and to for by from'.split(' '));
+const wordsOf = (s: string, drop: Set<string>) => normText(s).split(' ').filter(w => w.length > 1 && !/^\d+$/.test(w) && !drop.has(w)).map(stem);
+const wordHit = (w: string, iw: string) => w === iw || (w.length >= 4 && iw.length >= 4 && (iw.startsWith(w) || w.startsWith(iw)));
+const compactSku = (s: string | null | undefined) => String(s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+export interface StoragePlan {
+  kind: 'release' | 'receipt';
+  /** the day written on the line; null = use the invoice date */
+  day: string | null;
+  venueId: string | null;
+  draws: Array<{ itemId: string; name: string; qty: number }>;
+  /** why it cannot be recorded by itself — someone picks the item / qty; null = record it */
+  problem: string | null;
+}
+
+/** Read one storage line into stock moves: the venue (written on it, else the line's / order's),
+ *  the day, and per "N CASES <item>" part the item and the cases. An item is matched by its SKU,
+ *  else by its words among the venue's brand (then h.wood stock); when two items fit equally, the
+ *  one we hold stock of is it. Anything unsure becomes a problem, never a guess. */
+export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, order: Pick<OtOrder, 'venue_id'>,
+                                items: OtItem[], moves: OtMove[], venues: Array<{ id: string; name: string }>): StoragePlan {
+  const text = l.description;
+  const kind: StoragePlan['kind'] = /\b(receiving|returns?)\b/i.test(text) ? 'receipt' : 'release';
+  const dm = text.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})\b/);
+  const day = dm && +dm[1] >= 1 && +dm[1] <= 12 && +dm[2] >= 1 && +dm[2] <= 31
+    ? `${dm[3].length === 2 ? '20' + dm[3] : dm[3]}-${dm[1].padStart(2, '0')}-${dm[2].padStart(2, '0')}` : null;
+  const plan: StoragePlan = { kind, day, venueId: null, draws: [], problem: null };
+  const problems: string[] = [];
+
+  const t = ` ${normText(text)} `;
+  const named = venues.filter(v => venueAliases(v).some(a => t.includes(` ${a} `)));
+  const fallback = l.venue_id ?? order.venue_id;
+  if (named.length > 1) problems.push(`names more than one venue (${named.map(v => v.name).join(', ')})`);
+  else plan.venueId = named[0]?.id ?? (fallback && fallback !== MULTIPLE_VENUES ? fallback : null);
+  const venue = venues.find(v => v.id === plan.venueId) ?? null;
+  if (kind === 'release' && !plan.venueId && !named.length) problems.push('which venue it went to');
+
+  const drop = new Set([...PART_STOP, ...venues.flatMap(v => venueAliases(v).flatMap(a => a.split(' ')))]);
+  const stock = items.filter(i => i.is_active && i.track_stock);
+  const held = (i: OtItem) => moves.some(m => m.item_id === i.id && (m.kind === 'receipt' || (m.kind === 'count' && n(m.qty) > 0)));
+  const body = dm ? text.replace(dm[0], ' ') : text;
+  const head = body.search(STORAGE_HEAD);
+  const rest = head < 0 ? body : body.slice(head).replace(STORAGE_HEAD, ' ');
+  for (const raw of rest.split(/[\/;,+]| & /)) {
+    const part = raw.replace(/\s+-\s+|\s+-$|^-\s+/g, ' ').trim();
+    const qm = part.match(/(\d+(?:\.\d+)?)\s*(?:cases?|cs|ctns?|cartons?)\b/i) ?? part.match(/\b(?:cases?|cs)\s*(\d+(?:\.\d+)?)\b/i);
+    const pallet = /\d+\s*pallets?\b/i.test(part);
+    const ws = wordsOf(qm ? part.replace(qm[0], ' ') : part, drop);
+    if (!qm && !ws.length && !pallet) continue;              // "UBER PICK UP", "via UPS"
+    // the item: its SKU written on the line, else the best word match
+    const skus = new Set([...part.matchAll(/[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+|\b[A-Za-z]{2,}\d[A-Za-z0-9]*\b/g)].map(m => compactSku(m[0])));
+    let found: OtItem | null = stock.find(i => i.sku && skus.has(compactSku(i.sku))) ?? null;
+    let why = '';
+    if (!found && ws.length) {
+      const score = (i: OtItem) => { const iw = wordsOf(`${i.name} ${i.sku ?? ''}`, drop); return ws.filter(w => iw.some(x => wordHit(w, x))).length / ws.length; };
+      // the venue's own brand first, then stock any venue can draw (h.wood, no brand)
+      const general = (i: OtItem) => !brandKey(i.category) || brandKey(i.category) === GENERAL_BRAND;
+      for (const pool of venue ? [stock.filter(i => brandServes(i.category, venue.name)), stock.filter(general)] : [stock]) {
+        const scored = pool.map(i => ({ i, s: score(i) })).filter(x => x.s >= 0.5);
+        if (!scored.length) continue;
+        const best = Math.max(...scored.map(x => x.s));
+        let tops = scored.filter(x => x.s === best).map(x => x.i);
+        if (tops.length > 1 && tops.some(held)) tops = tops.filter(held);
+        if (tops.length === 1) found = tops[0];
+        else why = `could be ${tops.slice(0, 3).map(i => i.name).join(' or ')}`;
+        break;
+      }
+      if (!found && !why) why = `no stock item matches "${part}"`;
+    }
+    if (!found) { problems.push(why || `which item the ${qm ? `${qm[1]} cases are` : 'line is'}`); continue; }
+    if (!qm) { problems.push(pallet ? `how many cases of ${found.name} the pallet held` : `how many cases of ${found.name}`); continue; }
+    plan.draws.push({ itemId: found.id, name: found.name, qty: Number(qm[1]) });
+  }
+  if (!plan.draws.length && !problems.length) problems.push('no item or quantity on it');
+  plan.problem = problems.length ? `Can't tell ${problems.join('; ')}.` : null;
+  return plan;
+}
+
+/** The stock moves a storage plan records — dated the delivery day, at noon, so a count of that
+ *  day keeps the last word (E&E bills the trip days after it happened). */
+export function storageMoveRows(plan: StoragePlan, l: Pick<OtLine, 'id' | 'description'>, fallbackDay: string) {
+  const day = plan.day ?? fallbackDay;
+  return plan.draws.map(d => ({
+    item_id: d.itemId, moved_on: day, kind: plan.kind, qty: d.qty,
+    venue_id: plan.kind === 'release' ? plan.venueId : null, line_id: l.id,
+    note: `E&E: ${l.description}`.slice(0, 500), created_at: `${day}T19:00:00Z`,
+  }));
 }
 
 /* ── validation ───────────────────────────────────────────────────────── */
