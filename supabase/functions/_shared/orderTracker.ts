@@ -501,11 +501,15 @@ export function planDocumentSave(r: DocReview): ApplyDocument {
       const keepInvoice = otherInvoice(cur, r.kind, docNumber);
       // the invoice sets the price; a quote only while nothing is invoiced yet (a late quote never overwrites it)
       const quoteMayPrice = r.kind === 'quote' && !cur.invoice_number && statusRank(cur.status) < statusRank('INVOICED');
-      if (price != null && !keepInvoice && (r.kind === 'invoice' || quoteMayPrice || cur.unit_price == null)) u.unit_price = price;
-      if (r.kind === 'quote' && docNumber) u.quote_number = docNumber;
-      if (r.kind === 'invoice' && docNumber && !keepInvoice) { u.invoice_number = docNumber; u.invoice_date = r.docDate || r.today; }
-      if (r.kind === 'shipping' && r.tracking) u.tracking_number = r.tracking;
-      if (r.expected && (r.kind === 'confirmation' || r.kind === 'shipping')) u.expected_on = r.expected;
+      // only what differs from the line, so a document its lines already reflect changes nothing (and is just attached)
+      if (price != null && !keepInvoice && (r.kind === 'invoice' || quoteMayPrice || cur.unit_price == null) && n(cur.unit_price) !== price) u.unit_price = price;
+      if (r.kind === 'quote' && docNumber && cur.quote_number !== docNumber) u.quote_number = docNumber;
+      if (r.kind === 'invoice' && docNumber && !keepInvoice) {
+        if (cur.invoice_number !== docNumber) u.invoice_number = docNumber;
+        if (!cur.invoice_date || cur.invoice_number !== docNumber) u.invoice_date = r.docDate || r.today;
+      }
+      if (r.kind === 'shipping' && r.tracking && cur.tracking_number !== r.tracking) u.tracking_number = r.tracking;
+      if (r.expected && (r.kind === 'confirmation' || r.kind === 'shipping') && cur.expected_on !== r.expected) u.expected_on = r.expected;
       if (ref && !cur.item_id) Object.assign(u, ref);
       if (Object.keys(u).length > 1) out.updates.push(u);
     } else {
@@ -699,9 +703,20 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   const docVenue = venueForDoc(doc, opts.venues ?? [])?.id ?? (referred?.order.id === order.id ? referred.venueId : null);
   const allLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
   const venueOf = (l: OtLine) => l.venue_id ?? order!.venue_id;
-  const orderLines = docVenue ? allLines.filter(l => !venueOf(l) || venueOf(l) === docVenue) : allLines;
+  // lines that already carry this document's own number ARE what it is about, whatever venue it is addressed to
+  // (an HQ invoice billed to LA; an invoice the old tracker sheet put on the order before its PDF arrived)
+  const ownNumber = (l: OtLine) => !!docNumber && normText(doc.doc_kind === 'quote' ? l.quote_number : l.invoice_number) === normText(docNumber);
+  const own = doc.doc_kind === 'quote' || doc.doc_kind === 'invoice' ? allLines.filter(ownNumber) : [];
+  const orderLines = own.length ? own : docVenue ? allLines.filter(l => !venueOf(l) || venueOf(l) === docVenue) : allLines;
   const appendToThread = how === 'same email thread' && !!opts.autoCreate;
   const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false, doc.subtotal);
+  if (own.length) {
+    // the lines with its number are its items even when worded otherwise ("Mints — custom" vs "DELILAH - MINTS 1000/CS"):
+    // what did not match by words pairs up one-for-one, in order, when the counts agree
+    const left = own.filter(l => !rows.some(r => r.target === l.id)).sort((x, y) => x.sort - y.sort);
+    const unpaired = rows.filter(r => r.include && r.doc.line_kind === 'product' && r.target === 'new');
+    if (left.length && left.length === unpaired.length) unpaired.forEach((r, i) => { r.target = left[i].id; });
+  }
   if (appendToThread) {
     // a second invoice of the request for an item already invoiced is another charge: its own line
     for (const r of rows) {
@@ -725,7 +740,8 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     tracking: (doc.tracking_numbers || []).join(', '), deliverTo: order.deliver_to, venueId: order.venue_id ?? '', today,
     fileName: src.file_name || 'document.pdf', storagePath: src.storage_path, total: doc.total, parsed: doc,
   });
-  if (!payload.updates.length && !payload.new_lines.length) return { state: 'pending', reason: `Nothing changes on ${label}.`, orderId: order.id };
+  // nothing on it changes the order (its lines already say so): the PDF is still the order's — attach it
+  const attachOnly = !payload.updates.length && !payload.new_lines.length;
   // lines for another venue of the request: they carry their venue, and the order now serves several
   if (docVenue && order.venue_id !== docVenue && payload.new_lines.length) {
     if (!order.venue_id) payload.order_patch = { ...(payload.order_patch ?? {}), venue_id: docVenue };
@@ -734,7 +750,7 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
       if (order.venue_id !== MULTIPLE_VENUES) payload.order_patch = { ...(payload.order_patch ?? {}), venue_id: MULTIPLE_VENUES };
     }
   }
-  const reason = newProducts.length ? `Added to ${label} (${how}).` : `Applied to ${label} (${how}).`;
+  const reason = attachOnly ? `Attached to ${label} (${how}) — its lines already had it.` : newProducts.length ? `Added to ${label} (${how}).` : `Applied to ${label} (${how}).`;
   payload.note += ' — from email, applied automatically';
   payload.inbox_id = src.id;
   payload.decision = reason;
