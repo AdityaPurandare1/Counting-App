@@ -21,9 +21,9 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
-import { decideMailDocument, extractTracking, orderForEmail, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { decideMailDocument, extractTracking, orderForEmail, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
-import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
+import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, matchR365Payments, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -138,8 +138,9 @@ Deno.serve(async (req) => {
     if (action === 'redecide') {
       // after a save in the admin: waiting items that now match an order go in (cheap — no reading)
       const stats = blankStats(`re-check by ${caller.email}`);
-      await redecidePending(sb, stats);
-      return json(200, { applied: stats.applied });
+      await redecidePending(sb, stats, Date.now() + 40_000);
+      await r365PaidPhase(sb, stats);
+      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid });
     }
 
     return reject(400, 'Unknown action');
@@ -153,9 +154,9 @@ Deno.serve(async (req) => {
 
 interface Stats {
   trigger: string; started_at: string; messages: number; new_pdfs: number; read: number;
-  applied: number; pending: number; ignored: number; failed: number; tracking: number; remaining?: number; error: string | null; reconnect: boolean;
+  applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; remaining?: number; error: string | null; reconnect: boolean;
 }
-const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, error: null, reconnect: false });
+const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, error: null, reconnect: false });
 
 /** Runs with the lock held (kount_ot_mail_begin_run returned true) and always releases it. */
 async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
@@ -169,16 +170,17 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     // a continuation adds to the run it continues, so the admin sees one morning's totals
     if (trigger === 'continued' && acct.last_run) {
       const prev = acct.last_run as Partial<Stats>;
-      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed', 'tracking'] as const) stats[k] = Number(prev[k]) || 0;
+      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed', 'tracking', 'paid'] as const) stats[k] = Number(prev[k]) || 0;
       stats.trigger = String(prev.trigger ?? trigger);
       stats.started_at = String(prev.started_at ?? stats.started_at);
     }
     if (!acct.token_secret_id) { stats.error = 'Outlook is not connected.'; return; }
     const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
     if (trigger !== 'continued') await fetchPhase(sb, acct, stats, kinds);
-    // what waited may match now (an order saved since); then read what is new
-    await redecidePending(sb, stats);
+    // what waited may match now (an order saved since); then read what is new; then Paid from R365
+    await redecidePending(sb, stats, startedMs + READ_BUDGET_MS);
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
+    await r365PaidPhase(sb, stats);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -212,7 +214,8 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
   const sinceMs = prevThrough ? prevThrough - OVERLAP_MS : Date.now() - FIRST_LOOKBACK_DAYS * 86_400_000;
   const since = new Date(sinceMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
   const domains = acct.vendor_domains ?? [];
-  const suggested: Record<string, number> = { ...(acct.suggested_domains ?? {}) };
+  // a full re-scan (no mark) counts suggested senders from scratch, so repeated scans don't add up
+  const suggested: Record<string, number> = prevThrough ? { ...(acct.suggested_domains ?? {}) } : {};
   let newest = prevThrough;
   let url = `/me/messages?$filter=receivedDateTime ge ${since} and hasAttachments eq true&$orderby=receivedDateTime asc`
     + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId&$top=50';
@@ -302,15 +305,17 @@ async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder
 interface PendingRow { id: string; message_id: string; attachment_id: string; conversation_id: string | null; subject: string | null; file_name: string | null; storage_path: string; parsed: Record<string, unknown> | null }
 
 /** Look again at everything waiting: since it waited, a person may have saved the order it belongs to. */
-async function redecidePending(sb: SupabaseClient, stats: Stats) {
+async function redecidePending(sb: SupabaseClient, stats: Stats, deadline: number) {
   const { data: rows, error } = await sb.from('kount_ot_inbox')
     .select('id, message_id, attachment_id, conversation_id, subject, file_name, storage_path, parsed').eq('state', 'pending').order('received_at', { ascending: true });
   if (error) throw error;
   if (!rows?.length) return;
   let data = await loadTracker(sb);
-  if (!data.orders.length) return;
+  const opts = await decideOptions(sb);
+  if (!data.orders.length && !opts.autoCreate) return;
   const today = laParts().isoDate;
   for (const r of rows as PendingRow[]) {
+    if (Date.now() > deadline) break;                  // the rest on the next pull / re-check
     if (!r.parsed) continue;
     if (r.attachment_id === 'body') {
       const hits = (r.parsed.tracking ?? []) as TrackingHit[];
@@ -319,7 +324,7 @@ async function redecidePending(sb: SupabaseClient, stats: Stats) {
       continue;
     }
     const d = decideMailDocument(r.parsed as unknown as ReadDoc, { id: r.id, message_id: r.message_id, conversation_id: r.conversation_id, file_name: r.file_name, storage_path: r.storage_path },
-      data, today, fmtMoney);
+      data, today, fmtMoney, opts);
     if (d.state === 'applied') {
       const { error: aErr } = await sb.rpc('kount_ot_apply_document', { p: d.payload });
       if (!aErr) { stats.applied++; data = await loadTracker(sb); }
@@ -363,8 +368,17 @@ interface InboxRow { id: string; message_id: string; conversation_id: string | n
 
 const KIND_PLURAL: Record<string, string> = { quote: 'quotes', confirmation: 'order confirmations', invoice: 'invoices', shipping: 'shipping notices' };
 
+async function decideOptions(sb: SupabaseClient): Promise<MailDecideOptions> {
+  const [{ data: acct }, { data: venues }] = await Promise.all([
+    sb.from('kount_ot_mail_account').select('auto_create').eq('id', 1).maybeSingle(),
+    sb.from('kount_venues').select('id, name').eq('is_active', true),
+  ]);
+  return { autoCreate: acct?.auto_create !== false, venues: (venues ?? []) as Array<{ id: string; name: string }> };
+}
+
 async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kinds: string[]) {
   let data = await loadTracker(sb);
+  const opts = await decideOptions(sb);
   const today = laParts().isoDate;
   while (Date.now() < deadline) {
     const { data: batch, error } = await sb.from('kount_ot_inbox').select('id, message_id, conversation_id, file_name, storage_path, attempts')
@@ -404,7 +418,7 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kin
         continue;
       }
       const d = decideMailDocument(r.doc, { id: r.b.id, message_id: r.b.message_id, conversation_id: r.b.conversation_id, file_name: r.b.file_name, storage_path: r.b.storage_path },
-        data, today, fmtMoney);
+        data, today, fmtMoney, opts);
       if (d.state === 'applied') {
         const { error: aErr } = await sb.rpc('kount_ot_apply_document', { p: d.payload });
         if (!aErr) { stats.applied++; data = await loadTracker(sb); continue; }
@@ -419,6 +433,33 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kin
       }).eq('id', r.b.id);
       if (d.state === 'pending') stats.pending++; else stats.ignored++;
     }
+  }
+}
+
+/** Invoiced lines whose R365 AP invoice has been paid -> PAID (matchR365Payments: R365's payment rows
+ *  don't name invoices, so vendor + company + amount; unsure = left alone). Never fails the pull. */
+const BEFORE_PAID = ['REQUESTED', 'ORDERED', 'QUOTED', 'INVOICED'];
+async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
+  try {
+    const { data: lines, error } = await sb.from('kount_ot_lines').select('invoice_number').not('invoice_number', 'is', null).in('status', BEFORE_PAID);
+    if (error) throw error;
+    const numbers = [...new Set((lines ?? []).map(l => String(l.invoice_number).trim()).filter(Boolean))];
+    if (!numbers.length) return;
+    const since = new Date(Date.now() - 150 * 86_400_000).toISOString().slice(0, 10);
+    const { data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since });
+    if (rErr) throw rErr;
+    const paid = matchR365Payments(((txs ?? []) as R365Tx[]).map(t => ({ ...t, amount: Number(t.amount) })));
+    for (const n of numbers) {
+      const p = paid.get(n);
+      if (!p) continue;
+      const { data: upd, error: uErr } = await sb.from('kount_ot_lines')
+        .update({ status: 'PAID', status_source: 'document', status_note: `Paid in R365: ${p.number} on ${p.date}` })
+        .eq('invoice_number', n).in('status', BEFORE_PAID).select('id');
+      if (uErr) throw uErr;
+      if (upd?.length) stats.paid++;
+    }
+  } catch (e) {
+    console.error('[kount-order-mail] R365 paid check failed:', msg(e));
   }
 }
 

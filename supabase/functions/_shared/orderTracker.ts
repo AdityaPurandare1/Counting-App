@@ -495,6 +495,8 @@ export interface ReadDoc {
   doc_kind: DocKind;
   is_credit?: boolean;
   vendor_name: string;
+  bill_to?: string;
+  ship_to?: string;
   doc_number: string;
   doc_date: string;
   order_number: string;
@@ -515,6 +517,29 @@ export type MailDecision =
 
 const isoDate = (s: string | null | undefined) => (/^\d{4}-\d{2}-\d{2}$/.test(String(s ?? '')) ? String(s) : '');
 
+/** The venue a document is for, from its Ship to / Bill to name ("Delilah LA", "The Nice Guy"). null when unsure. */
+export function venueForDoc(doc: Pick<ReadDoc, 'bill_to' | 'ship_to'>, venues: Array<{ id: string; name: string }>): { id: string; name: string } | null {
+  let best: { id: string; name: string } | null = null, bestScore = 0;
+  for (const label of [doc.ship_to, doc.bill_to]) {
+    const l = normText(label);
+    if (!l) continue;
+    for (const v of venues) {
+      const n = normText(v.name);
+      if (!n) continue;
+      const score = l === n ? 1 : (` ${l} `.includes(` ${n} `) || ` ${n} `.includes(` ${l} `)) ? 0.9 : similarity(l, n);
+      if (score > bestScore) { bestScore = score; best = v; }
+    }
+    if (bestScore >= 0.9) break;          // the Ship to settles it
+  }
+  return best && bestScore >= 0.6 ? best : null;
+}
+
+export interface MailDecideOptions {
+  /** create a new order from a quote / invoice / confirmation that matches none (0138) */
+  autoCreate?: boolean;
+  venues?: Array<{ id: string; name: string }>;
+}
+
 /** What the morning pull does with one read PDF. It saves on its own ONLY
  *  when the document clearly belongs to one existing order (an earlier
  *  document in the same email thread, else the PO / quote / invoice number
@@ -522,7 +547,7 @@ const isoDate = (s: string | null | undefined) => (/^\d{4}-\d{2}-\d{2}$/.test(St
  *  none of the review checks fire. Everything else waits for a person. */
 export function decideMailDocument(doc: ReadDoc, src: MailSource,
                                    data: { orders: OtOrder[]; lines: OtLine[]; items: OtItem[]; documents: OtDocument[] },
-                                   today: string, fmt: (x: number) => string): MailDecision {
+                                   today: string, fmt: (x: number) => string, opts: MailDecideOptions = {}): MailDecision {
   if (!doc || !Array.isArray(doc.lines)) return { state: 'pending', reason: 'The reader returned nothing usable — open the PDF.', orderId: null };
   const docNumber = String(doc.doc_number ?? '').trim();
   if (docNumber && doc.doc_kind !== 'other') {
@@ -540,11 +565,21 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
     const ids = new Set(sameThread.map(o => o.id));
     if (ids.size === 1) { order = sameThread[0]; how = 'same email thread'; }
   }
+  if (order && opts.autoCreate) {
+    // one email thread can carry several orders ("WAREHOUSING AND DELIVERY"): a document sharing no
+    // product with the thread's order starts its own
+    const threadLines = data.lines.filter(l => l.order_id === order!.id);
+    const products = planDocRows(doc.lines, threadLines, data.items, doc.doc_kind, false).filter(r => r.include && r.doc.line_kind === 'product');
+    if (products.length && products.every(r => r.target === 'new')) { order = null; how = ''; }
+  }
   if (!order) {
     order = matchOrder(data.orders, data.lines, { order_number: doc.order_number, doc_number: docNumber, kind: doc.doc_kind, vendor_name: doc.vendor_name });
     if (order) how = doc.order_number && normText(order.order_number) === normText(doc.order_number) ? 'PO #' : 'document #';
   }
-  if (!order) return { state: 'pending', reason: 'No matching order yet — create one from it.', orderId: null };
+  if (!order) {
+    if (opts.autoCreate && doc.doc_kind !== 'shipping') return newOrderFrom(doc, src, data, today, fmt, opts.venues ?? []);
+    return { state: 'pending', reason: 'No matching order yet — create one from it.', orderId: null };
+  }
 
   const orderLines = data.lines.filter(l => l.order_id === order!.id).sort((a, b) => a.sort - b.sort);
   const rows = planDocRows(doc.lines, orderLines, data.items, doc.doc_kind, false);
@@ -567,6 +602,33 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   if (!payload.updates.length && !payload.new_lines.length) return { state: 'pending', reason: `Nothing changes on ${label}.`, orderId: order.id };
   const reason = `Applied to ${label} (${how}).`;
   payload.note += ' — from email, applied automatically';
+  payload.inbox_id = src.id;
+  payload.decision = reason;
+  payload.document.source_message_id = src.message_id;
+  payload.document.source_conversation_id = src.conversation_id;
+  return { state: 'applied', payload, reason };
+}
+
+/** A new order from a quote / invoice / confirmation nothing matched — the same save a person makes
+ *  with "A new order", only when none of the review checks fire. */
+function newOrderFrom(doc: ReadDoc, src: MailSource, data: { orders: OtOrder[]; lines: OtLine[]; items: OtItem[]; documents: OtDocument[] },
+                      today: string, fmt: (x: number) => string, venues: Array<{ id: string; name: string }>): MailDecision {
+  const docNumber = String(doc.doc_number ?? '').trim();
+  const rows = planDocRows(doc.lines, [], data.items, doc.doc_kind, false);
+  if (!rows.some(r => r.include && r.doc.line_kind === 'product')) {
+    return { state: 'pending', reason: 'No items on it to start an order from — check the PDF.', orderId: null };
+  }
+  const review = { kind: doc.doc_kind, vendor: doc.vendor_name, docNumber, order: null, orderLines: [] as OtLine[], rows };
+  const checks = documentChecks(review, doc, data, fmt);
+  if (checks.length) return { state: 'pending', reason: `Not created automatically: ${checks.join(' ')}`, orderId: null };
+  const venue = venueForDoc(doc, venues);
+  const payload = planDocumentSave({
+    ...review, docId: src.id, docDate: isoDate(doc.doc_date), orderNumber: doc.order_number || '', expected: isoDate(doc.expected_date),
+    tracking: (doc.tracking_numbers || []).join(', '), deliverTo: venue ? 'venue' : 'warehouse', venueId: venue?.id ?? '', today,
+    fileName: src.file_name || 'document.pdf', storagePath: src.storage_path, total: doc.total, parsed: doc,
+  });
+  const reason = `New order created from this ${DOC_KIND_LABEL[doc.doc_kind].toLowerCase()}${venue ? ` (for ${venue.name})` : ''}.`;
+  payload.note += ' — from email, order created automatically';
   payload.inbox_id = src.id;
   payload.decision = reason;
   payload.document.source_message_id = src.message_id;

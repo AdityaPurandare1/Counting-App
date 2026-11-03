@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment } from './rules.ts';
+import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, matchR365Payments, safeEqual, sha256Hex, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -86,4 +86,37 @@ Deno.test('invoices only: which attachments are opened, which readings are kept'
   assert(!kindAllowed(inv, { doc_kind: 'quote' }), 'read as a quote -> skipped');
   assert(kindAllowed(inv, { doc_kind: 'other', is_credit: true }), 'a credit memo goes with invoices');
   assert(!kindAllowed(['quote'], { doc_kind: 'other', is_credit: true }));
+});
+
+Deno.test('R365: a payment for exactly one invoice', () => {
+  const tx = (type: 'AP Invoice' | 'AP Payment', number: string, date: string, amount: number, venue = 'TNG') => ({ type, number, date, venue, vendor: 'E&E Mercantile LLC', amount });
+  const m = matchR365Payments([
+    tx('AP Invoice', 'INV-2026-817036', '2026-10-15', 13682.74), tx('AP Invoice', 'INV-2026-927468', '2026-10-15', 241.38),
+    tx('AP Payment', 'ACH - 24737', '2026-10-22', 13682.74), tx('AP Payment', 'ACH - 24589', '2026-10-22', 241.38),
+  ]);
+  assertEquals(m.get('INV-2026-817036')?.number, 'ACH - 24737');
+  assertEquals(m.get('INV-2026-927468')?.number, 'ACH - 24589');
+});
+
+Deno.test('R365: one payment for several invoices, only when exactly one combination fits', () => {
+  const tx = (type: 'AP Invoice' | 'AP Payment', number: string, date: string, amount: number, venue = 'TNG') => ({ type, number, date, venue, vendor: 'E&E Mercantile LLC', amount });
+  const m = matchR365Payments([
+    tx('AP Invoice', 'A', '2026-10-01', 100.10), tx('AP Invoice', 'B', '2026-10-02', 250.25), tx('AP Invoice', 'C', '2026-10-03', 49.65),
+    tx('AP Payment', 'ACH - 1', '2026-10-10', 350.35),
+  ]);
+  assertEquals([...m.keys()].sort(), ['A', 'B']);
+  const amb = matchR365Payments([
+    tx('AP Invoice', 'A', '2026-10-01', 100), tx('AP Invoice', 'B', '2026-10-02', 200), tx('AP Invoice', 'C', '2026-10-03', 150), tx('AP Invoice', 'D', '2026-10-04', 150),
+    tx('AP Payment', 'ACH - 2', '2026-10-10', 300),
+  ]);
+  assertEquals(amb.size, 0, '100+200 and 150+150 both fit -> not sure -> nothing');
+});
+
+Deno.test('R365: never across companies, never a payment before the invoice', () => {
+  const tx = (type: 'AP Invoice' | 'AP Payment', number: string, date: string, amount: number, venue: string) => ({ type, number, date, venue, vendor: 'E&E Mercantile LLC', amount });
+  assertEquals(matchR365Payments([tx('AP Invoice', 'A', '2026-10-01', 500, 'TNG'), tx('AP Payment', 'P', '2026-10-05', 500, 'Delilah')]).size, 0);
+  assertEquals(matchR365Payments([tx('AP Invoice', 'A', '2026-10-20', 500, 'TNG'), tx('AP Payment', 'P', '2026-10-05', 500, 'TNG')]).size, 0);
+  const twice = matchR365Payments([tx('AP Invoice', 'A', '2026-10-01', 500, 'TNG'), tx('AP Invoice', 'B', '2026-10-02', 500, 'TNG'),
+    tx('AP Payment', 'P1', '2026-10-05', 500, 'TNG'), tx('AP Payment', 'P2', '2026-10-06', 500, 'TNG')]);
+  assertEquals([twice.get('A')?.number, twice.get('B')?.number], ['P1', 'P2'], 'equal amounts: oldest invoice first, each paid once');
 });

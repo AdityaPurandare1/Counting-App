@@ -88,6 +88,57 @@ export function idTokenMailbox(idToken: string | null | undefined): string {
   }
 }
 
+/* ── paid, from R365 (AP payments matched to AP invoices) ──────────────── */
+
+/** An R365 AP invoice or AP payment, one per transaction (kount_ot_r365_ap, 0138). */
+export interface R365Tx { type: 'AP Invoice' | 'AP Payment'; number: string; date: string; venue: string | null; vendor: string; amount: number }
+
+const DAY_MS = 86_400_000;
+const cents = (x: number) => Math.round(Number(x) * 100);
+
+/** Which payment paid which invoice. R365's payment rows do not name the invoices they pay, so a
+ *  payment is matched by vendor + company (venue) + amount: first one invoice for exactly the
+ *  amount (oldest first), else the ONE combination of 2–8 open invoices that adds up to the cent.
+ *  Two possible combinations = not sure = not matched (the invoice simply stays Invoiced). */
+export function matchR365Payments(txs: R365Tx[], opts: { windowDays?: number; maxSubset?: number; maxCandidates?: number } = {}): Map<string, R365Tx> {
+  const windowDays = opts.windowDays ?? 120, maxSubset = opts.maxSubset ?? 8, maxCandidates = opts.maxCandidates ?? 18;
+  const paidBy = new Map<string, R365Tx>();
+  const key = (t: R365Tx) => `${t.vendor.toLowerCase()}|${t.venue ?? ''}`;
+  const groups = new Map<string, { inv: R365Tx[]; pay: R365Tx[] }>();
+  for (const t of txs) {
+    const g = groups.get(key(t)) ?? { inv: [], pay: [] };
+    (t.type === 'AP Invoice' ? g.inv : g.pay).push(t);
+    groups.set(key(t), g);
+  }
+  for (const { inv, pay } of groups.values()) {
+    inv.sort((a, b) => a.date.localeCompare(b.date));
+    pay.sort((a, b) => a.date.localeCompare(b.date));
+    const used = new Set<string>();
+    for (const p of pay) {
+      const pd = Date.parse(p.date), target = cents(p.amount);
+      if (!(target > 0)) continue;
+      const open = inv.filter(i => !used.has(i.number) && Date.parse(i.date) <= pd + 3 * DAY_MS && Date.parse(i.date) >= pd - windowDays * DAY_MS && cents(i.amount) > 0);
+      const exact = open.find(i => cents(i.amount) === target);
+      if (exact) { used.add(exact.number); paidBy.set(exact.number, p); continue; }
+      // the newest open invoices before the payment, small enough to fit in it
+      const cands = open.filter(i => cents(i.amount) < target).slice(-maxCandidates);
+      const found: R365Tx[][] = [];
+      const pick: R365Tx[] = [];
+      const walk = (start: number, left: number) => {
+        if (found.length > 1) return;
+        if (left === 0 && pick.length >= 2) { found.push([...pick]); return; }
+        if (left <= 0 || pick.length >= maxSubset) return;
+        for (let i = start; i < cands.length && found.length < 2; i++) {
+          pick.push(cands[i]); walk(i + 1, left - cents(cands[i].amount)); pick.pop();
+        }
+      };
+      walk(0, target);
+      if (found.length === 1) for (const i of found[0]) { used.add(i.number); paidBy.set(i.number, p); }
+    }
+  }
+  return paidBy;
+}
+
 /** Constant-time string compare (the cron secret). */
 export function safeEqual(a: string, b: string): boolean {
   if (!a || !b || a.length !== b.length) return false;
