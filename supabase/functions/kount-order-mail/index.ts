@@ -21,9 +21,9 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
-import { decideMailDocument, extractTracking, orderForEmail, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { decideMailDocument, extractTracking, orderForEmail, orderVenues, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
-import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, matchR365Payments, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
+import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -140,7 +140,7 @@ Deno.serve(async (req) => {
       const stats = blankStats(`re-check by ${caller.email}`);
       await redecidePending(sb, stats, Date.now() + 40_000);
       await r365PaidPhase(sb, stats);
-      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, r365_error: stats.r365_error ?? null });
+      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, stubs: stats.stubs, r365_error: stats.r365_error ?? null });
     }
 
     return reject(400, 'Unknown action');
@@ -154,9 +154,9 @@ Deno.serve(async (req) => {
 
 interface Stats {
   trigger: string; started_at: string; messages: number; new_pdfs: number; read: number;
-  applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; remaining?: number; error: string | null; reconnect: boolean; r365_error?: string;
+  applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; stubs: number; remaining?: number; error: string | null; reconnect: boolean; r365_error?: string;
 }
-const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, error: null, reconnect: false });
+const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
 /** Runs with the lock held (kount_ot_mail_begin_run returned true) and always releases it. */
 async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
@@ -170,7 +170,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     // a continuation adds to the run it continues, so the admin sees one morning's totals
     if (trigger === 'continued' && acct.last_run) {
       const prev = acct.last_run as Partial<Stats>;
-      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed', 'tracking', 'paid'] as const) stats[k] = Number(prev[k]) || 0;
+      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed', 'tracking', 'paid', 'stubs'] as const) stats[k] = Number(prev[k]) || 0;
       stats.trigger = String(prev.trigger ?? trigger);
       stats.started_at = String(prev.started_at ?? stats.started_at);
     }
@@ -242,6 +242,7 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
     url = page['@odata.nextLink'] ?? '';
   }
   await trackingPhase(sb, tok.access_token, domains, sinceMs, stats);
+  await stubPhase(sb, tok.access_token, sinceMs, stats);
   const { error: upErr } = await sb.from('kount_ot_mail_account').update({
     fetched_through: newest ? new Date(newest).toISOString() : null, suggested_domains: suggested, updated_at: nowIso(),
   }).eq('id', 1);
@@ -302,12 +303,92 @@ async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder
   return true;
 }
 
-interface PendingRow { id: string; message_id: string; attachment_id: string; conversation_id: string | null; subject: string | null; file_name: string | null; storage_path: string; parsed: Record<string, unknown> | null }
+/** h.wood's own "Please find the attached paystub for INV-…" emails: the stub file goes onto every order
+ *  holding one of those invoices (a 'payment' document). Stubs for invoices not tracked yet wait (redecide). */
+async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats) {
+  const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
+  let data = await loadTracker(sb);
+  const seenMsg = new Set<string>();
+  for (const term of ['paystub', 'pay stub', 'payment stub', 'remittance']) {
+    let url = `/me/messages?$search=${encodeURIComponent(`"${term} received>=${sinceDay}"`)}`
+      + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,hasAttachments,uniqueBody&$top=25';
+    let pages = 0;
+    while (url && pages++ < 10) {
+      const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+      for (const m of page.value ?? []) {
+        if (seenMsg.has(m.id) || !m.hasAttachments || !onList(domainOf(m.from?.emailAddress?.address), OWN_DOMAINS)) continue;
+        seenMsg.add(m.id);
+        const invoices = stubInvoices(m.uniqueBody?.content);
+        if (!invoices.length) continue;
+        const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
+        for (const a of atts.value ?? []) {
+          const type = isStubAttachment(a);
+          if (!type) continue;
+          const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', a.id).maybeSingle();
+          if (seen) continue;
+          const full = await graphGet<{ contentBytes?: string }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(a.id)}`);
+          if (!full.contentBytes) continue;
+          const bytes = fromBase64(full.contentBytes);
+          const hash = `stub:${await sha256Hex(bytes)}`;
+          const { data: dup } = await sb.from('kount_ot_inbox').select('id').eq('content_hash', hash).maybeSingle();
+          if (dup) continue;                                  // the same stub sent again
+          const id = crypto.randomUUID();
+          const ext = type === 'application/pdf' ? 'pdf' : type === 'image/png' ? 'png' : 'jpg';
+          const path = `docs/${id}.${ext}`;
+          const up = await sb.storage.from(BUCKET).upload(path, bytes, { contentType: type, upsert: true });
+          if (up.error) throw up.error;
+          const row = {
+            id, message_id: m.id, attachment_id: a.id, internet_message_id: m.internetMessageId ?? null, conversation_id: m.conversationId ?? null,
+            subject: (m.subject ?? '').slice(0, 300), sender_email: m.from?.emailAddress?.address ?? null, sender_name: m.from?.emailAddress?.name ?? null,
+            received_at: m.receivedDateTime, file_name: (a.name ?? `paystub.${ext}`).slice(0, 200), size_bytes: a.size ?? bytes.length,
+            content_hash: hash, storage_path: path, state: 'pending', parsed: { kind: 'payment', invoices },
+            decision: `Check stub for ${invoices.join(', ')}.`,
+          };
+          const { error } = await sb.from('kount_ot_inbox').insert(row);
+          if (error) { await sb.storage.from(BUCKET).remove([path]); if (error.code === '23505') continue; throw error; }
+          if (await attachStub(sb, row, data)) { stats.stubs++; data = await loadTracker(sb); }
+        }
+      }
+      url = page['@odata.nextLink'] ?? '';
+    }
+  }
+}
+
+/** A stub onto every live order with one of its invoices; false when none is tracked yet (it keeps waiting). */
+async function attachStub(sb: SupabaseClient, row: { id: string; message_id: string; conversation_id: string | null; file_name: string | null; storage_path: string; parsed: unknown; received_at?: string | null },
+                          data: { orders: OtOrder[]; lines: OtLine[]; documents: OtDocument[] }): Promise<boolean> {
+  const invoices = ((row.parsed as { invoices?: string[] })?.invoices ?? []).map(invoiceToken);
+  const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
+  const orderIds = new Set<string>();
+  for (const inv of invoices) {
+    for (const l of data.lines) if (l.invoice_number && invoiceToken(l.invoice_number) === inv && live.has(l.order_id)) orderIds.add(l.order_id);
+    for (const d of data.documents) if (d.kind === 'invoice' && d.order_id && invoiceToken(d.doc_number) === inv && live.has(d.order_id)) orderIds.add(d.order_id);
+  }
+  if (!orderIds.size) {
+    await sb.from('kount_ot_inbox').update({ decision: `Check stub for ${invoices.join(', ')} — no order with that invoice yet; it goes on by itself once there is one.` }).eq('id', row.id);
+    return false;
+  }
+  for (const orderId of orderIds) {
+    if (data.documents.some(d => d.order_id === orderId && d.storage_path === row.storage_path)) continue;
+    const { error } = await sb.from('kount_ot_documents').insert({
+      order_id: orderId, kind: 'payment', doc_number: invoices.join(', ').slice(0, 200), doc_date: row.received_at ? row.received_at.slice(0, 10) : null,
+      file_name: row.file_name, storage_path: row.storage_path, parsed: { invoices }, source_message_id: row.message_id, source_conversation_id: row.conversation_id,
+    });
+    if (error) throw error;
+  }
+  await sb.from('kount_ot_inbox').update({
+    state: 'applied', order_id: [...orderIds][0], decided_by: 'morning mail pull',
+    decision: `Check stub for ${invoices.join(', ')} attached to ${orderIds.size === 1 ? 'its order' : `${orderIds.size} orders`}.`,
+  }).eq('id', row.id);
+  return true;
+}
+
+interface PendingRow { id: string; message_id: string; attachment_id: string; conversation_id: string | null; subject: string | null; file_name: string | null; storage_path: string; received_at: string | null; parsed: Record<string, unknown> | null }
 
 /** Look again at everything waiting: since it waited, a person may have saved the order it belongs to. */
 async function redecidePending(sb: SupabaseClient, stats: Stats, deadline: number) {
   const { data: rows, error } = await sb.from('kount_ot_inbox')
-    .select('id, message_id, attachment_id, conversation_id, subject, file_name, storage_path, parsed').eq('state', 'pending').order('received_at', { ascending: true });
+    .select('id, message_id, attachment_id, conversation_id, subject, file_name, storage_path, received_at, parsed').eq('state', 'pending').order('received_at', { ascending: true });
   if (error) throw error;
   if (!rows?.length) return;
   let data = await loadTracker(sb);
@@ -317,6 +398,10 @@ async function redecidePending(sb: SupabaseClient, stats: Stats, deadline: numbe
   for (const r of rows as PendingRow[]) {
     if (Date.now() > deadline) break;                  // the rest on the next pull / re-check
     if (!r.parsed) continue;
+    if ((r.parsed as { kind?: string }).kind === 'payment') {
+      if (await attachStub(sb, r, data)) { stats.stubs++; data = await loadTracker(sb); }
+      continue;
+    }
     if (r.attachment_id === 'body') {
       const hits = (r.parsed.tracking ?? []) as TrackingHit[];
       const order = orderForEmail(r.conversation_id, String(r.parsed.excerpt ?? r.subject ?? ''), data);
@@ -373,7 +458,8 @@ async function decideOptions(sb: SupabaseClient): Promise<MailDecideOptions> {
     sb.from('kount_ot_mail_account').select('auto_create').eq('id', 1).maybeSingle(),
     sb.from('kount_venues').select('id, name').eq('is_active', true),
   ]);
-  return { autoCreate: acct?.auto_create !== false, venues: (venues ?? []) as Array<{ id: string; name: string }> };
+  // + the order-only venues (Delilah Dallas, Corporate) Kount does not count
+  return { autoCreate: acct?.auto_create !== false, venues: orderVenues((venues ?? []) as Array<{ id: string; name: string }>) };
 }
 
 async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kinds: string[]) {
@@ -443,19 +529,22 @@ async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
   try {
     const { data: lines, error } = await sb.from('kount_ot_lines').select('invoice_number').not('invoice_number', 'is', null).in('status', BEFORE_PAID);
     if (error) throw error;
-    const numbers = [...new Set((lines ?? []).map(l => String(l.invoice_number).trim()).filter(Boolean))];
+    const originals = [...new Set((lines ?? []).map(l => String(l.invoice_number).trim()).filter(Boolean))];
+    const numbers = [...new Set(originals.map(invoiceToken))];
     if (!numbers.length) return;
     const since = new Date(Date.now() - 150 * 86_400_000).toISOString().slice(0, 10);
     // the first read of the ledger after a quiet spell can pass the 8 s limit; the second is warm (~0.3 s)
     let { data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since });
     if (rErr?.code === '57014') ({ data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since }));
     if (rErr) throw rErr;
-    const paid = matchR365Payments(((txs ?? []) as R365Tx[]).map(t => ({ ...t, amount: Number(t.amount) })));
-    for (const n of numbers) {
-      const p = paid.get(n);
-      if (!p) continue;
+    // R365 splits some invoices per venue ("INV-2026-857309 Delilah LA" / Miami / Dallas): paid = every part paid
+    const paid = paidInvoices(numbers, ((txs ?? []) as R365Tx[]).map(t => ({ ...t, amount: Number(t.amount) })));
+    for (const n of originals) {
+      const pays = paid.get(invoiceToken(n));
+      if (!pays?.length) continue;
+      const note = `Paid in R365: ${pays.map(p => `${p.number} on ${p.date}`).join(', ')}`.slice(0, 300);
       const { data: upd, error: uErr } = await sb.from('kount_ot_lines')
-        .update({ status: 'PAID', status_source: 'document', status_note: `Paid in R365: ${p.number} on ${p.date}` })
+        .update({ status: 'PAID', status_source: 'document', status_note: note })
         .eq('invoice_number', n).in('status', BEFORE_PAID).select('id');
       if (uErr) throw uErr;
       if (upd?.length) stats.paid++;

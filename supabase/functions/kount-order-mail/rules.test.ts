@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, matchR365Payments, safeEqual, sha256Hex, toBase64, wantsAttachment } from './rules.ts';
+import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -119,4 +119,30 @@ Deno.test('R365: never across companies, never a payment before the invoice', ()
   const twice = matchR365Payments([tx('AP Invoice', 'A', '2026-10-01', 500, 'TNG'), tx('AP Invoice', 'B', '2026-10-02', 500, 'TNG'),
     tx('AP Payment', 'P1', '2026-10-05', 500, 'TNG'), tx('AP Payment', 'P2', '2026-10-06', 500, 'TNG')]);
   assertEquals([twice.get('A')?.number, twice.get('B')?.number], ['P1', 'P2'], 'equal amounts: oldest invoice first, each paid once');
+});
+
+Deno.test('R365: an invoice split per venue is paid only when every part is', () => {
+  const tx = (type: 'AP Invoice' | 'AP Payment', number: string, date: string, amount: number, venue: string) => ({ type, number, date, venue, vendor: 'E&E Mercantile LLC', amount });
+  const parts = [tx('AP Invoice', 'INV-2026-857309 Delilah LA', '2026-08-30', 5120.03, 'LA'), tx('AP Invoice', 'INV-2026-857309 Delilah Miami', '2026-08-30', 5120.03, 'MIA'),
+                 tx('AP Invoice', 'INV-2026-857309 Delilah Dallas', '2026-08-30', 5120.03, 'DAL')];
+  const pays = [tx('AP Payment', 'ACH - 1', '2026-09-03', 5120.03, 'LA'), tx('AP Payment', 'ACH - 2', '2026-09-03', 5120.03, 'MIA')];
+  assertEquals(paidInvoices(['INV-2026-857309'], [...parts, ...pays]).size, 0, 'Dallas part unpaid -> not paid');
+  const all = paidInvoices(['inv-2026-857309-1'], [...parts, ...pays, tx('AP Payment', 'ACH - 3', '2026-09-04', 5120.03, 'DAL')]);
+  assertEquals(all.get('INV-2026-857309')?.map(p => p.number).sort(), ['ACH - 1', 'ACH - 2', 'ACH - 3']);
+  const voided = paidInvoices(['INV-2026-291876'], [tx('AP Invoice', 'INV-2026-291876 - Voided', '2026-09-22', 29680.5, 'LA'),
+    tx('AP Invoice', 'INV-2026-291876 - Voiding', '2026-09-28', -29680.5, 'LA'), tx('AP Payment', 'ACH - 9', '2026-09-29', 29680.5, 'LA')]);
+  assertEquals(voided.size, 0, 'a voided invoice is never paid');
+  assertEquals(invoiceToken('INV-2026-291876/2'), 'INV-2026-291876');
+  assertEquals(invoiceToken('Invoice-INV-2026-086418.pdf'), 'INV-2026-086418');
+});
+
+Deno.test('check stubs: which files, which invoices', () => {
+  const att = (over: Record<string, unknown>) => ({ '@odata.type': '#microsoft.graph.fileAttachment', id: 'a', name: 'paystub.pdf', contentType: 'application/pdf', size: 80_000, isInline: false, ...over });
+  assertEquals(isStubAttachment(att({})), 'application/pdf');
+  assertEquals(isStubAttachment(att({ name: 'IMG_2231.JPG', contentType: 'image/jpeg' })), 'image/jpeg');
+  assertEquals(isStubAttachment(att({ name: 'image.png', contentType: 'image/png', isInline: true, size: 22_909 })), null, 'a signature logo is not a stub');
+  assertEquals(isStubAttachment(att({ name: 'image.png', contentType: 'image/png', isInline: true, size: 240_000 })), 'image/png', 'a pasted screenshot of the stub is');
+  assertEquals(isStubAttachment(att({ name: 'stub.docx', contentType: 'application/msword' })), null);
+  assertEquals(stubInvoices('Please find the attached paystub for the invoices INV-2026-569180, INV-2026-466262 and inv-2026-280644.'), ['INV-2026-569180', 'INV-2026-466262', 'INV-2026-280644']);
+  assertEquals(stubInvoices('Please find the attached paystub for this invoice. Let us know the ETA'), []);
 });

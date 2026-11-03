@@ -139,6 +139,52 @@ export function matchR365Payments(txs: R365Tx[], opts: { windowDays?: number; ma
   return paidBy;
 }
 
+/** "INV-2026-857309" out of "INV-2026-857309 Delilah LA", "INV-2026-857309-1", "inv-2026-857309/2" (upper case). */
+export function invoiceToken(n: string | null | undefined): string {
+  const m = /INV-\d{4}-\d{5,7}/i.exec(String(n ?? ''));
+  return m ? m[0].toUpperCase() : String(n ?? '').trim().toUpperCase();
+}
+
+/** Tracked invoice token -> the R365 payments that paid it, only when EVERY R365 part of it is paid
+ *  (R365 splits some E&E invoices per venue). Voided / voiding entries are not parts. */
+export function paidInvoices(tokens: string[], txs: R365Tx[]): Map<string, R365Tx[]> {
+  const live = txs.filter(t => !/void/i.test(t.number));
+  const paidBy = matchR365Payments(live);
+  const parts = new Map<string, R365Tx[]>();
+  for (const t of live) if (t.type === 'AP Invoice') {
+    const k = invoiceToken(t.number);
+    parts.set(k, [...(parts.get(k) ?? []), t]);
+  }
+  const out = new Map<string, R365Tx[]>();
+  for (const tok of new Set(tokens.map(invoiceToken))) {
+    const ps = parts.get(tok);
+    if (!ps?.length || !ps.every(p => paidBy.has(p.number))) continue;
+    out.set(tok, [...new Set(ps.map(p => paidBy.get(p.number)!))]);
+  }
+  return out;
+}
+
+/* ── check stubs (h.wood's "attached paystub for INV-…" emails) ────────── */
+
+export const STUB_TYPES = ['application/pdf', 'image/png', 'image/jpeg'] as const;
+
+/** A stub file: a PDF or photo, not a signature logo (inline images under 60 KB are logos). */
+export function isStubAttachment(a: GraphAttachment): string | null {
+  if (a['@odata.type'] && a['@odata.type'] !== '#microsoft.graph.fileAttachment') return null;
+  const name = (a.name ?? '').toLowerCase();
+  const type = /pdf/i.test(a.contentType ?? '') || name.endsWith('.pdf') ? 'application/pdf'
+    : /png/i.test(a.contentType ?? '') || name.endsWith('.png') ? 'image/png'
+    : /jpe?g/i.test(a.contentType ?? '') || /\.jpe?g$/.test(name) ? 'image/jpeg' : null;
+  if (!type || (a.size ?? 0) > MAX_PDF_BYTES) return null;
+  if (a.isInline && (type !== 'application/pdf') && (a.size ?? 0) < 60_000) return null;
+  return type;
+}
+
+/** The invoice numbers a stub email is for — only what THAT email says (uniqueBody), not the quoted thread. */
+export function stubInvoices(text: string | null | undefined): string[] {
+  return [...new Set([...String(text ?? '').matchAll(/INV-\d{4}-\d{5,7}/gi)].map(m => m[0].toUpperCase()))];
+}
+
 /** Constant-time string compare (the cron secret). */
 export function safeEqual(a: string, b: string): boolean {
   if (!a || !b || a.length !== b.length) return false;

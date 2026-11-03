@@ -98,7 +98,8 @@ export interface OtMove {
 export interface OtDocument {
   id: string;
   order_id: string | null;
-  kind: DocKind;
+  /** 'payment' = a check stub (0139) */
+  kind: DocKind | 'payment';
   doc_number: string | null;
   doc_date: string | null;
   vendor_name: string | null;
@@ -111,6 +112,17 @@ export interface OtDocument {
 }
 
 export type DocKind = 'quote' | 'confirmation' | 'invoice' | 'shipping' | 'other';
+
+/** Venues an order can be FOR that Kount does not count (orders only). Their ids carry an 'x:' prefix. */
+export const ORDER_ONLY_VENUES: Array<{ id: string; name: string }> = [
+  { id: 'x:Delilah Dallas', name: 'Delilah Dallas' },
+  { id: 'x:h.wood Corporate', name: 'h.wood Corporate' },
+];
+export const orderVenues = (counting: Array<{ id: string; name: string }>) => [...counting, ...ORDER_ONLY_VENUES.filter(x => !counting.some(v => v.name === x.name))];
+export function orderVenueName(id: string | null, counting: Array<{ id: string; name: string }>): string {
+  if (!id) return 'Warehouse';
+  return orderVenues(counting).find(v => v.id === id)?.name ?? (id.startsWith('x:') ? id.slice(2) : id);
+}
 
 /** A tracking number on an order (kount_ot_tracking, 0137) — from a vendor email, a shipping notice or by hand. */
 export interface OtTracking {
