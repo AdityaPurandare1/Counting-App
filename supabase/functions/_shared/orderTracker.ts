@@ -958,10 +958,10 @@ export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, ord
   const t = ` ${normText(text)} `;
   const named = venues.filter(v => venueAliases(v).some(a => t.includes(` ${a} `)));
   const fallback = l.venue_id ?? order.venue_id;
-  if (named.length > 1) problems.push(`names more than one venue (${named.map(v => v.name).join(', ')})`);
+  if (named.length > 1) problems.push(`It names more than one venue (${named.map(v => v.name).join(', ')}).`);
   else plan.venueId = named[0]?.id ?? (fallback && fallback !== MULTIPLE_VENUES ? fallback : null);
   const venue = venues.find(v => v.id === plan.venueId) ?? null;
-  if (kind === 'release' && !plan.venueId && !named.length) problems.push('which venue it went to');
+  if (kind === 'release' && !plan.venueId && !named.length) problems.push('Which venue did it go to?');
 
   const drop = new Set([...PART_STOP, ...venues.flatMap(v => venueAliases(v).flatMap(a => a.split(' ')))]);
   const stock = items.filter(i => i.is_active && i.track_stock);
@@ -990,17 +990,17 @@ export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, ord
         let tops = scored.filter(x => x.s === best).map(x => x.i);
         if (tops.length > 1 && tops.some(held)) tops = tops.filter(held);
         if (tops.length === 1) found = tops[0];
-        else why = `could be ${tops.slice(0, 3).map(i => i.name).join(' or ')}`;
+        else why = `Could be ${tops.slice(0, 3).map(i => i.name).join(' or ')} — pick one.`;
         break;
       }
-      if (!found && !why) why = `no stock item matches "${part}"`;
+      if (!found && !why) why = `No stock item matches "${part}".`;
     }
-    if (!found) { problems.push(why || `which item the ${qm ? `${qm[1]} cases are` : 'line is'}`); continue; }
-    if (!qm) { problems.push(pallet ? `how many cases of ${found.name} the pallet held` : `how many cases of ${found.name}`); continue; }
+    if (!found) { problems.push(why || `Which item ${!qm ? 'is it' : Number(qm[1]) === 1 ? 'is the 1 case' : `are the ${qm[1]} cases`}?`); continue; }
+    if (!qm) { problems.push(pallet ? `How many cases of ${found.name} were on the pallet?` : `How many cases of ${found.name}?`); continue; }
     plan.draws.push({ itemId: found.id, name: found.name, qty: Number(qm[1]) });
   }
-  if (!plan.draws.length && !problems.length) problems.push('no item or quantity on it');
-  plan.problem = problems.length ? `Can't tell ${problems.join('; ')}.` : null;
+  if (!plan.draws.length && !problems.length) problems.push('No item or quantity written on it.');
+  plan.problem = problems.length ? problems.join(' ') : null;
   return plan;
 }
 
