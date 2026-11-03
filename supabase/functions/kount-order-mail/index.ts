@@ -140,7 +140,7 @@ Deno.serve(async (req) => {
       const stats = blankStats(`re-check by ${caller.email}`);
       await redecidePending(sb, stats, Date.now() + 40_000);
       await r365PaidPhase(sb, stats);
-      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid });
+      return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, r365_error: stats.r365_error ?? null });
     }
 
     return reject(400, 'Unknown action');
@@ -154,7 +154,7 @@ Deno.serve(async (req) => {
 
 interface Stats {
   trigger: string; started_at: string; messages: number; new_pdfs: number; read: number;
-  applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; remaining?: number; error: string | null; reconnect: boolean;
+  applied: number; pending: number; ignored: number; failed: number; tracking: number; paid: number; remaining?: number; error: string | null; reconnect: boolean; r365_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, error: null, reconnect: false });
 
@@ -446,7 +446,9 @@ async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
     const numbers = [...new Set((lines ?? []).map(l => String(l.invoice_number).trim()).filter(Boolean))];
     if (!numbers.length) return;
     const since = new Date(Date.now() - 150 * 86_400_000).toISOString().slice(0, 10);
-    const { data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since });
+    // the first read of the ledger after a quiet spell can pass the 8 s limit; the second is warm (~0.3 s)
+    let { data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since });
+    if (rErr?.code === '57014') ({ data: txs, error: rErr } = await sb.rpc('kount_ot_r365_ap', { p_numbers: numbers, p_since: since }));
     if (rErr) throw rErr;
     const paid = matchR365Payments(((txs ?? []) as R365Tx[]).map(t => ({ ...t, amount: Number(t.amount) })));
     for (const n of numbers) {
@@ -459,7 +461,8 @@ async function r365PaidPhase(sb: SupabaseClient, stats: Stats) {
       if (upd?.length) stats.paid++;
     }
   } catch (e) {
-    console.error('[kount-order-mail] R365 paid check failed:', msg(e));
+    stats.r365_error = msg(e).slice(0, 300);           // shown in the last run, never fails the pull
+    console.error('[kount-order-mail] R365 paid check failed:', stats.r365_error);
   }
 }
 

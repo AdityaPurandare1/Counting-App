@@ -568,9 +568,13 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   if (order && opts.autoCreate) {
     // one email thread can carry several orders ("WAREHOUSING AND DELIVERY"): a document sharing no
     // product with the thread's order starts its own
+    // — and so does an invoice whose items are all already on ANOTHER invoice of it (E&E invoices the same
+    // coaster per venue in one "Order Request" thread)
     const threadLines = data.lines.filter(l => l.order_id === order!.id);
+    const byId = new Map(threadLines.map(l => [l.id, l]));
     const products = planDocRows(doc.lines, threadLines, data.items, doc.doc_kind, false).filter(r => r.include && r.doc.line_kind === 'product');
-    if (products.length && products.every(r => r.target === 'new')) { order = null; how = ''; }
+    const elsewhere = (target: string) => target === 'new' || (!!byId.get(target) && otherInvoice(byId.get(target)!, doc.doc_kind, docNumber));
+    if (products.length && products.every(r => elsewhere(r.target))) { order = null; how = ''; }
   }
   if (!order) {
     order = matchOrder(data.orders, data.lines, { order_number: doc.order_number, doc_number: docNumber, kind: doc.doc_kind, vendor_name: doc.vendor_name });
@@ -615,8 +619,9 @@ function newOrderFrom(doc: ReadDoc, src: MailSource, data: { orders: OtOrder[]; 
                       today: string, fmt: (x: number) => string, venues: Array<{ id: string; name: string }>): MailDecision {
   const docNumber = String(doc.doc_number ?? '').trim();
   const rows = planDocRows(doc.lines, [], data.items, doc.doc_kind, false);
-  if (!rows.some(r => r.include && r.doc.line_kind === 'product')) {
-    return { state: 'pending', reason: 'No items on it to start an order from — check the PDF.', orderId: null };
+  // a fee-only invoice (shipping fee, warehousing and delivery) is spend too: freight / fee lines start the order
+  if (!rows.some(r => r.include)) {
+    return { state: 'pending', reason: 'Nothing on it to start an order from — check the PDF.', orderId: null };
   }
   const review = { kind: doc.doc_kind, vendor: doc.vendor_name, docNumber, order: null, orderLines: [] as OtLine[], rows };
   const checks = documentChecks(review, doc, data, fmt);
