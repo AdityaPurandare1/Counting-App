@@ -45,7 +45,13 @@ export interface OtItem {
   track_stock: boolean;
   notes: string | null;
   is_active: boolean;
+  /** where the stock is kept (0146): the E&E warehouse (default), Corporate, … */
+  location?: string;
 }
+
+/** E&E's warehouse — where its delivery fee lines draw stock from (0146). */
+export const EE_WAREHOUSE = 'E&E warehouse';
+export const itemLocation = (i: Pick<OtItem, 'location'>) => i.location?.trim() || EE_WAREHOUSE;
 
 export interface OtOrder {
   id: string;
@@ -1177,7 +1183,8 @@ export function planStorageLine(l: Pick<OtLine, 'description' | 'venue_id'>, ord
   if (kind === 'release' && !plan.venueId && !named.length) problems.push('Which venue did it go to?');
 
   const drop = new Set([...PART_STOP, ...venues.flatMap(v => venueAliases(v).flatMap(a => a.split(' ')))]);
-  const stock = items.filter(i => i.is_active && i.track_stock);
+  // E&E draws from its own warehouse only (not stock kept at corporate)
+  const stock = items.filter(i => i.is_active && i.track_stock && itemLocation(i) === EE_WAREHOUSE);
   const held = (i: OtItem) => moves.some(m => m.item_id === i.id && (m.kind === 'receipt' || (m.kind === 'count' && n(m.qty) > 0)));
   const body = dm ? text.replace(dm[0], ' ') : text;
   const head = body.search(STORAGE_HEAD);
