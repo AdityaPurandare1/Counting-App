@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64 } from './rules.ts';
+import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -71,4 +71,19 @@ Deno.test('mailbox from the sign-in id token', () => {
   assertEquals(idTokenMailbox(tok({ name: 'no address' })), '');
   assertEquals(idTokenMailbox('not-a-jwt'), '');
   assertEquals(idTokenMailbox(undefined), '');
+});
+
+Deno.test('invoices only: which attachments are opened, which readings are kept', () => {
+  const inv = ['invoice'];
+  assert(wantsAttachment(inv, 'Re: Delilah LA - Quote Request - Collins Glass', 'Invoice-INV-2026-086418.pdf'), 'E&E invoice in a quote thread');
+  assert(wantsAttachment(inv, 'Re: TNG Order', 'CM INV-2026-86333.pdf'), 'credit memo');
+  assert(wantsAttachment(inv, 'Invoice from KEVIDKO: 379993', '379993.pdf'), 'subject says invoice');
+  assert(!wantsAttachment(inv, 'Re: Lady Delilah Scalloped Coasters', 'Quote-Q-2026-1182.pdf'), 'a quote is not opened');
+  assert(!wantsAttachment(inv, 'Re: Order TNG - OS&E 7/20', 'TNG delivery list.pdf'));
+  assert(wantsAttachment(['quote', 'confirmation', 'invoice', 'shipping'], 'anything', 'anything.pdf'), 'all types on: every PDF');
+  assert(wantsAttachment(['invoice', 'quote'], '', 'Quote-Q-1.pdf'));
+  assert(kindAllowed(inv, { doc_kind: 'invoice' }));
+  assert(!kindAllowed(inv, { doc_kind: 'quote' }), 'read as a quote -> skipped');
+  assert(kindAllowed(inv, { doc_kind: 'other', is_credit: true }), 'a credit memo goes with invoices');
+  assert(!kindAllowed(['quote'], { doc_kind: 'other', is_credit: true }));
 });

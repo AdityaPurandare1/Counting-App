@@ -40,6 +40,31 @@ export function looksLikePurchaseDoc(subject: string | null | undefined, fileNam
   return PURCHASE_HINT.test(fileName ?? '') || PURCHASE_HINT.test(subject ?? '');
 }
 
+/* ── which document types the pull takes (kount_ot_mail_account.doc_kinds, 0136) ── */
+
+export const ALL_DOC_KINDS = ['quote', 'confirmation', 'invoice', 'shipping'] as const;
+const KIND_HINT: Record<string, RegExp> = {
+  invoice: /(invoice|\binv\b|inv[-_ #]?\d|credit ?memo)/i,
+  quote: /(quote|quotation|estimate|proposal|pro-?forma)/i,
+  confirmation: /(confirm|acknowledg|sales ?order)/i,
+  shipping: /(packing|ship(ping|ment)? (notice|confirmation)|tracking|bill of lading|\bbol\b|delivery note)/i,
+};
+
+/** With every type on, any PDF from a listed vendor is opened. With a subset, only attachments
+ *  whose file name or email subject looks like one of those types — fewer paid reads, and quotes
+ *  are not stored when only invoices are wanted. */
+export function wantsAttachment(kinds: readonly string[], subject: string | null | undefined, fileName: string | null | undefined): boolean {
+  if (ALL_DOC_KINDS.every(k => kinds.includes(k))) return true;
+  return kinds.some(k => KIND_HINT[k]?.test(fileName ?? '') || KIND_HINT[k]?.test(subject ?? ''));
+}
+
+/** After reading: is this a type the pull takes? A credit memo counts as an invoice. */
+export function kindAllowed(kinds: readonly string[], doc: { doc_kind: string; is_credit?: boolean }): boolean {
+  if (doc.is_credit) return kinds.includes('invoice');
+  if (doc.doc_kind === 'other') return true;          // decided later: not a purchasing document -> skipped
+  return kinds.includes(doc.doc_kind);
+}
+
 /** The hour (0-23) and date (YYYY-MM-DD) in Los Angeles — the pull runs in the 9 o'clock hour, PDT or PST. */
 export function laParts(d: Date = new Date()): { hour: number; isoDate: string } {
   const parts = new Intl.DateTimeFormat('en-CA', {

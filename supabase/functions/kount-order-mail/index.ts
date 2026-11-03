@@ -23,7 +23,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import { decideMailDocument, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
-import { domainOf, fromBase64, idTokenMailbox, isPdfAttachment, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, type GraphAttachment } from './rules.ts';
+import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
@@ -156,7 +156,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
   let chain = false;
   try {
     const { data: acct, error } = await sb.from('kount_ot_mail_account')
-      .select('token_secret_id, vendor_domains, suggested_domains, fetched_through, last_run').eq('id', 1).single();
+      .select('token_secret_id, vendor_domains, doc_kinds, suggested_domains, fetched_through, last_run').eq('id', 1).single();
     if (error) throw error;
     // a continuation adds to the run it continues, so the admin sees one morning's totals
     if (trigger === 'continued' && acct.last_run) {
@@ -166,8 +166,9 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
       stats.started_at = String(prev.started_at ?? stats.started_at);
     }
     if (!acct.token_secret_id) { stats.error = 'Outlook is not connected.'; return; }
-    if (trigger !== 'continued') await fetchPhase(sb, acct, stats);
-    await readPhase(sb, stats, startedMs + READ_BUDGET_MS);
+    const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
+    if (trigger !== 'continued') await fetchPhase(sb, acct, stats, kinds);
+    await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -187,10 +188,10 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
   }
 }
 
-interface Account { vendor_domains: string[] | null; suggested_domains: Record<string, number> | null; fetched_through: string | null }
+interface Account { vendor_domains: string[] | null; doc_kinds?: string[] | null; suggested_domains: Record<string, number> | null; fetched_through: string | null }
 interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; from?: { emailAddress?: { address?: string; name?: string } } }
 
-async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats) {
+async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds: string[]) {
   const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
   if (error) throw error;
   if (!refresh) throw new Error('Outlook is not connected.');
@@ -223,7 +224,7 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats) {
         if (received > prevThrough && pdfs.some(p => looksLikePurchaseDoc(m.subject, p.name))) suggested[domain] = (Number(suggested[domain]) || 0) + 1;
         continue;
       }
-      for (const p of pdfs) await takePdf(sb, tok.access_token, m, p, stats);
+      for (const p of pdfs) if (wantsAttachment(kinds, m.subject, p.name)) await takePdf(sb, tok.access_token, m, p, stats);
     }
     url = page['@odata.nextLink'] ?? '';
   }
@@ -263,7 +264,9 @@ async function takePdf(sb: SupabaseClient, accessToken: string, m: GraphMessage,
 
 interface InboxRow { id: string; message_id: string; conversation_id: string | null; file_name: string | null; storage_path: string; attempts: number }
 
-async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number) {
+const KIND_PLURAL: Record<string, string> = { quote: 'quotes', confirmation: 'order confirmations', invoice: 'invoices', shipping: 'shipping notices' };
+
+async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kinds: string[]) {
   let data = await loadTracker(sb);
   const today = laParts().isoDate;
   while (Date.now() < deadline) {
@@ -295,6 +298,14 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number) {
       }
       stats.read++;
       await sb.from('kount_ot_inbox').update({ parsed: r.doc, model: r.model, read_error: null }).eq('id', r.b.id);
+      if (!kindAllowed(kinds, r.doc)) {
+        const only = kinds.map(k => KIND_PLURAL[k] ?? k).join(' and ');
+        await sb.from('kount_ot_inbox').update({
+          state: 'ignored', decision: `Only ${only} are pulled for now — bring it back to save it.`, decided_by: 'morning mail pull',
+        }).eq('id', r.b.id);
+        stats.ignored++;
+        continue;
+      }
       const d = decideMailDocument(r.doc, { id: r.b.id, message_id: r.b.message_id, conversation_id: r.b.conversation_id, file_name: r.b.file_name, storage_path: r.b.storage_path },
         data, today, fmtMoney);
       if (d.state === 'applied') {
