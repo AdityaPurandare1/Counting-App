@@ -47,10 +47,11 @@ export async function refreshAccess(refreshToken: string): Promise<{ access_toke
 }
 
 /** GET a Graph path (or a full @odata.nextLink). Immutable ids, so a message moved between folders keeps its id. */
-export async function graphGet<T = Record<string, unknown>>(accessToken: string, pathOrUrl: string): Promise<T> {
+export async function graphGet<T = Record<string, unknown>>(accessToken: string, pathOrUrl: string, opts: { textBody?: boolean } = {}): Promise<T> {
   const url = pathOrUrl.startsWith('https://') ? pathOrUrl : GRAPH + pathOrUrl;
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Prefer: 'IdType="ImmutableId"' } });
+    const prefer = 'IdType="ImmutableId"' + (opts.textBody ? ', outlook.body-content-type="text"' : '');
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}`, Prefer: prefer } });
     if ((r.status === 429 || r.status === 503 || r.status === 504) && attempt < 3) {
       const wait = Math.min(20, Number(r.headers.get('Retry-After')) || 2 ** attempt * 2);
       await new Promise(res => setTimeout(res, wait * 1000));

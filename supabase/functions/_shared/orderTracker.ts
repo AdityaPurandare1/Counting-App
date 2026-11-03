@@ -3,10 +3,14 @@
    tab. Tables: kount_ot_* (migration 0132). No Supabase calls in here, so
    every rule below is unit-tested (tests/orderTracker.test.ts).
 
-   LIFECYCLE (per order LINE, the same cycle the desktop Order Tracker used):
-     QUOTED → ORDERED → CONFIRMED → IN_PRODUCTION → SHIPPED → DELIVERED
-     → INVOICED → PAID          CANCELLED ends a line early.
-   An order is only as far along as its least-advanced line (the bottleneck).
+   LIFECYCLE (per order LINE — h.wood's own cycle with E&E and the custom
+   vendors, prepaid: the vendor invoices and is paid BEFORE it ships):
+     REQUESTED → ORDERED → QUOTED → INVOICED → PAID → SHIPPED → DELIVERED
+     → RECEIVED          CANCELLED ends a line early.
+   Delivered = the carrier / vendor says it arrived; received = we counted it
+   in (the warehouse Receive, or by hand). An order is only as far along as
+   its least-advanced line (the bottleneck), and done when every line is
+   received.
 
    WAREHOUSE STOCK (per item, in the item's unit — usually cases):
      receipt +qty (a delivered line received into the warehouse)
@@ -14,13 +18,13 @@
      count   =qty (on hand as counted; later moves apply on top)
    ─────────────────────────────────────────────────────────────────────── */
 
-export const STATUSES = ['QUOTED', 'ORDERED', 'CONFIRMED', 'IN_PRODUCTION', 'SHIPPED', 'DELIVERED', 'INVOICED', 'PAID'] as const;
+export const STATUSES = ['REQUESTED', 'ORDERED', 'QUOTED', 'INVOICED', 'PAID', 'SHIPPED', 'DELIVERED', 'RECEIVED'] as const;
 export type LineStatus = typeof STATUSES[number] | 'CANCELLED';
 export const ALL_STATUSES: readonly LineStatus[] = [...STATUSES, 'CANCELLED'];
 
 export const STATUS_LABEL: Record<LineStatus, string> = {
-  QUOTED: 'Quoted', ORDERED: 'Ordered', CONFIRMED: 'Confirmed', IN_PRODUCTION: 'In production',
-  SHIPPED: 'Shipped', DELIVERED: 'Delivered', INVOICED: 'Invoiced', PAID: 'Paid', CANCELLED: 'Cancelled',
+  REQUESTED: 'Requested', ORDERED: 'Ordered', QUOTED: 'Quoted', INVOICED: 'Invoiced', PAID: 'Paid',
+  SHIPPED: 'Shipped', DELIVERED: 'Delivered', RECEIVED: 'Received', CANCELLED: 'Cancelled',
 };
 
 /** Position in the cycle; CANCELLED sorts after PAID (it is terminal). */
@@ -108,6 +112,18 @@ export interface OtDocument {
 
 export type DocKind = 'quote' | 'confirmation' | 'invoice' | 'shipping' | 'other';
 
+/** A tracking number on an order (kount_ot_tracking, 0137) — from a vendor email, a shipping notice or by hand. */
+export interface OtTracking {
+  id: string;
+  order_id: string;
+  tracking_number: string;
+  carrier: string | null;
+  source: 'email' | 'document' | 'manual';
+  note: string | null;
+  created_at: string;
+  created_by?: string | null;
+}
+
 /* ── numbers / dates ──────────────────────────────────────────────────── */
 
 const n = (x: unknown): number => { const v = Number(x); return Number.isFinite(v) ? v : 0; };
@@ -144,12 +160,12 @@ export function headlineStatus(lines: Pick<OtLine, 'status'>[]): LineStatus | nu
 
 export type OrderState = 'open' | 'completed' | 'archived';
 
-/** Archived (never a real order) > completed (finished by hand, or every live line paid) > open. */
+/** Archived (never a real order) > completed (finished by hand, or every live line received) > open. */
 export function orderState(o: Pick<OtOrder, 'completed_at' | 'archived_at'>, lines: Pick<OtLine, 'status'>[]): OrderState {
   if (o.archived_at) return 'archived';
   if (o.completed_at) return 'completed';
   const h = headlineStatus(lines);
-  if (h === 'PAID' || h === 'CANCELLED') return 'completed';
+  if (h === 'RECEIVED' || h === 'CANCELLED') return 'completed';
   return 'open';
 }
 
@@ -170,13 +186,14 @@ export function isLate(l: Pick<OtLine, 'status' | 'expected_on' | 'qty'>, order:
 
 /* ── documents → line updates ─────────────────────────────────────────── */
 
+// an order confirmation is the vendor confirming the ORDER (before its quote / invoice)
 const DOC_STATUS: Record<DocKind, LineStatus | null> = {
-  quote: 'QUOTED', confirmation: 'CONFIRMED', invoice: 'INVOICED', shipping: 'SHIPPED', other: null,
+  quote: 'QUOTED', confirmation: 'ORDERED', invoice: 'INVOICED', shipping: 'SHIPPED', other: null,
 };
 
 /** The status a document moves a line to. Documents only move lines FORWARD:
- *  an invoice arriving for a line already PAID, or a confirmation for a line
- *  already shipped, leaves the status alone (it still records the numbers). */
+ *  an invoice arriving for a line already PAID, or a quote for a line
+ *  already invoiced, leaves the status alone (it still records the numbers). */
 export function statusAfterDocument(current: LineStatus | null, kind: DocKind): LineStatus | null {
   const target = DOC_STATUS[kind];
   if (!target) return current;
@@ -395,7 +412,9 @@ export function planDocumentSave(r: DocReview): ApplyDocument {
       const next = statusAfterDocument(cur.status, r.kind);
       if (next && next !== cur.status) u.status = next;
       const keepInvoice = otherInvoice(cur, r.kind, docNumber);
-      if (price != null && !keepInvoice && (r.kind === 'quote' || r.kind === 'invoice' || cur.unit_price == null)) u.unit_price = price;
+      // the invoice sets the price; a quote only while nothing is invoiced yet (a late quote never overwrites it)
+      const quoteMayPrice = r.kind === 'quote' && !cur.invoice_number && statusRank(cur.status) < statusRank('INVOICED');
+      if (price != null && !keepInvoice && (r.kind === 'invoice' || quoteMayPrice || cur.unit_price == null)) u.unit_price = price;
       if (r.kind === 'quote' && docNumber) u.quote_number = docNumber;
       if (r.kind === 'invoice' && docNumber && !keepInvoice) { u.invoice_number = docNumber; u.invoice_date = r.docDate || r.today; }
       if (r.kind === 'shipping' && r.tracking) u.tracking_number = r.tracking;
@@ -555,6 +574,71 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   return { state: 'applied', payload, reason };
 }
 
+/* ── tracking numbers in vendor emails ────────────────────────────────── */
+
+export type Carrier = 'UPS' | 'FedEx' | 'USPS' | 'DHL';
+export interface TrackingHit { number: string; carrier: Carrier }
+
+// digits only count as a tracking number when they sit right after one of these
+const TRACK_WORD = /(track(ing)?|fedex|fed ex|\bups\b|usps|\bdhl\b|waybill|\bawb\b|shipped|shipment)/gi;
+
+/** Tracking numbers written in an email ("here's the tracking Fedex with tracking# 879337642791
+ *  and 879337641177"). A UPS 1Z number counts anywhere; plain digits only within 160 characters
+ *  after a tracking / carrier word, and only in carrier lengths — so phone numbers, invoice
+ *  numbers and dates are not taken. */
+export function extractTracking(text: string | null | undefined): TrackingHit[] {
+  const t = String(text ?? '');
+  const out = new Map<string, TrackingHit>();
+  for (const m of t.matchAll(/\b1Z[0-9A-Z]{16}\b/gi)) out.set(m[0].toUpperCase(), { number: m[0].toUpperCase(), carrier: 'UPS' });
+  for (const w of t.matchAll(TRACK_WORD)) {
+    const win = t.slice(w.index ?? 0, (w.index ?? 0) + 160);
+    const usps = /usps/i.test(win), dhl = /\bdhl\b/i.test(win);
+    for (const m of win.matchAll(/(?<![\d\-./])(\d[\d ]{8,30}\d)(?![\d\-./])/g)) {
+      // "1234 5678 9012" is one FedEx number; "879337642791 879337641177" is two
+      for (const cand of [m[1].replace(/ /g, ''), ...m[1].split(' ')]) {
+        let carrier: Carrier | null = null;
+        if (/^9[2-5]\d{18,20}$/.test(cand) || (usps && /^\d{20,22}$/.test(cand))) carrier = 'USPS';
+        else if (/^(\d{12}|\d{15}|\d{20}|\d{22})$/.test(cand)) carrier = 'FedEx';
+        else if (dhl && /^\d{10}$/.test(cand)) carrier = 'DHL';
+        if (carrier && !out.has(cand)) out.set(cand, { number: cand, carrier });
+      }
+    }
+  }
+  return [...out.values()];
+}
+
+export function trackingUrl(h: { number: string; carrier: string | null }): string {
+  const n = encodeURIComponent(h.number);
+  switch (h.carrier) {
+    case 'UPS': return `https://www.ups.com/track?tracknum=${n}`;
+    case 'FedEx': return `https://www.fedex.com/fedextrack/?trknbr=${n}`;
+    case 'USPS': return `https://tools.usps.com/go/TrackConfirmAction?tLabels=${n}`;
+    case 'DHL': return `https://www.dhl.com/us-en/home/tracking.html?tracking-id=${n}`;
+    default: return `https://www.google.com/search?q=${n}`;
+  }
+}
+
+/** The order a vendor email is about: an earlier saved document of the same email thread, else
+ *  an invoice / quote number written in it that is on exactly one order. null when unsure. */
+export function orderForEmail(conversationId: string | null, text: string,
+                              data: { orders: OtOrder[]; lines: OtLine[]; documents: OtDocument[] }): OtOrder | null {
+  const live = (id: string | null | undefined) => data.orders.find(o => o.id === id && !o.archived_at);
+  const one = (ids: Array<string | null | undefined>) => {
+    const found = [...new Set(ids.filter(Boolean))].map(live).filter((o): o is OtOrder => !!o);
+    return found.length === 1 ? found[0] : null;
+  };
+  if (conversationId) {
+    const o = one(data.documents.filter(d => d.source_conversation_id === conversationId).map(d => d.order_id));
+    if (o) return o;
+  }
+  const refs = new Set([...String(text).matchAll(/\b(INV-\d{4}-\d{5,7}|Q-\d{4}-\d{4}-\d{4})\b/gi)].map(m => normText(m[1])));
+  if (!refs.size) return null;
+  return one([
+    ...data.lines.filter(l => refs.has(normText(l.invoice_number)) || refs.has(normText(l.quote_number))).map(l => l.order_id),
+    ...data.documents.filter(d => refs.has(normText(d.doc_number))).map(d => d.order_id),
+  ]);
+}
+
 /* ── warehouse stock ──────────────────────────────────────────────────── */
 
 /** On hand after every move up to and including `asOf` (all moves when omitted).
@@ -580,12 +664,12 @@ export interface StockRow {
   item: OtItem;
   onHand: number;
   /** Everything still to come into the warehouse: the unreceived qty of every
-   *  ordered (not quoted, not cancelled) line on an OPEN warehouse order. It
-   *  counts a line until its units are RECEIVED, whatever its status says, so
-   *  a line marked delivered or invoiced but not received yet stays in it. */
+   *  line from ORDERED on (not a mere request, not cancelled, not marked
+   *  received) on an OPEN warehouse order — counted until its units are
+   *  received into stock, so a line that says shipped or delivered stays in. */
   incoming: number;
-  /** The part of `incoming` whose line already says delivered (or later):
-   *  it is at the warehouse, waiting for someone to receive it. */
+  /** The part of `incoming` whose line already says delivered: it is at the
+   *  warehouse, waiting for someone to receive it. */
   awaitingReceipt: number;
   /** Average released per month over the last 90 days (or since the first release). */
   monthlyUse: number;
@@ -620,7 +704,8 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
     const dailyUse = released / spanDays;
     const monthlyUse = dailyUse * 30;
 
-    const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'QUOTED' && openWarehouse.has(l.order_id));
+    const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'REQUESTED' && l.status !== 'RECEIVED'
+      && openWarehouse.has(l.order_id));
     const unreceived = (l: OtLine) => Math.max(0, n(l.qty) - receivedForLine(mv, l.id));
     const incoming = itemLines.reduce((s, l) => s + unreceived(l), 0);
     const awaitingReceipt = itemLines.filter(l => statusRank(l.status) >= statusRank('DELIVERED')).reduce((s, l) => s + unreceived(l), 0);

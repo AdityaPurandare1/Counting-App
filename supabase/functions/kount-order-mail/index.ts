@@ -11,7 +11,7 @@
 //   {action:'cron'}      pg_cron 'kount-order-mail-morning' (x-kount-cron secret); works only
 //                        in the 9 o'clock hour in Los Angeles
 //   {action:'continue'}  the pull itself, when PDFs are left to read (same secret)
-//   {action:'connect_start' | 'connect_poll' | 'pull'}  a person: JWT of an ACTIVE admin /
+//   {action:'connect_start' | 'connect_poll' | 'pull' | 'redecide'}  a person: JWT of an ACTIVE admin /
 //                        corporate app_users row (deployed with --no-verify-jwt for the cron
 //                        call; every person call is checked here instead)
 //
@@ -21,7 +21,7 @@
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
-import { decideMailDocument, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc } from '../_shared/orderTracker.ts';
+import { decideMailDocument, extractTracking, orderForEmail, type OtDocument, type OtItem, type OtLine, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, type GraphAttachment } from './rules.ts';
 
@@ -135,6 +135,13 @@ Deno.serve(async (req) => {
       return json(202, { started: true });
     }
 
+    if (action === 'redecide') {
+      // after a save in the admin: waiting items that now match an order go in (cheap — no reading)
+      const stats = blankStats(`re-check by ${caller.email}`);
+      await redecidePending(sb, stats);
+      return json(200, { applied: stats.applied });
+    }
+
     return reject(400, 'Unknown action');
   } catch (e) {
     console.error('[kount-order-mail]', action, msg(e));
@@ -146,13 +153,14 @@ Deno.serve(async (req) => {
 
 interface Stats {
   trigger: string; started_at: string; messages: number; new_pdfs: number; read: number;
-  applied: number; pending: number; ignored: number; failed: number; remaining?: number; error: string | null; reconnect: boolean;
+  applied: number; pending: number; ignored: number; failed: number; tracking: number; remaining?: number; error: string | null; reconnect: boolean;
 }
+const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, error: null, reconnect: false });
 
 /** Runs with the lock held (kount_ot_mail_begin_run returned true) and always releases it. */
 async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
   const startedMs = Date.now();
-  const stats: Stats = { trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, error: null, reconnect: false };
+  const stats = blankStats(trigger);
   let chain = false;
   try {
     const { data: acct, error } = await sb.from('kount_ot_mail_account')
@@ -161,13 +169,15 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     // a continuation adds to the run it continues, so the admin sees one morning's totals
     if (trigger === 'continued' && acct.last_run) {
       const prev = acct.last_run as Partial<Stats>;
-      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed'] as const) stats[k] = Number(prev[k]) || 0;
+      for (const k of ['messages', 'new_pdfs', 'read', 'applied', 'pending', 'ignored', 'failed', 'tracking'] as const) stats[k] = Number(prev[k]) || 0;
       stats.trigger = String(prev.trigger ?? trigger);
       stats.started_at = String(prev.started_at ?? stats.started_at);
     }
     if (!acct.token_secret_id) { stats.error = 'Outlook is not connected.'; return; }
     const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
     if (trigger !== 'continued') await fetchPhase(sb, acct, stats, kinds);
+    // what waited may match now (an order saved since); then read what is new
+    await redecidePending(sb, stats);
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
@@ -228,10 +238,97 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
     }
     url = page['@odata.nextLink'] ?? '';
   }
+  await trackingPhase(sb, tok.access_token, domains, sinceMs, stats);
   const { error: upErr } = await sb.from('kount_ot_mail_account').update({
     fetched_through: newest ? new Date(newest).toISOString() : null, suggested_domains: suggested, updated_at: nowIso(),
   }).eq('id', 1);
   if (upErr) throw upErr;
+}
+
+interface BodyMessage extends GraphMessage { uniqueBody?: { content?: string } }
+
+/** Tracking numbers written in the vendors' email text (with or without attachments): each email with
+ *  any becomes an inbox row (attachment 'body'); onto its order at once when the thread / an invoice #
+ *  says which, else it waits for a person to pick the order. uniqueBody = only what that email added,
+ *  not the quoted history below it, so an old number in a reply chain is not taken again. */
+async function trackingPhase(sb: SupabaseClient, accessToken: string, domains: string[], sinceMs: number, stats: Stats) {
+  const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
+  let data = await loadTracker(sb);
+  for (const domain of domains) {
+    const search = encodeURIComponent(`"from:${domain} received>=${sinceDay}"`);
+    let url = `/me/messages?$search=${search}&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,uniqueBody&$top=25`;
+    let pages = 0;
+    while (url && pages++ < 20) {
+      const page = await graphGet<{ value?: BodyMessage[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+      for (const m of page.value ?? []) {
+        if (!onList(domainOf(m.from?.emailAddress?.address), [domain])) continue;
+        const text = `${m.subject ?? ''}\n${m.uniqueBody?.content ?? ''}`;
+        const hits = extractTracking(text);
+        if (!hits.length) continue;
+        const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', 'body').maybeSingle();
+        if (seen) continue;
+        const id = crypto.randomUUID();
+        const order = orderForEmail(m.conversationId ?? null, text, data);
+        const { error } = await sb.from('kount_ot_inbox').insert({
+          id, message_id: m.id, attachment_id: 'body', internet_message_id: m.internetMessageId ?? null, conversation_id: m.conversationId ?? null,
+          subject: (m.subject ?? '').slice(0, 300), sender_email: m.from?.emailAddress?.address ?? null, sender_name: m.from?.emailAddress?.name ?? null,
+          received_at: m.receivedDateTime, file_name: null, content_hash: `body:${m.id}`, storage_path: '',
+          state: 'pending', parsed: { tracking: hits, excerpt: text.slice(0, 1500) },
+          decision: order ? null : 'Tracking number in the email, but which order is not clear — pick it.', order_id: null,
+        });
+        if (error) { if (error.code === '23505') continue; throw error; }
+        if (order && await applyTracking(sb, id, order, hits, m.subject ?? '', m.id, m.conversationId ?? null)) {
+          stats.tracking++; data = await loadTracker(sb);
+        } else stats.pending++;
+      }
+      url = page['@odata.nextLink'] ?? '';
+    }
+  }
+}
+
+async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder, hits: TrackingHit[], subject: string, messageId: string, conversationId: string | null) {
+  const { error } = await sb.rpc('kount_ot_add_tracking', { p: {
+    order_id: order.id, numbers: hits, inbox_id: inboxId, source: 'email', message_id: messageId, conversation_id: conversationId,
+    note: `Tracking from email: ${subject}`.slice(0, 200), ship_lines: true,
+    decision: `Tracking ${hits.map(h => h.number).join(', ')} added to ${order.order_number || `the ${order.vendor_name} order`}.`,
+  } });
+  if (error) {
+    await sb.from('kount_ot_inbox').update({ decision: `Could not add the tracking automatically (${error.message}).`.slice(0, 1000) }).eq('id', inboxId);
+    return false;
+  }
+  return true;
+}
+
+interface PendingRow { id: string; message_id: string; attachment_id: string; conversation_id: string | null; subject: string | null; file_name: string | null; storage_path: string; parsed: Record<string, unknown> | null }
+
+/** Look again at everything waiting: since it waited, a person may have saved the order it belongs to. */
+async function redecidePending(sb: SupabaseClient, stats: Stats) {
+  const { data: rows, error } = await sb.from('kount_ot_inbox')
+    .select('id, message_id, attachment_id, conversation_id, subject, file_name, storage_path, parsed').eq('state', 'pending').order('received_at', { ascending: true });
+  if (error) throw error;
+  if (!rows?.length) return;
+  let data = await loadTracker(sb);
+  if (!data.orders.length) return;
+  const today = laParts().isoDate;
+  for (const r of rows as PendingRow[]) {
+    if (!r.parsed) continue;
+    if (r.attachment_id === 'body') {
+      const hits = (r.parsed.tracking ?? []) as TrackingHit[];
+      const order = orderForEmail(r.conversation_id, String(r.parsed.excerpt ?? r.subject ?? ''), data);
+      if (order && hits.length && await applyTracking(sb, r.id, order, hits, r.subject ?? '', r.message_id, r.conversation_id)) { stats.tracking++; data = await loadTracker(sb); }
+      continue;
+    }
+    const d = decideMailDocument(r.parsed as unknown as ReadDoc, { id: r.id, message_id: r.message_id, conversation_id: r.conversation_id, file_name: r.file_name, storage_path: r.storage_path },
+      data, today, fmtMoney);
+    if (d.state === 'applied') {
+      const { error: aErr } = await sb.rpc('kount_ot_apply_document', { p: d.payload });
+      if (!aErr) { stats.applied++; data = await loadTracker(sb); }
+    } else if (d.state === 'ignored') {
+      await sb.from('kount_ot_inbox').update({ state: 'ignored', decision: d.reason.slice(0, 1000), decided_by: 'morning mail pull' }).eq('id', r.id);
+    } else {
+      await sb.from('kount_ot_inbox').update({ decision: d.reason.slice(0, 1000), order_id: d.orderId }).eq('id', r.id);
+    }
+  }
 }
 
 async function takePdf(sb: SupabaseClient, accessToken: string, m: GraphMessage, a: GraphAttachment, stats: Stats) {
