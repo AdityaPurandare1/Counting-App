@@ -74,7 +74,7 @@ async function corporateCaller(req: Request, sb: SupabaseClient): Promise<{ emai
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return reject(405, 'Method not allowed');
-  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number };
+  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number; number?: string };
   const action = String(body.action ?? '');
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -142,6 +142,26 @@ Deno.serve(async (req) => {
       await r365PaidPhase(sb, stats);
       await storagePhase(sb, stats, caller.email);
       return json(200, { applied: stats.applied, tracking: stats.tracking, paid: stats.paid, stubs: stats.stubs, r365_error: stats.r365_error ?? null, storage: stats.storage ?? 0 });
+    }
+
+    if (action === 'find') {
+      // one invoice / quote by its number, however old — the morning pull reads only what came since it last ran
+      // (its first run went back 30 days), so an invoice e-mailed before that is never seen
+      const number = String(body.number ?? '').trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9 _.\/-]{2,40}$/.test(number)) return reject(400, 'Enter an invoice or quote number.');
+      const { data: locked } = await sb.rpc('kount_ot_mail_begin_run');
+      if (locked !== true) return json(200, { found: 0, reason: 'A pull is running — try again in a minute.' });
+      const stats = blankStats(`find ${number} by ${caller.email}`);
+      try {
+        const found = await findPhase(sb, number, stats);
+        const { data: acct } = await sb.from('kount_ot_mail_account').select('doc_kinds').eq('id', 1).single();
+        const kinds: string[] = Array.isArray(acct?.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
+        if (stats.new_pdfs) await readPhase(sb, stats, Date.now() + 90_000, kinds);
+        await r365PaidPhase(sb, stats);
+        return json(200, { found, new_pdfs: stats.new_pdfs, applied: stats.applied, pending: stats.pending, ignored: stats.ignored, failed: stats.failed, paid: stats.paid });
+      } finally {
+        await sb.from('kount_ot_mail_account').update({ running_since: null, updated_at: nowIso() }).eq('id', 1);
+      }
     }
 
     if (action === 'storage') {
@@ -212,7 +232,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
 }
 
 interface Account { vendor_domains: string[] | null; doc_kinds?: string[] | null; suggested_domains: Record<string, number> | null; fetched_through: string | null }
-interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; from?: { emailAddress?: { address?: string; name?: string } } }
+interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; hasAttachments?: boolean; from?: { emailAddress?: { address?: string; name?: string } } }
 
 async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds: string[]) {
   const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
@@ -258,6 +278,37 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
     fetched_through: newest ? new Date(newest).toISOString() : null, suggested_domains: suggested, updated_at: nowIso(),
   }).eq('id', 1);
   if (upErr) throw upErr;
+}
+
+/** The listed vendors' e-mails that mention `number` (Outlook search: subject, body and attachment text),
+ *  any age: their PDFs go into the Inbox like the morning pull's (a PDF already taken is skipped). Returns the
+ *  PDFs seen. Only listed vendor senders, as in the pull — a colleague's forward is not read. */
+async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Promise<number> {
+  const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains, doc_kinds').eq('id', 1).single();
+  if (error) throw error;
+  const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+  if (tErr) throw tErr;
+  if (!refresh) throw new Error('Outlook is not connected.');
+  const tok = await refreshAccess(String(refresh));
+  if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+  const domains: string[] = acct.vendor_domains ?? [];
+  const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
+  const page = await graphGet<{ value?: GraphMessage[] }>(tok.access_token, `/me/messages?$search=${encodeURIComponent(`"${number.replace(/"/g, '')}"`)}`
+    + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,hasAttachments&$top=25');
+  let seen = 0;
+  for (const m of page.value ?? []) {
+    stats.messages++;
+    const domain = domainOf(m.from?.emailAddress?.address);
+    if (!m.hasAttachments || !domain || !onList(domain, domains)) continue;
+    const atts = await graphGet<{ value?: GraphAttachment[] }>(tok.access_token,
+      `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
+    for (const p of (atts.value ?? []).filter(isPdfAttachment)) {
+      if (!wantsAttachment(kinds, m.subject, p.name)) continue;
+      seen++;
+      await takePdf(sb, tok.access_token, m, p, stats);
+    }
+  }
+  return seen;
 }
 
 interface BodyMessage extends GraphMessage { uniqueBody?: { content?: string } }
