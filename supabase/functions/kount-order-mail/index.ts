@@ -35,6 +35,9 @@ const SELF_URL = `${SUPABASE_URL}/functions/v1/kount-order-mail`;
 
 const BUCKET = 'kount-order-docs';
 const ALLOWED_ROLES = new Set(['admin', 'corporate']);
+// v0.96 (0148): the Order tracker permission; a row from before 0148 (no list) by its role, as before
+const mayUseOrderTracker = (p: { role?: unknown; features?: unknown }) =>
+  Array.isArray(p.features) ? (p.features as unknown[]).includes('purchasing:order-tracker') : ALLOWED_ROLES.has(String(p.role));
 const FIRST_LOOKBACK_DAYS = 30;
 const OVERLAP_MS = 2 * 3600_000;       // re-look 2 h back: Outlook indexes late; duplicates are skipped
 const READ_BUDGET_MS = 100_000;        // stop STARTING reads after this; the rest go on in a chained call
@@ -64,10 +67,10 @@ async function corporateCaller(req: Request, sb: SupabaseClient): Promise<{ emai
   const { data, error } = await asCaller.auth.getUser();
   if (error || !data.user?.email) return reject(401, 'Invalid or expired JWT');
   const email = data.user.email.toLowerCase();
-  const { data: profile, error: pErr } = await sb.from('app_users').select('role,is_active').eq('email', email).limit(1).maybeSingle();
+  const { data: profile, error: pErr } = await sb.from('app_users').select('role,is_active,features').eq('email', email).limit(1).maybeSingle();
   if (pErr) return reject(500, 'Failed to verify caller');
-  if (!profile || profile.is_active !== true || !ALLOWED_ROLES.has(String(profile.role))) {
-    return reject(403, 'The order mail pull is limited to admin and corporate users');
+  if (!profile || profile.is_active !== true || !mayUseOrderTracker(profile)) {
+    return reject(403, 'The order mail pull needs the Order tracker permission');
   }
   return { email };
 }

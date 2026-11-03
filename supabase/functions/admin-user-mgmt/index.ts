@@ -47,6 +47,16 @@ interface UpdatePayload {
   is_active?: boolean;
 }
 
+// v0.96 (0148): a person's roles (one primary), permission keys and venues, saved together (User access)
+interface SetAccessPayload {
+  action: 'set_access';
+  email: string;
+  role: Role;
+  roles: Role[];
+  features: string[];
+  venue_ids: string[];
+}
+
 interface MigrateLegacyPayload {
   action: 'migrate_legacy';
   dry_run?: boolean;
@@ -56,7 +66,7 @@ interface MigrateLegacyPayload {
 type Payload =
   | InvitePayload | DisablePayload | EnablePayload
   | DeletePayload | ResetPayload | UpdatePayload
-  | MigrateLegacyPayload;
+  | MigrateLegacyPayload | SetAccessPayload;
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -197,7 +207,7 @@ Deno.serve(async (req) => {
   // --- 4. Authorize: only the admin role can hit this function. ---
   const { data: callerProfile, error: profileErr } = await admin
     .from('app_users')
-    .select('role,is_active')
+    .select('role,is_active,features')
     .eq('email', callerEmail)
     .limit(1)
     .maybeSingle();
@@ -212,8 +222,10 @@ Deno.serve(async (req) => {
   // Granting access is admin-only. Corporate keeps every operational screen
   // but no longer decides who gets in — it is handed out too widely for that,
   // and this function is the one place the service-role key is used.
-  if (callerProfile.role !== 'admin') {
-    return reject(403, 'Admin role required');
+  // v0.96: the access:users permission (admins start with it; 0148). A row from before 0148 has no list: admin.
+  const callerFeatures = (callerProfile as { features?: string[] | null }).features;
+  if (!(Array.isArray(callerFeatures) ? callerFeatures.includes('access:users') : callerProfile.role === 'admin')) {
+    return reject(403, 'User access permission required');
   }
 
   // --- 5. Parse + dispatch ---
@@ -236,6 +248,7 @@ Deno.serve(async (req) => {
       case 'reset_password':  return await handleResetPassword(admin, body, callerEmail);
       case 'update_profile':  return await handleUpdateProfile(admin, body, callerEmail);
       case 'migrate_legacy':  return await handleMigrateLegacy(admin, body, callerEmail);
+      case 'set_access':      return await handleSetAccess(admin, body, callerEmail);
       default:
         return reject(400, 'Unknown action: ' + (body as { action?: string }).action);
     }
@@ -563,6 +576,49 @@ async function handleUpdateProfile(
   console.log('[admin-user-mgmt] update_profile by', callerEmail, '→', email, Object.keys(update).join(','));
   await logAudit(admin, callerEmail, 'update_profile', email, true, { ...update, updated_fields: Object.keys(update) });
   return jsonResponse(200, { ok: true, email, action: 'update_profile', updated_fields: Object.keys(update) });
+}
+
+// v0.96: roles + permissions + venues in one write (User access). Keys must be in kount_features (the
+// table's trigger refuses others too); the primary role must be one of the roles; nobody takes User access
+// away from themselves (they could not undo it), and one person with User access always remains.
+async function handleSetAccess(
+  admin: ReturnType<typeof createClient>,
+  payload: SetAccessPayload,
+  callerEmail: string,
+): Promise<Response> {
+  const email = (payload.email || '').toLowerCase().trim();
+  if (!email) return reject(400, 'email required');
+  const roles = Array.isArray(payload.roles) ? [...new Set(payload.roles)] : [];
+  if (!roles.length || !roles.every(r => ALLOWED_ROLES.includes(r))) return reject(400, ROLE_ERROR);
+  if (!roles.includes(payload.role)) return reject(400, 'the primary role must be one of the roles');
+  const features = Array.isArray(payload.features) ? [...new Set(payload.features.map(String))] : null;
+  if (!features) return reject(400, 'features required');
+  const venueIds = Array.isArray(payload.venue_ids) ? [...new Set(payload.venue_ids.map(String))] : [];
+
+  const { data: catalog, error: cErr } = await admin.from('kount_features').select('key');
+  if (cErr) return reject(500, 'Failed to read the permission list: ' + cErr.message);
+  const known = new Set((catalog ?? []).map((r: { key: string }) => r.key));
+  const unknown = features.filter(k => !known.has(k));
+  if (unknown.length) return reject(400, 'unknown permission: ' + unknown.join(', '));
+
+  if (email === callerEmail && !features.includes('access:users')) {
+    return reject(400, 'Cannot take User access away from yourself');
+  }
+  if (!features.includes('access:users')) {
+    const { data: keepers, error: kErr } = await admin.from('app_users').select('email')
+      .eq('is_active', true).contains('features', ['access:users']).neq('email', email).limit(1);
+    if (kErr) return reject(500, 'Failed to check who keeps User access: ' + kErr.message);
+    if (!keepers?.length) return reject(400, 'Someone has to keep User access');
+  }
+
+  const update = { role: payload.role, roles, features, venue_ids: features.includes('access:all-venues') ? [] : venueIds };
+  const { data: done, error } = await admin.from('app_users').update(update).eq('email', email).select('email');
+  if (error) return reject(500, 'app_users update failed: ' + error.message);
+  if (!done?.length) return reject(404, 'No such user');
+
+  console.log('[admin-user-mgmt] set_access by', callerEmail, '->', email, roles.join(','), features.length, 'permissions');
+  await logAudit(admin, callerEmail, 'set_access', email, true, update);
+  return jsonResponse(200, { ok: true, email, action: 'set_access', updated_fields: Object.keys(update) });
 }
 
 // One-shot migration: walk every active app_users row, find the ones that

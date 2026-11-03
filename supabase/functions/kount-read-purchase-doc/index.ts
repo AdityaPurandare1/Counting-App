@@ -23,6 +23,9 @@ const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
 
 const ALLOWED_ROLES = new Set(['admin', 'corporate']);
+// v0.96 (0148): the Order tracker permission; a row from before 0148 (no list) by its role, as before
+const mayUseOrderTracker = (p: { role?: unknown; features?: unknown }) =>
+  Array.isArray(p.features) ? (p.features as unknown[]).includes('purchasing:order-tracker') : ALLOWED_ROLES.has(String(p.role));
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 }
@@ -45,12 +48,12 @@ Deno.serve(async (req) => {
   // --- 2. Active admin / corporate only (service-role lookup, so an RLS gap can't open it). ---
   const service = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
   const { data: profile, error: profileErr } = await service
-    .from('app_users').select('role,is_active').eq('email', userResp.user.email.toLowerCase()).limit(1).maybeSingle();
+    .from('app_users').select('role,is_active,features').eq('email', userResp.user.email.toLowerCase()).limit(1).maybeSingle();
   if (profileErr) {
     console.error('[kount-read-purchase-doc] profile lookup error:', profileErr);
     return reject(500, 'Failed to verify caller');
   }
-  if (!profile || profile.is_active !== true || !ALLOWED_ROLES.has(String(profile.role))) {
+  if (!profile || profile.is_active !== true || !mayUseOrderTracker(profile)) {
     return reject(403, 'Reading purchase documents is limited to admin and corporate users');
   }
 
