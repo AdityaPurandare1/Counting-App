@@ -380,7 +380,7 @@ test.describe('F7 — closeCount1AndFinalize is corporate-only (v1.83)', () => {
     // button gating reads appState.user.role, so flipping the role and
     // re-running updateVarianceActions is the real code path.
     await startAuditAs(page, 'corporate');
-    await page.evaluate(() => { appState.user.role = 'counter'; });
+    await page.evaluate(() => { appState.user.role = 'counter'; appState.user.features = PHONE_ROLE_TEMPLATES.counter; });
     await page.evaluate(() => { showPage('variance'); updateVarianceActions(); });
     await expect(page.locator('#closeCount1FinalizeBtn')).toHaveClass(/hide/);
   });

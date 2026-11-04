@@ -100,7 +100,7 @@ test.describe('wording fixes', () => {
     await expect(banner.getByRole('button', { name: 'Copy' })).toHaveCount(0);
 
     // Corporate still gets the raw detail to debug with.
-    await page.evaluate(() => { appState.user.role = 'corporate'; renderLastUpcErrorBanner(); });
+    await page.evaluate(() => { appState.user.role = 'corporate'; appState.user.features = PHONE_ROLE_TEMPLATES.corporate; renderLastUpcErrorBanner(); });
     await expect(banner).toContainText('PGRST301');
     await expect(banner).toContainText('ADD path');
     await expect(banner.getByRole('button', { name: 'Copy' })).toHaveCount(1);

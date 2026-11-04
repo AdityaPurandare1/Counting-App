@@ -677,12 +677,14 @@ test.describe('review follow-ups', () => {
   test('S5 the admin role passes the manager gates; venue_manager stays read-only', async ({ page }) => {
     await startAuditAs(page, 'manager');
     const r = await page.evaluate(() => {
-      const out = ['admin', 'corporate', 'manager', 'counter', 'venue_manager'].map(isManagerRole);
-      appState.user.role = 'admin';
+      // v2.32: a person is their permissions — each role as its template
+      const asRole = (role) => { appState.user.role = role; appState.user.features = PHONE_ROLE_TEMPLATES[role]; };
+      const out = ['admin', 'corporate', 'manager', 'counter', 'venue_manager'].map((role) => { asRole(role); return isManagerRole(role); });
+      asRole('admin');
       out.push(canSubmitAudit());
-      appState.user.role = 'counter';
+      asRole('counter');
       out.push(canSubmitAudit());
-      appState.user.role = 'manager';
+      asRole('manager');
       return out;
     });
     expect(r).toEqual([true, true, true, false, false, true, false]);

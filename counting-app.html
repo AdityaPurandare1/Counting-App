@@ -3203,7 +3203,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.31';
+const APP_VERSION = '2.32';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -4706,7 +4706,7 @@ function guessCategory(cat) {
      (b) the scanned barcode is already approved to a different item in the cache. */
 function resolveUpcLinkPolicy(barcode, item) {
   const role = (appState.user && appState.user.role) || 'counter';
-  const isAdmin = role === 'corporate';
+  const isAdmin = userCan('admin:catalog');
 
   const normBarcode = normalizeBarcode(barcode);
   const itemIdStr = item.supabaseId ? String(item.supabaseId) : '';
@@ -6119,8 +6119,7 @@ let upcRealtimeChannel = null;
 function startUpcRealtime() {
   if (!supabaseClient) return;                       // SDK failed to load
   if (upcRealtimeChannel) return;                    // already subscribed
-  const role = appState.user && appState.user.role;
-  if (role !== 'corporate' && role !== 'manager') return;
+  if (!canApproveUpcs()) return;
 
   // Post Path B we watch BOTH tables:
   //   - upc_mappings: pending submissions queue (admin toast on new pending)
@@ -6381,7 +6380,7 @@ async function joinNetworkedAudit(rawCode) {
   // a venue they have no access to. Corporate ('all') and assigned-list
   // checks mirror getVisibleVenues so we stay consistent with the venue
   // picker the user already sees.
-  const isCorporate = appState.user.role === 'corporate' || appState.user.venueIds === 'all';
+  const isCorporate = appState.user.venueIds === 'all';
   const assignedIds = Array.isArray(appState.user.venueIds) ? appState.user.venueIds : [];
   if (!isCorporate && !assignedIds.includes(audit.venue_id)) {
     showToast('You are not assigned to ' + audit.venue_name + ' \u2014 ask a manager.', 'error');
@@ -6421,7 +6420,7 @@ async function joinNetworkedAudit(rawCode) {
   // Join as a member — duplicate on reconnect is fine, 23505 swallowed.
   // venue_manager joins silently: it's a read-only observer and must not
   // appear in the audit's member roster.
-  if (appState.user.role !== 'venue_manager') {
+  if (!isCountReadOnly()) {
     try {
       const resp = await supabaseRest.insert('kount_members', {
         audit_id: audit.id,
@@ -7177,8 +7176,7 @@ async function syncEntryToSupabase(entry, zone, opts) {
   // venue_manager is a read-only "Venue Management" role — counting is
   // disabled. Refuse before any write, returning the {data,error} shape
   // callers expect so they don't crash on a null.
-  const role = appState.user && appState.user.role;
-  if (role === 'venue_manager') {
+  if (isCountReadOnly()) {
     showToast('View-only access — counting is disabled', 'error');
     return { data: null, error: { message: 'venue_manager-readonly' } };
   }
@@ -8278,17 +8276,42 @@ function addCustomItem(name, brand, category, subcategory, upc) {
    from the phone, no admin-desktop round-trip. The new row is pushed into the
    local catalog so the in-progress count links to it immediately. Returns the
    new master_items id, or null on failure. */
-/* Roles that run a shared audit (start, close, cancel, verify, submit). The
-   shared app_users table also has an 'admin' tier above corporate (0075);
-   venue_manager stays read-only. */
-function isManagerRole(role) {
-  return role === 'corporate' || role === 'manager' || role === 'admin';
+/* v2.32 (0148): per-person permissions. app_users.features is the person's own
+   permission list, edited on the admin's User access screen; every check below
+   asks userCan(key). A session saved before v2.32 has no list — its PRIMARY
+   role's template stands in. These are the phone's keys from the admin's
+   src/lib/permissions.ts ROLE_TEMPLATES (a test there compares them). */
+var PHONE_ROLE_TEMPLATES = {
+  admin:         ['team:issues', 'admin:approvals', 'admin:catalog', 'access:all-venues', 'audit:manage', 'phone:count', 'phone:run'],
+  corporate:     ['team:issues', 'admin:approvals', 'admin:catalog', 'access:all-venues', 'audit:manage', 'phone:count', 'phone:run'],
+  manager:       ['team:issues', 'admin:approvals', 'phone:count', 'phone:run'],
+  venue_manager: ['team:issues', 'admin:approvals'],
+  counter:       ['phone:count'],
+};
+function rowFeatures(r) {
+  if (!r) return [];
+  return Array.isArray(r.features) ? r.features : (PHONE_ROLE_TEMPLATES[r.role] || []);
+}
+/* Every venue with the All venues permission; otherwise the ones picked. */
+function rowVenueIds(r) {
+  return rowFeatures(r).indexOf('access:all-venues') >= 0 ? 'all' : ((r && r.venue_ids) || []);
+}
+function userCan(key) {
+  return rowFeatures(appState.user).indexOf(key) >= 0;
 }
 
-/* approve_upc_mapping / reject_upc_mapping accept corporate + manager only. */
+/* Runs a shared audit (start, close, cancel, verify, submit): phone:run.
+   Every caller passes the signed-in person's own role; the argument is kept
+   only so the call sites read as before. */
+function isManagerRole(_role) {
+  return userCan('phone:run');
+}
+
+/* Approves / rejects barcodes and catalog suggestions on the phone: someone who
+   runs counts (phone:run) with the Approvals permission — corporate, managers
+   and (v2.32) admins; venue management stays view-only. */
 function canApproveUpcs() {
-  const role = appState.user && appState.user.role;
-  return role === 'corporate' || role === 'manager';
+  return userCan('admin:approvals') && userCan('phone:run');
 }
 
 /* Words for stored role / count_phase values wherever a person reads them. */
@@ -8306,8 +8329,10 @@ function phaseLabel(phase) {
   return PHASE_LABELS[phase || 'count1'] || String(phase);
 }
 
+/* Creates catalog items and changes barcodes directly (others suggest them), and
+   reads raw barcode errors: the Catalog permission (corporate, and v2.32 admins). */
 function isCorporateUser() {
-  return !!(appState.user && appState.user.role === 'corporate');
+  return userCan('admin:catalog');
 }
 
 function masterCategoryForCreate(appCategory) {
@@ -8473,7 +8498,7 @@ async function submitPendingItem(payload) {
     return false;
   }
   const role = (appState.user && appState.user.role) || 'counter';
-  if (!isManagerRole(role) && role !== 'counter') {
+  if (!userCan('phone:count')) {
     showToast('Sign in to suggest catalog items', 'error');
     return false;
   }
@@ -8621,7 +8646,8 @@ function isAuditLocked() {
    does not also encode "locked" (that's the renderers' submitted-audit
    part). Pure predicate — no toast. */
 function isCountReadOnly() {
-  return !!(appState.user && appState.user.role === 'venue_manager');
+  // v2.32: no Count permission = view only (venue management's template)
+  return !!appState.user && !userCan('phone:count');
 }
 
 /* ================================================================
@@ -8715,7 +8741,8 @@ async function loadAppUsersFromSupabase() {
         email: r.email,
         name: r.name || r.email,
         role: r.role,
-        venueIds: r.role === 'corporate' ? 'all' : (r.venue_ids || []),
+        features: rowFeatures(r),
+        venueIds: rowVenueIds(r),
       };
     });
     // Empty success (admin cleared everyone) is DIFFERENT from a fetch
@@ -8742,8 +8769,10 @@ async function loadAppUsersFromSupabase() {
         setTimeout(function() {
           try { handleLogout(); } catch (e) { appState.user = null; saveState(); showPage('login'); }
         }, 1500);
-      } else if (me.role !== appState.user.role || JSON.stringify(me.venueIds) !== JSON.stringify(appState.user.venueIds)) {
+      } else if (me.role !== appState.user.role || JSON.stringify(me.venueIds) !== JSON.stringify(appState.user.venueIds)
+                 || JSON.stringify(me.features) !== JSON.stringify(rowFeatures(appState.user))) {
         appState.user.role     = me.role;
+        appState.user.features = me.features;
         appState.user.venueIds = me.venueIds;
         saveState();
         showToast('Your access has been updated by an admin.', 'info');
@@ -8865,6 +8894,7 @@ async function handleLogin() {
   }
 
   let resolvedRole = null;
+  let resolvedFeatures = null;
   let resolvedVenueIds = null;
   let resolvedName = null;
 
@@ -8901,7 +8931,8 @@ async function handleLogin() {
     }
     resolvedName = row.name || email;
     resolvedRole = row.role;
-    resolvedVenueIds = row.role === 'corporate' ? 'all' : (row.venue_ids || []);
+    resolvedFeatures = rowFeatures(row);
+    resolvedVenueIds = rowVenueIds(row);
   } catch (e) {
     console.warn('[auth] app_users lookup failed:', e);
     errorEl.textContent = 'Signed in but profile fetch failed. Try again in a moment.';
@@ -8914,6 +8945,7 @@ async function handleLogin() {
     email: email,
     name: resolvedName,
     role: resolvedRole,
+    features: resolvedFeatures,
     venueIds: resolvedVenueIds,
   };
 
@@ -8928,7 +8960,7 @@ async function handleLogin() {
   showToast('Signed in as ' + appState.user.name + ' (' + roleLabel(appState.user.role) + ')', 'success');
 
   // Admin-only version prompt so corporate always knows which build they are on.
-  if (appState.user.role === 'corporate') {
+  if (userCan('access:all-venues')) {
     setTimeout(() => showToast('k\u03a9unt v' + APP_VERSION, 'info'), 800);
   }
 
@@ -8952,7 +8984,7 @@ function getVisibleVenues() {
   if (!appState.user) return [];
 
   // Corporate sees all venues
-  if (appState.user.role === 'corporate' || appState.user.venueIds === 'all') {
+  if (appState.user.venueIds === 'all') {
     return appState.venues;
   }
 
@@ -9288,7 +9320,8 @@ async function _hydrateUserProfileFromSession(opts) {
     email: email,
     name: row.name || email,
     role: row.role,
-    venueIds: row.role === 'corporate' ? 'all' : (row.venue_ids || []),
+    features: rowFeatures(row),
+    venueIds: rowVenueIds(row),
   };
   saveState();
   // v2.00: same reason as the sign-in path — this runs once the JWT exists,
@@ -9537,7 +9570,7 @@ function renderPreAuditScreen() {
   // really only meaningful for catalog hygiene work.
   var preAuditEl = document.getElementById('preAuditItemCount');
   if (preAuditEl) {
-    if (appState.user?.role === 'corporate') {
+    if (userCan('access:all-venues')) {
       preAuditEl.innerHTML = itemMaster.length + '<span style="font-size:11px;font-weight:400;color:var(--text-muted);margin-left:4px">' + esc(src) + '</span>';
     } else {
       preAuditEl.innerHTML = '<span style="font-size:13px;font-weight:500;color:var(--text-muted)">Catalog ready</span>';
@@ -9735,7 +9768,7 @@ function renderProgress() {
   const countedCount = getCountedItemIds().size;
   const totalCount = itemMaster.length;
   const percent = totalCount > 0 ? Math.round(countedCount / totalCount * 100) : 0;
-  const isAdmin = appState.user?.role === 'corporate';
+  const isAdmin = userCan('access:all-venues');
 
   // Non-admin counters see just the running count, no "/ 20001" anchor.
   // The X-of-Y framing implies a goal of counting the entire catalog —
@@ -10029,7 +10062,7 @@ function updateHeaderCount() {
   // Hide the "X / catalogTotal" pill from counters/managers — they don't
   // benefit from seeing the full catalog size, only the corporate admin
   // working on catalog hygiene does.
-  if (appState.user?.role === 'corporate') {
+  if (userCan('access:all-venues')) {
     el.textContent = counted + ' / ' + itemMaster.length;
     el.classList.remove('hide');
   } else {
@@ -10291,7 +10324,7 @@ function renderAllCountList() {
 /* Adjust an entry from the All Count view, where the entry may live in a zone
    other than the current one. Find its zone, then delegate to adjustQuantity. */
 function adjustEntryById(entryId, delta) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   for (const [zone, items] of Object.entries(appState.audit.counts)) {
     if (items.some(function (i) { return i.id === entryId; })) { adjustQuantity(entryId, delta, zone); return; }
   }
@@ -10366,7 +10399,7 @@ function startEditQty(entryId, zone, currentQty, spanEl, prefill) {
    NOW, not the qty it showed when it opened: "4" sets 4, "+2" adds 2 to the
    current count. */
 function applyQtyEdit(entryId, zone, raw) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   const trimmed = String(raw == null ? '' : raw).trim();
   if (!trimmed) return; // empty → cancel
   const entry = ((appState.audit && appState.audit.counts[zone]) || []).find(function (e) { return e.id === entryId; });
@@ -10823,7 +10856,7 @@ function openGuidedEntry(masterId, fromScanCode) {
 }
 
 function adjustGuidedQty(delta) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   const input = document.getElementById('guidedQty');
   // Read the current value via clampQty so a stray 3-decimal entry the
   // user typed gets normalized into the increment math, then re-display
@@ -10846,7 +10879,7 @@ function adjustGuidedQty(delta) {
    No .focus() here - popping the keyboard on every stepper tap defeats
    the point of having buttons. */
 function adjustModalQty(inputId, delta) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   const input = document.getElementById(inputId);
   if (!input) return;
   const current = clampQty(input.value);
@@ -10860,7 +10893,7 @@ function adjustModalQty(inputId, delta) {
    adjustGuidedQty uses, so tapping +12 twice yields +24. No .focus() so the
    mobile keyboard doesn't pop on every tap. */
 function addGuidedQty(amount) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   const input = document.getElementById('guidedQty');
   if (!input) return;
   const current = clampQty(input.value);
@@ -10930,7 +10963,7 @@ function renderRemapBanner() {
     '</div>';
 }
 function setGuidedQtyMode(mode) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   appState.guidedQtyMode = (mode === 'add') ? 'add' : 'set';
   const input  = document.getElementById('guidedQty');
   const setBtn = document.getElementById('gqmSetBtn');
@@ -11010,7 +11043,7 @@ function selectGuidedIssue(element) {
 function submitGuidedEntry() {
   // venue_manager is read-only: refuse both the recount branch and the
   // normal-entry branch before any state mutation or write.
-  if (appState.user?.role === 'venue_manager') {
+  if (isCountReadOnly()) {
     showToast('View-only access — counting is disabled', 'error');
     return;
   }
@@ -11754,7 +11787,7 @@ function resolveTypedMaster(name, category, sku, done) {
 }
 
 function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role — no local state mutation
+  if (isCountReadOnly()) return; // read-only role — no local state mutation
   if (isAuditLocked()) return;
   if (!appState.audit) return;
   if (!appState.currentZone) {
@@ -11892,7 +11925,7 @@ function addCountEntry(name, category, qty, method, sku, notes, issue, photoId, 
    Keeps addCountEntry untouched — the data model already supports
    same-item-in-multiple-zones natively. */
 function addCountEntryToZone(zone, name, category, qty, method, sku, notes, issue, photoId, details, masterId) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role — no local state mutation
+  if (isCountReadOnly()) return; // read-only role — no local state mutation
   if (!zone || zone === appState.currentZone) return;
   const parsedQty = clampQty(qty);
   if (!Number.isFinite(parsedQty) || parsedQty <= 0) return;
@@ -12007,7 +12040,7 @@ function clearExtraLocations(containerId) {
    FIX #1: Lock check
    ================================================================ */
 function adjustQuantity(itemId, delta, zoneOverride) {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   // zoneOverride lets the All Count breakdown edit an entry in any zone.
@@ -12980,7 +13013,7 @@ function resolveInstantScan(code) {
    with non-blocking feedback. Returns true if it consumed the scan (known),
    false if the caller should fall through to the modal flow (unknown). */
 function instantScanCount(code) {
-  if (appState.user?.role === 'venue_manager') return false; // read-only role
+  if (isCountReadOnly()) return false; // read-only role
   const resolved = resolveInstantScan(code);
   if (!resolved) return false;
 
@@ -13250,7 +13283,7 @@ function closeBarcodeEntry(event) {
 }
 
 function submitBarcodeEntry() {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   if (isAuditLocked()) return;
 
   const name = document.getElementById('barcodeName').value.trim();
@@ -13808,7 +13841,7 @@ function closePhotoReview(event) {
 let _submittingPhotoEntry = false; // v2.05 (Harsh): see guard below
 
 async function submitPhotoEntry() {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   // v2.05 (Harsh): this awaits savePhoto (IndexedDB) before the modal
@@ -14122,7 +14155,7 @@ function copyLastUpcError() {
 }
 
 function submitManualEntry() {
-  if (appState.user?.role === 'venue_manager') return; // read-only role
+  if (isCountReadOnly()) return; // read-only role
   if (isAuditLocked()) return; // FIX #1
 
   const name = document.getElementById('manualName').value.trim();
@@ -15184,7 +15217,7 @@ function updateVarianceActions() {
     e1Btn.classList.remove('hide');
     e2Btn.classList.add('hide');
     // Finalize-from-Count-1 is CORPORATE ONLY (not managers).
-    if (fBtn) fBtn.classList.toggle('hide', role !== 'corporate');
+    if (fBtn) fBtn.classList.toggle('hide', !userCan('audit:manage'));
   } else if (phase === 'review' || phase === 'count2') {
     c1Btn.classList.add('hide');
     if (fBtn) fBtn.classList.add('hide');
@@ -15673,7 +15706,7 @@ function closeCount1AndFinalize() {
   // ADMIN ONLY — corporate role. Button is also role-gated in
   // updateVarianceActions; this is defense-in-depth for a stale tab.
   const role = appState.user && appState.user.role;
-  if (role !== 'corporate') { showToast('Only an admin can finalize from Count 1', 'error'); return; }
+  if (!userCan('audit:manage')) { showToast('Only an admin can finalize from Count 1', 'error'); return; }
   if ((appState.audit.countPhase || 'count1') === 'final' || appState.audit.status === 'submitted') {
     showToast('Audit already finalized', 'error'); return;
   }
@@ -16434,7 +16467,7 @@ function finalizeCount2() {
   // venue_manager is read-only — never finalizes an audit. Defense-in-depth:
   // the recount/close flow is already role-gated, but a stale path must fail
   // cleanly rather than mutate audit state.
-  if (appState.user?.role === 'venue_manager') {
+  if (isCountReadOnly()) {
     showToast('View-only access — counting is disabled', 'error');
     return;
   }
@@ -16723,7 +16756,7 @@ function renderIssuesPage() {
 
   // venue_manager can flag/resolve issues on both apps, so it shares the
   // Resolve affordance with corporate/manager here.
-  var isAdmin = appState.user && (isManagerRole(appState.user.role) || appState.user.role === 'venue_manager');
+  var isAdmin = userCan('team:issues');
 
   document.getElementById('issuesList').innerHTML = filtered.map(function(issue, originalIdx) {
     var idx = issueLog.indexOf(issue);
@@ -17502,7 +17535,7 @@ function renderSummaryContent() {
    read-only venue_manager. */
 function canSubmitAudit() {
   const role = appState.user && appState.user.role;
-  if (!appState.audit || role === 'venue_manager') return false;
+  if (!appState.audit || isCountReadOnly()) return false;
   return !appState.audit.supabaseId || isManagerRole(role);
 }
 
@@ -17676,7 +17709,7 @@ async function submitAudit() {
   }
 
   // venue_manager is read-only — never finalizes/submits an audit.
-  if (appState.user?.role === 'venue_manager') {
+  if (isCountReadOnly()) {
     showToast('View-only access — counting is disabled', 'error');
     return;
   }
@@ -18698,7 +18731,7 @@ if (appState.user) {
     showPage('venues');
   }
   // Restored session: same admin-only version ping as a fresh login.
-  if (appState.user.role === 'corporate') {
+  if (userCan('access:all-venues')) {
     setTimeout(() => showToast('k\u03a9unt v' + APP_VERSION, 'info'), 800);
   }
   // If the restored audit is a networked one, reopen the Realtime channel
