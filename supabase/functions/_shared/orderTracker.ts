@@ -97,6 +97,9 @@ export interface OtLine {
   r365_payments?: Array<{ number: string; date: string; amount: number }> | null;
   /** the day it was delivered (0147): stamped when first marked Delivered / Received; 'eta' = estimated */
   delivered_on?: string | null;
+  /** where this line goes (0151): set from its text when empty — sea -> the warehouse, air -> the venue;
+   *  null = the order's */
+  deliver_to?: 'warehouse' | 'venue' | null;
   delivered_source?: 'app' | 'eta' | 'manual' | null;
 }
 
@@ -1010,6 +1013,9 @@ export function onHand(moves: OtMove[], asOf?: string): number {
 }
 
 /** Units received into the warehouse against one order line. */
+/** Where a line goes: its own destination (0151: sea -> warehouse, air -> venue), else its order's. */
+export const lineDeliversTo = (l: Pick<OtLine, 'deliver_to'>, o: Pick<OtOrder, 'deliver_to'>): 'warehouse' | 'venue' => l.deliver_to ?? o.deliver_to;
+
 /** The pieces per case a line names — "CS/1500", "CS 1500", "(1500/CS)", "1500/CS" — else null. */
 export function linePack(l: Pick<OtLine, 'description'>): number | null {
   const m = /\bCS\s*[/ ]\s*(\d{2,5})\b/i.exec(l.description) ?? /\b(\d{2,5})\s*\/\s*CS\b/i.exec(l.description);
@@ -1057,8 +1063,10 @@ const SOON_DAYS = 30;
 export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], orders: OtOrder[], today: string): StockRow[] {
   const linesByOrder = new Map<string, OtLine[]>();
   for (const l of lines) (linesByOrder.get(l.order_id) ?? linesByOrder.set(l.order_id, []).get(l.order_id)!).push(l);
-  // open warehouse orders: completed (by hand, or every line paid) and archived ones bring nothing more
-  const openWarehouse = new Set(orders.filter(o => o.deliver_to !== 'venue' && orderState(o, linesByOrder.get(o.id) ?? []) === 'open').map(o => o.id));
+  // open orders (completed — by hand, or every line paid — and archived ones bring nothing more), and of their
+  // lines those going to the warehouse: the line's own destination (0151: a custom item by sea), else the order's
+  const openOrders = new Map(orders.filter(o => orderState(o, linesByOrder.get(o.id) ?? []) === 'open').map(o => [o.id, o]));
+  const toWarehouse = (l: OtLine) => { const o = openOrders.get(l.order_id); return !!o && lineDeliversTo(l, o) === 'warehouse'; };
   return items.filter(i => i.is_active && i.track_stock).map(item => {
     const mv = moves.filter(m => m.item_id === item.id);
     const releases = mv.filter(m => m.kind === 'release');
@@ -1072,7 +1080,7 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
     const monthlyUse = dailyUse * 30;
 
     const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'REQUESTED' && l.status !== 'RECEIVED'
-      && openWarehouse.has(l.order_id));
+      && toWarehouse(l));
     // in the item's own units (a line of 1,500-piece cases into a stock item counted in cases of 1,000)
     const unreceived = (l: OtLine) => Math.max(0, qtyInItemUnits(l, item) - receivedForLine(mv, l.id));
     const incoming = itemLines.reduce((s, l) => s + unreceived(l), 0);
