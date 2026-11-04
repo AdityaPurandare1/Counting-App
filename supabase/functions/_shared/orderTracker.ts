@@ -1010,6 +1010,19 @@ export function onHand(moves: OtMove[], asOf?: string): number {
 }
 
 /** Units received into the warehouse against one order line. */
+/** The pieces per case a line names — "CS/1500", "CS 1500", "(1500/CS)", "1500/CS" — else null. */
+export function linePack(l: Pick<OtLine, 'description'>): number | null {
+  const m = /\bCS\s*[/ ]\s*(\d{2,5})\b/i.exec(l.description) ?? /\b(\d{2,5})\s*\/\s*CS\b/i.exec(l.description);
+  return m ? Number(m[1]) : null;
+}
+
+/** A line's quantity in its stock item's units: cases of another size convert by pieces (14 sea cases of
+ *  1,500 = 21 of the warehouse's cases of 1,000). Same size, or either size unknown: the line's own qty. */
+export function qtyInItemUnits(l: Pick<OtLine, 'description' | 'qty'>, item: Pick<OtItem, 'pack_size'> | null | undefined): number {
+  const lp = linePack(l), ip = item?.pack_size != null ? n(item.pack_size) : null;
+  return lp && ip && lp !== ip ? (n(l.qty) * lp) / ip : n(l.qty);
+}
+
 export function receivedForLine(moves: OtMove[], lineId: string): number {
   return moves.filter(m => m.kind === 'receipt' && m.line_id === lineId).reduce((s, m) => s + n(m.qty), 0);
 }
@@ -1060,7 +1073,8 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
 
     const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'REQUESTED' && l.status !== 'RECEIVED'
       && openWarehouse.has(l.order_id));
-    const unreceived = (l: OtLine) => Math.max(0, n(l.qty) - receivedForLine(mv, l.id));
+    // in the item's own units (a line of 1,500-piece cases into a stock item counted in cases of 1,000)
+    const unreceived = (l: OtLine) => Math.max(0, qtyInItemUnits(l, item) - receivedForLine(mv, l.id));
     const incoming = itemLines.reduce((s, l) => s + unreceived(l), 0);
     const awaitingReceipt = itemLines.filter(l => statusRank(l.status) >= statusRank('DELIVERED')).reduce((s, l) => s + unreceived(l), 0);
 
