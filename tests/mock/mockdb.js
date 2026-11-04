@@ -292,7 +292,15 @@ class MockDB {
     }
     if (fn === 'find_auth_user_by_email') return { status: 200, body: null };
     if (fn === 'list_auth_user_emails') return { status: 200, body: [] };
-    if (fn === 'compute_avt_for_audit') return this.computeAvtForAudit(args || {});
+    if (fn === 'compute_avt_for_audit') {
+      // v2.33: like the real database's trigger on the computed report (KevaOS migration
+      // 520261103192326), the recount list is built when the AVT lands while the audit is in
+      // review — here, after whichever computeAvtForAudit a spec installed.
+      const res = this.computeAvtForAudit(args || {});
+      const audit = this.t.kount_audits.find(function (a) { return a.id === (args || {}).p_audit_id; });
+      if (res.status === 200 && audit && audit.status === 'active' && audit.count_phase === 'review') this.buildRecounts(audit.id, res.body);
+      return res;
+    }
     // v2.13: pre-close checks (migration 0078). Specs set db.guardrailsRows / db.guardrailsError.
     if (fn === 'kount_count_guardrails') {
       if (this.guardrailsError) return err(500, 'P0001', this.guardrailsError);
@@ -366,7 +374,52 @@ class MockDB {
     // Zero-variance row that must NOT be flagged.
     this.t.kount_avt_rows.push(mkRow("Tito's Handmade Vodka 750ml", 'Liquor Cost', 4, 4, 20));
 
+
     return { status: 200, body: reportId };
+  }
+
+  /* Mirror of kount_build_recounts for the mock: this report's rows scored with the default
+     procurement_kount_recount_rules (no chronic history in the mock), one row per zone the item
+     was counted in, untouched pending rows replaced, empty audits get none. */
+  buildRecounts(auditId, reportId) {
+    const self = this;
+    if (!this.t.kount_recounts) this.t.kount_recounts = [];
+    this.t.kount_recounts = this.t.kount_recounts.filter(function (r) {
+      return !(r.audit_id === auditId && r.status === 'pending' && r.count2_qty == null && r.audit_result == null);
+    });
+    const entries = this.t.kount_entries.filter(function (e) { return e.audit_id === auditId && !e.is_recount; });
+    if (entries.length === 0) return;
+    const sev = function (row) {
+      const a = Math.abs(Number(row.variance_value) || 0);
+      const wine = String(row.category || '').toLowerCase().indexOf('wine') >= 0;
+      if (a >= (wine ? 1000 : 500)) return 'CRITICAL';
+      if (a >= (wine ? 500 : 250)) return 'HIGH';
+      if (a >= (wine ? 250 : 100)) return 'MEDIUM';
+      return null;
+    };
+    const norm = function (v) { return String(v || '').trim().toLowerCase(); };
+    const picked = this.t.kount_avt_rows
+      .filter(function (r) { return r.report_id === reportId && sev(r); })
+      .sort(function (a, b) { return Math.abs(b.variance_value) - Math.abs(a.variance_value); })
+      .slice(0, 60);
+    picked.forEach(function (row) {
+      const zones = {};
+      entries.filter(function (e) { return norm(e.item_name) === norm(row.item_name); }).forEach(function (e) {
+        const z = zones[e.zone] || (zones[e.zone] = { qty: 0, master: null });
+        z.qty += Number(e.qty) || 0;
+        z.master = z.master || e.master_item_id || null;
+      });
+      const list = Object.keys(zones).length ? Object.keys(zones) : [null];
+      list.forEach(function (zone) {
+        self.t.kount_recounts.push({
+          id: uuid(), audit_id: auditId, item_id: null, item_name: row.item_name,
+          master_item_id: zone != null ? zones[zone].master : null,
+          severity: sev(row), variance_value: row.variance_value, variance_qty: row.variance,
+          count1_qty: zone != null ? zones[zone].qty : 0, count2_qty: null, zone: zone,
+          category: row.category, status: 'pending', audit_result: null, created_at: new Date().toISOString(),
+        });
+      });
+    });
   }
 
   edge(fn, headers, body) {
