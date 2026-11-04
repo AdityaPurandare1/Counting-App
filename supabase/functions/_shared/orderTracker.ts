@@ -1097,7 +1097,10 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
         reorderBy = addDays(today, Math.max(0, headroom) / dailyUse);
         state = headroom <= 0 ? 'reorder now' : daysBetween(today, reorderBy) <= SOON_DAYS ? 'reorder soon' : 'ok';
       } else {
-        state = 'ok';
+        // v1.02: no reorder point (none set, no lead time to work one out) — judge by cover, what is coming
+        // included: nothing left = reorder now (it showed OK at 0 cases), lasting 30 days or less = soon
+        const have = qty + incoming;
+        state = have <= 0 ? 'reorder now' : have / dailyUse <= SOON_DAYS ? 'reorder soon' : 'ok';
       }
     } else if (item.reorder_point != null && qty + incoming <= item.reorder_point) {
       state = 'reorder now';
