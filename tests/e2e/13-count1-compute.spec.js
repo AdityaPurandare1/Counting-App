@@ -88,7 +88,11 @@ test.describe('v1.70 Count 1 compute', () => {
     await expect.poll(() => db.t.kount_audits[0].count_phase).toBe('final');
   });
 
-  /* v1.98 MATERIALITY FILTER (generateRecountFromAvt).
+  /* v2.33: these rules now live in the database (kount_build_recounts; the mock mirrors it):
+     MEDIUM >= $100 liquor / $250 wine, HIGH >= $250 / $500. Every assertion below still holds —
+     Don Julio (-$200) is MEDIUM now rather than HIGH, and is kept either way.
+
+     v1.98 MATERIALITY FILTER (generateRecountFromAvt).
      A recountable item is flagged only when severity is CRITICAL/HIGH, OR it is
      needsRecount()-eligible AND material by dollars (|$|>=250) OR bottles
      (|bottles|>=3) OR percentage (|pct|>=25). The pct arm catches
@@ -195,9 +199,9 @@ test.describe('v1.70 Count 1 compute', () => {
     await startAuditAs(page, 'manager');
     await addManual(page, 'Belvedere 1L', 3);
 
-    // 50 material MEDIUM wine rows ($300..$349 each). All clear the $250 floor
-    // and are MEDIUM (wine: >=200 and <500), so all are eligible — but the cap
-    // must trim them to the top 40 by |$|, dropping the 10 smallest.
+    // v2.33: the list is built by the database (procurement_kount_recount_rules, cap 60).
+    // 70 MEDIUM wine rows ($300..$369 each): all clear the $250 wine floor and stay under the
+    // $500 HIGH line, so all are eligible — the cap must trim them to the top 60 by |$|.
     db.computeAvtForAudit = function (args) {
       const rid = () => 'cccccccc-cccc-4ccc-8ccc-' + Date.now().toString(16).padStart(12, '0').slice(-12) + Math.random().toString(16).slice(2, 6);
       const auditId = args.p_audit_id;
@@ -218,7 +222,7 @@ test.describe('v1.70 Count 1 compute', () => {
         return true;
       });
       this.t.kount_avt_reports.push({ id: reportId, audit_id: auditId, venue_ids: [venueId], source: 'computed', uploaded_at: now, computed_at: now });
-      for (let i = 0; i < 50; i++) {
+      for (let i = 0; i < 70; i++) {
         const cu = 300 + i; // |$ var| = cu (variance -1 * cu)
         this.t.kount_avt_rows.push({
           id: rid(), report_id: reportId, venue_id: venueId, venue_name: venueName, store: venueName,
@@ -241,10 +245,10 @@ test.describe('v1.70 Count 1 compute', () => {
     const names = await page.evaluate(() =>
       Array.from(new Set(Object.values(appState.audit.recounts).map((r) => r.itemName))));
 
-    // Capped to 40 (maxRecountItems), not all 50.
-    expect(names.length).toBe(40);
-    // The largest-$ item ($349) is kept; the smallest ($300) is trimmed.
-    expect(names).toContain('Test Wine 49 750ml');
+    // Capped to 60 (max_items), not all 70.
+    expect(names.length).toBe(60);
+    // The largest-$ item ($369) is kept; the smallest ($300) is trimmed.
+    expect(names).toContain('Test Wine 69 750ml');
     expect(names).not.toContain('Test Wine 00 750ml');
   });
 });
