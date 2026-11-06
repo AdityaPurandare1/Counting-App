@@ -64,21 +64,29 @@ returns text language sql immutable parallel safe set search_path to 'pg_catalog
 $fn$;
 
 -- ── the live end of a merge chain ──────────────────────────────────────────
+-- Active and not merged = live. Active but merged on = keep following (Little Luck "Limes" -> "Limes 1each").
+-- When the chain loops or dead-ends -- 26 of Little Luck's food items are the active half of a loop with an
+-- archived twin ("Heavy Cream" <-> archived "Heavy Cream") -- the furthest ACTIVE row is the one in use.
+-- Null only when nothing on the chain is active (an archived, unmerged item: the import revives those itself).
 create or replace function public.kount_live_item(p_id uuid)
-returns uuid language plpgsql stable security definer set search_path to 'public', 'pg_temp' as $fn$
+returns uuid language plpgsql stable set search_path to 'public', 'pg_temp' as $fn$
 declare
-  v_cur uuid := p_id; v_active boolean; v_next uuid; v_hops int := 0;
+  v_cur uuid := p_id; v_active boolean; v_next uuid; v_hops int := 0; v_last_active uuid;
 begin
   while v_cur is not null and v_hops <= 12 loop
     select m.is_active, m.merged_into_id into v_active, v_next from public.master_items m where m.id = v_cur;
-    if not found then return null; end if;
-    if v_active then return v_cur; end if;   -- live (an active row that still points somewhere is treated as live)
+    if not found then exit; end if;
+    if v_active then
+      if v_next is null then return v_cur; end if;
+      v_last_active := v_cur;
+    end if;
     v_cur := v_next; v_hops := v_hops + 1;
-    if v_cur = p_id then return null; end if; -- a loop
+    if v_cur = p_id then exit; end if;        -- a loop
   end loop;
-  return null;
+  return v_last_active;
 end
 $fn$;
+revoke all on function public.kount_live_item(uuid) from public, anon;
 
 -- ── remembered matches, per venue ──────────────────────────────────────────
 create table if not exists public.kount_food_aliases (
@@ -97,7 +105,7 @@ revoke all on table public.kount_food_aliases from public, anon, authenticated;
 grant select on table public.kount_food_aliases to authenticated;
 drop policy if exists kount_food_aliases_read on public.kount_food_aliases;
 create policy kount_food_aliases_read on public.kount_food_aliases for select to authenticated
-  using (public.kount_has_feature('admin:food-count'));
+  using (public.kount_has_feature('admin:food-count') and public.kount_can_see_venue(venue_id));
 
 create or replace function public.kount_food_alias_save(p_venue_id text, p_alias text, p_master_item_id uuid)
 returns jsonb language plpgsql security definer set search_path to 'public', 'pg_temp' as $fn$
@@ -143,6 +151,7 @@ declare
   v_total_value  numeric := 0;
   v_has_counts   boolean := false;
   v_how          jsonb;
+  v_prior        uuid;
 begin
   -- 0. Authorization. Corporate/admin anywhere; manager only at their venue.
   --    Reads the VERIFIED JWT claim, never a caller-supplied argument.
@@ -184,9 +193,29 @@ begin
   -- 0088: an upload with no quantities is a LIST/PRICE setup, not a count.
   select exists (select 1 from _food_rows where qty is not null) into v_has_counts;
 
-  -- 2. Resolve (0155): picked item -> confirmed alias -> the venue's list (exact name, then key, only when one
-  --    list item has that key) -> a LIVE catalog item by exact name. Every hit is taken to the live end of its
-  --    merge chain; a merged / looped row is never used as it is.
+  -- 0155: a retry of a count that already went through (lost response, double click) records nothing new.
+  -- The screen sends the same p_counted_at on every retry; a person who really means to redo a count cancels
+  -- the first one in Counts.
+  if p_commit and v_has_counts then
+    select a.id into v_prior from public.kount_audits a
+     where a.venue_id = p_venue_id and a.audit_kind = 'food' and a.status = 'submitted'
+       and a.started_at = p_counted_at and lower(a.started_by_email) = v_email
+     limit 1;
+    if v_prior is not null then
+      return jsonb_build_object(
+        'ok', true, 'committed', true, 'already_recorded', true, 'has_counts', true,
+        'venue_id', p_venue_id, 'venue_name', v_venue_name, 'audit_id', v_prior,
+        'rows_in_sheet', (select count(*) from _food_rows), 'matched', 0, 'matched_by', '{}'::jsonb,
+        'unmatched', '[]'::jsonb, 'masters_created', 0,
+        'rows_with_qty', (select count(*) from _food_rows where qty is not null),
+        'rows_with_price', 0, 'costs_written', 0, 'total_value', 0,
+        'entries_written', (select count(*) from public.kount_entries e where e.audit_id = v_prior));
+    end if;
+  end if;
+
+  -- 2. Resolve (0155): picked item -> the venue's list by exact name -> a confirmed alias -> the venue's list
+  --    by key (only when one list item has it) -> a live catalog item by exact name. Every hit is taken to the
+  --    live end of its merge chain (kount_live_item); a merged row is never used as it is.
   create temp table _food_resolved on commit drop as
   with k as (select f.*, public.kount_food_key(f.item) as item_key from _food_rows f),
   list as (
@@ -202,13 +231,13 @@ begin
       (select case when count(distinct l.live_id) = 1 then (array_agg(l.live_id))[1] end
          from list l where l.name_key = k.item_key and k.item_key <> '' and l.live_id is not null) as t_list_key,
       (select (array_agg(m.id order by (m.base_unit is null), m.id))[1] from public.master_items m
-        where lower(m.name) = lower(k.item) and m.is_active and m.merged_into_id is null) as t_catalog
+        where lower(m.name) = lower(k.item) and m.is_active and public.kount_live_item(m.id) = m.id) as t_catalog
     from k
   )
   select t.rn, t.item, t.count_unit, t.units_per_case, t.qty, t.price, t.sheet, t.sort_order, t.item_key,
-         coalesce(t.t_picked, t.t_alias, t.t_list_name, t.t_list_key, t.t_catalog) as master_item_id,
-         case when t.t_picked is not null then 'picked' when t.t_alias is not null then 'alias'
-              when t.t_list_name is not null then 'list' when t.t_list_key is not null then 'list_key'
+         coalesce(t.t_picked, t.t_list_name, t.t_alias, t.t_list_key, t.t_catalog) as master_item_id,
+         case when t.t_picked is not null then 'picked' when t.t_list_name is not null then 'list'
+              when t.t_alias is not null then 'alias' when t.t_list_key is not null then 'list_key'
               when t.t_catalog is not null then 'catalog' end as matched_by
     from tiers t;
 
@@ -268,7 +297,9 @@ begin
        started_by_email, started_by_name, started_at, count1_closed_at, completed_at, notes)
     values
       (p_venue_id, v_venue_name, 'submitted', 'final', 'food',
-       'FOOD-' || to_char(p_counted_at, 'MMDD-HH24MI'),
+       -- join_code is unique across ALL venues: venue + time + a random tail, so two venues back-dating to the
+       -- same evening (both stamped 23:59) never collide.
+       'FOOD-' || upper(p_venue_id) || '-' || to_char(p_counted_at, 'MMDD-HH24MI') || '-' || substr(md5(gen_random_uuid()::text), 1, 4),
        v_email, coalesce(v_name, v_email), p_counted_at, p_counted_at, p_counted_at,
        'Food count by ' || v_email)
     returning id into v_audit_id;
@@ -288,6 +319,19 @@ begin
   end if;
 
   if p_commit then
+    -- 0155: list rows whose item was merged into another live item move to it (or go, when it is already listed),
+    -- so the list never keeps a row that counts land beside instead of on.
+    create temp table _food_moves on commit drop as
+    select fi.master_item_id as old_id, public.kount_live_item(fi.master_item_id) as live_id
+      from public.kount_venue_food_items fi where fi.venue_id = p_venue_id;
+    delete from _food_moves where live_id is null or live_id = old_id;
+    delete from public.kount_venue_food_items fi using _food_moves d
+     where fi.venue_id = p_venue_id and fi.master_item_id = d.old_id
+       and (exists (select 1 from public.kount_venue_food_items x where x.venue_id = p_venue_id and x.master_item_id = d.live_id)
+            or d.old_id::text <> (select min(d2.old_id::text) from _food_moves d2 where d2.live_id = d.live_id));
+    update public.kount_venue_food_items fi set master_item_id = d.live_id, updated_at = now()
+      from _food_moves d where fi.venue_id = p_venue_id and fi.master_item_id = d.old_id;
+
     -- Costs: a seed (is_manual = false) the invoice refresh overwrites later.
     insert into public.kount_venue_cost_overrides
       (venue_id, master_item_id, cost_per_unit, source, set_by, is_manual, price_date, updated_at)
@@ -355,14 +399,42 @@ update public.kount_venue_food_items f
  where f.units_per_case is null
    and (f.count_unit ~ '\(\s*\d+(\.\d+)?\s*/' or f.count_unit ~ '\(\s*\d+(\.\d+)?\s*(ct|pc|pcs|count)\s*\)');
 
--- ── verification ─────────────────────────────────────────────────────────────
-select public.kount_food_key('Butter, Unsalted') = public.kount_food_key('Unsalted Butter') as butter_same,
-       public.kount_food_key('Heavy Cream 40%') as cream,                                   -- 'cream heavy'
-       public.kount_food_key('Wagyu Ground Beef, 5lb CVP (Margaret River)') as wagyu,      -- 'beef cvp ground wagyu'
-       public.kount_food_key('Avocado, Hass 20/24') as avocado,                             -- 'avocado hass'
-       public.kount_food_key('Eggs, Large') as eggs,                                        -- 'egg large'
-       public.kount_food_key('Tomatoes & Potatoes') as plurals,                             -- 'potato tomato'
-       (select count(*) from public.kount_venue_food_items where units_per_case is not null) as packs_filled;
--- expect: true, cream heavy, beef cvp ground wagyu, avocado hass, egg large, potato tomato, > 0
+-- ── one-time: every venue's list onto live items (same move the import makes on each count) ──
+-- Little Luck 2026-11-05: 4 rows move (Limes -> Limes 1each, Oat Milk, Grapeseed Oil, Cauliflower); the 26 active
+-- halves of merge loops stay where they are.
+create temp table _list_moves on commit drop as
+select fi.venue_id, fi.master_item_id as old_id, public.kount_live_item(fi.master_item_id) as live_id
+  from public.kount_venue_food_items fi;
+delete from _list_moves where live_id is null or live_id = old_id;
+delete from public.kount_venue_food_items fi using _list_moves d
+ where fi.venue_id = d.venue_id and fi.master_item_id = d.old_id
+   and (exists (select 1 from public.kount_venue_food_items x where x.venue_id = d.venue_id and x.master_item_id = d.live_id)
+        or d.old_id::text <> (select min(d2.old_id::text) from _list_moves d2 where d2.venue_id = d.venue_id and d2.live_id = d.live_id));
+update public.kount_venue_food_items fi set master_item_id = d.live_id, updated_at = now()
+  from _list_moves d where fi.venue_id = d.venue_id and fi.master_item_id = d.old_id;
+
+-- ── verification: any wrong answer aborts the migration ──────────────────────
+do $v$
+declare v_bad text := '';
+begin
+  if public.kount_food_key('Butter, Unsalted') <> public.kount_food_key('Unsalted Butter') then v_bad := v_bad || ' butter'; end if;
+  if public.kount_food_key('Heavy Cream 40%') <> 'cream heavy' then v_bad := v_bad || ' cream'; end if;
+  if public.kount_food_key('Wagyu Ground Beef, 5lb CVP (Margaret River)') <> 'beef cvp ground wagyu' then v_bad := v_bad || ' wagyu'; end if;
+  if public.kount_food_key('Avocado, Hass 20/24') <> 'avocado hass' then v_bad := v_bad || ' avocado'; end if;
+  if public.kount_food_key('Eggs, Large') <> 'egg large' then v_bad := v_bad || ' eggs'; end if;
+  if public.kount_food_key('Tomatoes & Potatoes') <> 'potato tomato' then v_bad := v_bad || ' plurals'; end if;
+  if public.kount_food_key('Butter ½ lb') <> 'butter lb' then v_bad := v_bad || ' half'; end if;
+  if exists (select 1 from public.kount_venue_food_items fi
+              where public.kount_live_item(fi.master_item_id) is distinct from fi.master_item_id
+                and public.kount_live_item(fi.master_item_id) is not null) then
+    v_bad := v_bad || ' list-not-on-live-items';
+  end if;
+  if (select count(*) from public.kount_venue_food_items where venue_id = 'v11') < 230 then v_bad := v_bad || ' little-luck-list-shrank'; end if;
+  if v_bad <> '' then raise exception '0155 verification failed:%', v_bad; end if;
+end
+$v$;
+select (select count(*) from public.kount_venue_food_items where venue_id = 'v11') as little_luck_items,
+       (select count(*) from public.kount_venue_food_items where units_per_case is not null) as packs_filled,
+       (select count(*) from _list_moves) as list_rows_moved;
 
 commit;
