@@ -664,6 +664,13 @@ export function venueForDoc(doc: Pick<ReadDoc, 'bill_to' | 'ship_to'>, venues: A
   return best && bestScore >= 0.6 ? best : null;
 }
 
+/** Two money amounts are the same document total: both present and within half a cent. */
+function sameMoney(a: number | null | undefined, b: number | null | undefined): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  const x = Number(a), y = Number(b);
+  return Number.isFinite(x) && Number.isFinite(y) && Math.abs(x - y) < 0.005;
+}
+
 export interface MailDecideOptions {
   /** create a new order from a quote / invoice / confirmation that matches none (0138) */
   autoCreate?: boolean;
@@ -681,8 +688,28 @@ export function decideMailDocument(doc: ReadDoc, src: MailSource,
   if (!doc || !Array.isArray(doc.lines)) return { state: 'pending', reason: 'The reader returned nothing usable — open the PDF.', orderId: null };
   const docNumber = String(doc.doc_number ?? '').trim();
   if (docNumber && doc.doc_kind !== 'other') {
-    const saved = data.documents.find(d => d.kind === doc.doc_kind && normText(d.doc_number) === normText(docNumber) && sameVendor(d.vendor_name, doc.vendor_name));
-    if (saved) return { state: 'ignored', reason: `Already saved on ${saved.created_at.slice(0, 10)} (${DOC_KIND_LABEL[doc.doc_kind].toLowerCase()} ${docNumber}).` };
+    // A resend is the same number from the same vendor AND the same total. The number alone is not enough:
+    // E&E puts one "Job Reference Number" on every quote for a project (582 = all Delilah Dallas smallware) and
+    // has reused an invoice number, so 4 new documents were dropped as "already saved" (10/14-11/08). A number
+    // match with another total -- or no total to compare -- is never skipped: a person decides.
+    const sameNumber = data.documents
+      .filter(d => d.kind === doc.doc_kind && normText(d.doc_number) === normText(docNumber) && sameVendor(d.vendor_name, doc.vendor_name))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+    const saved = sameNumber.find(d => sameMoney(d.total, doc.total));
+    if (saved) return { state: 'ignored', reason: `Already saved on ${saved.created_at.slice(0, 10)} (${DOC_KIND_LABEL[doc.doc_kind].toLowerCase()} ${docNumber}, same total).` };
+    if (sameNumber.length) {
+      const prev = sameNumber[0];
+      const prevOrder = data.orders.find(o => o.id === prev.order_id);
+      const label = DOC_KIND_LABEL[doc.doc_kind].toLowerCase();
+      const prevTotal = prev.total === null || !Number.isFinite(Number(prev.total)) ? 'no total' : fmt(Number(prev.total));
+      const thisTotal = Number.isFinite(Number(doc.total)) ? fmt(Number(doc.total)) : 'no total';
+      return {
+        state: 'pending',
+        reason: `Same ${label} number (${docNumber}) as the one saved on ${prev.created_at.slice(0, 10)}${prevOrder ? ` for ${prevOrder.order_number}` : ''}, `
+          + `but a different total (${thisTotal} vs ${prevTotal}) — a new ${label} under a reused number, or a revision. Check which order it belongs to.`,
+        orderId: null,
+      };
+    }
   }
   if (doc.is_credit) return { state: 'pending', reason: 'A credit memo — check it against the order by hand.', orderId: null };
   if (doc.doc_kind === 'other') return { state: 'ignored', reason: 'Not a quote, order confirmation, invoice or shipping notice.' };
