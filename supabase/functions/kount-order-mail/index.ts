@@ -22,7 +22,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { decideMailDocument, extractTracking, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { awaitingApproval, decideMailDocument, extractTracking, planQuoteApprovals, quoteKey, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -191,6 +191,13 @@ Deno.serve(async (req) => {
       return json(200, { recorded: stats.storage ?? 0, review: stats.storage_review ?? 0, error: stats.storage_error ?? null });
     }
 
+    if (action === 'approvals') {
+      // the Quoted lines' approval e-mails (0157), on demand: "I've sent it - check now"
+      const stats = blankStats(`approvals by ${caller.email}`);
+      await approvalPhase(sb, stats);
+      return json(200, { approved: stats.approved ?? 0, error: stats.approval_error ?? null });
+    }
+
     if (action === 'sent') {
       // when each order went to the vendor, from its e-mail threads (0147)
       const stats = blankStats(`sent dates by ${caller.email}`);
@@ -216,6 +223,8 @@ interface Stats {
   others?: number; others_unplaced?: number; others_error?: string;
   /** orders dated by the e-mail that sent them to the vendor (0147) / why the step failed */
   sent?: number; sent_error?: string;
+  /** Quoted lines whose approval e-mail was found (0157) / why the step failed */
+  approved?: number; approval_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -245,6 +254,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     await storagePhase(sb, stats, 'morning mail pull');
     await otherPhase(sb, stats);
     await sentPhase(sb, stats);
+    await approvalPhase(sb, stats);
     const { count } = await sb.from('kount_ot_inbox').select('id', { count: 'exact', head: true }).eq('state', 'unread').lt('attempts', MAX_ATTEMPTS);
     stats.remaining = count ?? 0;
     chain = (count ?? 0) > 0 && depth < MAX_CHAIN;
@@ -870,6 +880,68 @@ async function sentPhase(sb: SupabaseClient, stats: Stats) {
   }
 }
 
+/** Quoted lines stay flagged until h.wood e-mails the vendor its go-ahead (0157). For each open order with a Quoted
+ *  line and no approval e-mail for its quote number: read the order's threads (its documents' and the Inbox's) and,
+ *  for a real quote number, the e-mails that mention it; planQuoteApprovals says which lines a reply approved, and
+ *  they are stamped (when, which quote, who said what). Read-only on the mailbox. Never fails the pull. */
+const MAIL_FIELDS = 'id,conversationId,sentDateTime,receivedDateTime,isDraft,from,toRecipients,ccRecipients,uniqueBody,bodyPreview';
+async function approvalPhase(sb: SupabaseClient, stats: Stats) {
+  try {
+    const data = await loadTracker(sb);
+    const byOrder = new Map<string, OtLine[]>();
+    for (const l of data.lines) (byOrder.get(l.order_id) ?? byOrder.set(l.order_id, []).get(l.order_id)!).push(l);
+    const todo = data.orders.filter(o => !o.archived_at && !o.completed_at && (byOrder.get(o.id) ?? []).some(awaitingApproval));
+    if (!todo.length) return;
+    const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+    if (tErr) throw tErr;
+    if (!refresh) return;
+    const tok = await refreshAccess(String(refresh));
+    if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+    const { data: inbox, error: iErr } = await sb.from('kount_ot_inbox').select('order_id, conversation_id')
+      .in('order_id', todo.map(o => o.id)).not('conversation_id', 'is', null);
+    if (iErr) throw iErr;
+    const threadCache = new Map<string, MailMessage[]>();
+    const searchCache = new Map<string, MailMessage[]>();
+    for (const o of todo) {
+      const ls = byOrder.get(o.id) ?? [];
+      const docs = data.documents.filter(d => d.order_id === o.id);
+      const convs = new Set([...docs.map(d => d.source_conversation_id), ...(inbox ?? []).filter(r => r.order_id === o.id).map(r => r.conversation_id)]
+        .filter((c): c is string => !!c));
+      const threads = new Map<string, MailMessage[]>();
+      for (const c of convs) {
+        if (!threadCache.has(c)) {
+          const page = await graphGet<{ value?: MailMessage[] }>(tok.access_token, `/me/messages?$filter=${encodeURIComponent(`conversationId eq '${c.replace(/'/g, "''")}'`)}`
+            + `&$select=${MAIL_FIELDS}&$top=100`, { textBody: true });
+          threadCache.set(c, page.value ?? []);
+        }
+        threads.set(c, threadCache.get(c)!);
+      }
+      const searched = new Map<string, MailMessage[]>();
+      for (const l of ls) {
+        if (!awaitingApproval(l) || !searchableQuote(l.quote_number)) continue;
+        const k = quoteKey(l.quote_number);
+        if (!searchCache.has(k)) {
+          const page = await graphGet<{ value?: MailMessage[] }>(tok.access_token, `/me/messages?$search=${encodeURIComponent(`"${String(l.quote_number).replace(/"/g, '')}"`)}`
+            + `&$select=${MAIL_FIELDS}&$top=25`, { textBody: true });
+          searchCache.set(k, page.value ?? []);
+        }
+        searched.set(k, searchCache.get(k)!);
+      }
+      for (const s of planQuoteApprovals(ls, docs, threads, searched)) {
+        const { data: upd, error } = await sb.from('kount_ot_lines').update({
+          quote_approved_at: s.approval.at, quote_approved_for: s.quoteNumber,
+          quote_approval_note: `${s.approval.by}: "${s.approval.note}"`.slice(0, 500), quote_approval_message_id: s.approval.messageId,
+        }).in('id', s.lineIds).eq('status', 'QUOTED').select('id');
+        if (error) throw error;
+        stats.approved = (stats.approved ?? 0) + (upd?.length ?? 0);
+      }
+    }
+  } catch (e) {
+    stats.approval_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] quote approvals failed:', stats.approval_error);
+  }
+}
+
 async function selectAll<T>(sb: SupabaseClient, table: string, columns = '*'): Promise<T[]> {
   const out: T[] = [];
   for (let from = 0; ; from += 1000) {
@@ -886,7 +958,7 @@ async function loadTracker(sb: SupabaseClient) {
     selectAll<OtOrder>(sb, 'kount_ot_orders'),
     selectAll<OtLine>(sb, 'kount_ot_lines'),
     selectAll<OtItem>(sb, 'kount_ot_items'),
-    selectAll<OtDocument>(sb, 'kount_ot_documents', 'id, order_id, kind, doc_number, doc_date, vendor_name, total, file_name, storage_path, created_at, source_conversation_id'),
+    selectAll<OtDocument>(sb, 'kount_ot_documents', 'id, order_id, kind, doc_number, doc_date, vendor_name, total, file_name, storage_path, created_at, source_conversation_id, source_message_id'),
   ]);
   return {
     orders,

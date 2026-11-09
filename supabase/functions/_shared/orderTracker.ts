@@ -101,6 +101,12 @@ export interface OtLine {
    *  null = the order's */
   deliver_to?: 'warehouse' | 'venue' | null;
   delivered_source?: 'app' | 'eta' | 'manual' | null;
+  /** h.wood's e-mail approving its quote (0157), found by the mail pull: when, which quote number it covered,
+   *  who said what. A Quoted line without one (for its current quote number) is flagged until it is sent. */
+  quote_approved_at?: string | null;
+  quote_approved_for?: string | null;
+  quote_approval_note?: string | null;
+  quote_approval_message_id?: string | null;
 }
 
 export interface OtMove {
@@ -130,6 +136,7 @@ export interface OtDocument {
   created_at: string;
   uploaded_by?: string | null;
   source_conversation_id?: string | null;
+  source_message_id?: string | null;
 }
 
 export type DocKind = 'quote' | 'confirmation' | 'invoice' | 'shipping' | 'other';
@@ -1310,4 +1317,181 @@ export function validateNewOrder(vendor: string, lines: DraftLine[]): string | n
     if (l.unitPrice.trim() && (!Number.isFinite(Number(l.unitPrice)) || Number(l.unitPrice) < 0)) return `The price for ${l.description.trim()} is not a number.`;
   }
   return null;
+}
+
+/* ── quote approval (0157) ────────────────────────────────────────────────
+   A quote stays flagged until h.wood e-mails the vendor that it is approved ("Approved", "good to go ahead",
+   "Yes, please proceed"). The mail pull reads each flagged order's threads (and, for a real quote number, the
+   e-mails that mention it), finds the first such reply sent after the quote came in, and stamps the Quoted lines
+   it covers. A revised quote (a new number on the line) is flagged again until it has its own approval. */
+
+/** An e-mail as Graph lists it, with the new text of a reply (uniqueBody, as text). */
+export interface MailMessage {
+  id?: string; conversationId?: string; sentDateTime?: string; receivedDateTime?: string; isDraft?: boolean;
+  from?: { emailAddress?: { address?: string; name?: string } };
+  toRecipients?: Array<{ emailAddress?: { address?: string } }>;
+  ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
+  uniqueBody?: { content?: string } | null;
+  bodyPreview?: string;
+}
+export interface QuoteApproval { at: string; by: string; messageId: string | null; note: string }
+export interface ApprovalStamp { lineIds: string[]; quoteNumber: string | null; approval: QuoteApproval }
+
+/** h.wood's own mail domains: a reply from here is "our end". */
+export const OWN_MAIL_DOMAINS = ['hwoodgroup.com'];
+
+const mailDomain = (a: string | null | undefined) => {
+  const m = /@([^@\s>]+)\s*>?$/.exec(String(a ?? '').trim().toLowerCase());
+  return m ? m[1] : '';
+};
+const onDomains = (a: string | null | undefined, list: readonly string[]) => {
+  const d = mailDomain(a);
+  return !!d && list.some(x => d === x || d.endsWith('.' + x));
+};
+
+/** A quote number, for comparing: 'Q-2026-1028-9329' = 'q 2026 1028 9329'. */
+export const quoteKey = (q: string | null | undefined) => String(q ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+/** Worth an Outlook search on its own: a real quote id ('Q-2026-1028-9329', '1789067157316'), not E&E's short job
+ *  numbers ('582'), which turn up in every other e-mail. */
+export const searchableQuote = (q: string | null | undefined) => {
+  const k = quoteKey(q);
+  return (/[A-Z]/.test(k) && /\d{4}/.test(k) && k.length >= 6) || /^\d{8,}$/.test(k);
+};
+
+/** Waiting on h.wood: Quoted, with no approval e-mail for the quote number it carries now. */
+export function awaitingApproval(l: Pick<OtLine, 'status' | 'quote_number' | 'quote_approved_at' | 'quote_approved_for'>): boolean {
+  return l.status === 'QUOTED' && !(l.quote_approved_at && quoteKey(l.quote_approved_for) === quoteKey(l.quote_number));
+}
+
+/** The new text of a reply, without the e-mail it quotes. */
+export function replyText(text: string): string {
+  const t = String(text ?? '').replace(/\r/g, '');
+  const cut = t.search(/^[ \t>]*(?:from:\s|sent:\s|-{2,}\s*original message|_{8,}|on .{3,120}\bwrote:)/im);
+  return (cut >= 0 ? t.slice(0, cut) : t).trim();
+}
+
+const APPROVES = [
+  /\bapprov(?:e|ed)\b/,
+  /\b(?:have|has|give|giving|gave|got) (?:our|my|your|the) (?:approval|go[- ]ahead|ok|okay)\b/,
+  /\bgood to go\b/, /\b(?:go|going)[- ]ahead\b/, /\bproceed(?:ing)?\b/, /\bmove forward\b/, /\bgreen light\b/,
+  /\bplease (?:place|process|book|release) (?:the |this |our )?order\b/, /\blet'?s do (?:it|this)\b/,
+];
+const NOT_YET = [
+  /\b(?:not|never|no|cannot|dont|\w+n't)\b[^.;]{0,25}\b(?:approv|go[- ]ahead|proceed|move forward|good to go)/,
+  /\b(?:before|until|once|if|when|after|whether|unless)\b[^.;]{0,40}\b(?:approv|proceed|go[- ]ahead|move forward|good to go)/,
+  /\b(?:will|would|ll|going to|need to|needs to|have to|has to|to be|waiting|awaiting|pending|for|get|getting|seek|seeking|require|requires|request|requesting|please)\s+(?:\w+\s+){0,2}approv/,
+];
+/** Anywhere in the reply: it is not a go-ahead, whatever else it says. */
+const STOP = /\bhold (?:off|on)\b|\bon hold\b|\bplease (?:wait|hold)\b|\b(?:do not|don't|dont) (?:proceed|go ahead|order|place|move forward)\b|\bcancel (?:the |this |our )?order\b/;
+
+/** A question that is still a go-ahead: "This works, can we proceed with invoicing ?" */
+const ASK_TO_PROCEED = /\b(?:can|could|shall|may) (?:we|you|i) (?:please )?(?:proceed|go ahead|move forward)\b/;
+/** "Hi Aleli," / "Hello," / "Good morning Anne," — the line before the reply's first sentence. */
+const GREETING = /^(?:hi|hello|hey|dear|good (?:morning|afternoon|evening)|morning)\b[^.!?]{0,40}[,!.]?$/;
+/** A reply that opens with a bare yes ("Yes", "Yes please!", "Yes, thanks") — not "Yes, confirming I got the tracking". */
+const BARE_YES = /^(?:yes|yep|yup|yeah)(?:[,!]?\s*(?:please|thanks|thank you))?\s*[.!]*$/;
+
+/** The sentence of a reply that approves a quote ("Approved, good to go ahead.", "We will proceed with the below",
+ *  "Yes please"), or null. Questions (except "can we proceed …?"), "not yet / once approved / pending approval" and a
+ *  "hold off" anywhere do not count; a bare "Yes" counts only as the reply's opening (after the greeting). */
+export function approvalPhrase(text: string): string | null {
+  const body = replyText(text).replace(/[‘’]/g, "'").replace(/[“”]/g, '"');
+  const low = body.toLowerCase();
+  if (!low.trim() || STOP.test(low)) return null;
+  const sentences = body.split(/(?<=[.!?])\s+|\n+/).map(s => s.trim()).filter(Boolean);
+  let first = true;
+  for (const s of sentences) {
+    const l = s.toLowerCase();
+    if (first && l.length <= 50 && GREETING.test(l)) continue;
+    const opening = first;
+    first = false;
+    if (s.endsWith('?') && !ASK_TO_PROCEED.test(l)) continue;
+    const yes = opening && BARE_YES.test(l);
+    if (!yes && !APPROVES.some(r => r.test(l))) continue;
+    if (NOT_YET.some(r => r.test(l))) continue;
+    return s.length > 160 ? s.slice(0, 157) + '...' : s;
+  }
+  return null;
+}
+
+const sentAt = (m: MailMessage) => Date.parse(m.sentDateTime ?? m.receivedDateTime ?? '');
+
+/** The first e-mail from h.wood to someone outside it (not a draft, not a note between colleagues), sent after
+ *  `afterMs`, that approves (approvalPhrase). */
+export function findApproval(messages: readonly MailMessage[], afterMs: number, own: readonly string[] = OWN_MAIL_DOMAINS): QuoteApproval | null {
+  const ours = messages
+    .filter(m => !m.isDraft && Number.isFinite(sentAt(m)) && sentAt(m) > afterMs && onDomains(m.from?.emailAddress?.address, own)
+      && [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].some(r => !!mailDomain(r.emailAddress?.address) && !onDomains(r.emailAddress?.address, own)))
+    .sort((a, b) => sentAt(a) - sentAt(b));
+  for (const m of ours) {
+    const said = approvalPhrase(m.uniqueBody?.content ?? m.bodyPreview ?? '');
+    if (said) return { at: new Date(sentAt(m)).toISOString(), by: String(m.from?.emailAddress?.address ?? '').toLowerCase(), messageId: m.id ?? null, note: said };
+  }
+  return null;
+}
+
+const earlier = (a: QuoteApproval | null, b: QuoteApproval | null) => (!a ? b : !b ? a : Date.parse(b.at) < Date.parse(a.at) ? b : a);
+/** 07:00 UTC = the start of that day in Los Angeles (PDT; an hour early in winter, which only widens the window). */
+const dayStart = (day: string) => Date.parse(`${day}T07:00:00Z`);
+
+/** Which of one order's flagged lines an e-mail approved, quote number by quote number:
+ *   1. lines whose quote is a document on the order: its own thread, after the e-mail that brought it;
+ *   2. lines with no such document (a sheet import, a quote with no number): the order's threads, after the
+ *      vendor first wrote in them;
+ *   3. still nothing, for a real quote number: the e-mails that mention it (searched), after the quote's day.
+ *  `threads` = this order's threads (conversation id -> messages); `searched` = quoteKey -> messages. */
+export function planQuoteApprovals(lines: readonly OtLine[], docs: readonly OtDocument[],
+                                   threads: ReadonlyMap<string, readonly MailMessage[]>,
+                                   searched: ReadonlyMap<string, readonly MailMessage[]> = new Map(),
+                                   own: readonly string[] = OWN_MAIL_DOMAINS): ApprovalStamp[] {
+  const groups = new Map<string, OtLine[]>();
+  for (const l of lines) {
+    if (!awaitingApproval(l)) continue;
+    const k = quoteKey(l.quote_number);
+    (groups.get(k) ?? groups.set(k, []).get(k)!).push(l);
+  }
+  const out: ApprovalStamp[] = [];
+  for (const [key, ls] of groups) {
+    const quotes = key ? docs.filter(d => d.kind === 'quote' && quoteKey(d.doc_number) === key) : [];
+    let hit: QuoteApproval | null = null;
+    for (const d of quotes) {
+      const msgs = d.source_conversation_id ? threads.get(d.source_conversation_id) : undefined;
+      if (!msgs) continue;
+      const src = msgs.find(m => !!m.id && m.id === d.source_message_id);
+      const after = src && Number.isFinite(sentAt(src)) ? sentAt(src) : d.doc_date ? dayStart(d.doc_date) : Date.parse(d.created_at);
+      hit = earlier(hit, findApproval(msgs, after, own));
+    }
+    if (!quotes.length) {
+      for (const msgs of threads.values()) {
+        const vendorTimes = msgs.filter(m => !onDomains(m.from?.emailAddress?.address, own)).map(sentAt).filter(Number.isFinite);
+        if (!vendorTimes.length) continue;
+        hit = earlier(hit, findApproval(msgs, Math.min(...vendorTimes), own));
+      }
+    }
+    const found = key ? searched.get(key) : undefined;
+    if (!hit && found?.length) {
+      const day = quotes.map(d => d.doc_date).filter((x): x is string => !!x).sort()[0];
+      hit = findApproval(found, day ? dayStart(day) : -Infinity, own);
+    }
+    if (hit) out.push({ lineIds: ls.map(l => l.id), quoteNumber: ls[0].quote_number, approval: hit });
+  }
+  return out;
+}
+
+/** The open orders waiting on an approval e-mail, longest wait first: their flagged lines, quote numbers and
+ *  how many days the oldest has waited. */
+export function ordersAwaitingApproval(orders: readonly OtOrder[], lines: readonly OtLine[], today: string):
+    Array<{ order: OtOrder; lines: OtLine[]; quotes: string[]; days: number }> {
+  const by = new Map<string, OtLine[]>();
+  for (const l of lines) if (awaitingApproval(l)) (by.get(l.order_id) ?? by.set(l.order_id, []).get(l.order_id)!).push(l);
+  const out: Array<{ order: OtOrder; lines: OtLine[]; quotes: string[]; days: number }> = [];
+  for (const o of orders) {
+    const ls = by.get(o.id);
+    if (!ls || o.archived_at || o.completed_at) continue;
+    const since = ls.map(l => (l.status_at ?? '').slice(0, 10)).filter(Boolean).sort()[0] ?? today;
+    const days = Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 86_400_000));
+    out.push({ order: o, lines: ls, quotes: [...new Set(ls.map(l => l.quote_number).filter((q): q is string => !!q))], days });
+  }
+  return out.sort((a, b) => b.days - a.days);
 }
