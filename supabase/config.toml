@@ -1,0 +1,28 @@
+# Settings the Supabase CLI applies on every `supabase functions deploy` from this repo (added 2026-11-10, 0159).
+#
+# There was no config.toml, so every deploy fell back to verify_jwt = true unless --no-verify-jwt was typed.
+# The 11/09 deploy of kount-order-mail forgot it, and on 11/10 every 9 o'clock pg_cron call (no sign-in,
+# x-kount-cron only) got 401 "Missing authorization header". Keep each function's setting here equal to the
+# live one (`supabase functions list --project-ref mnraeesscqsaappkaldb -o json`).
+project_id = "counting-app"
+
+[functions.kount-order-mail]
+# pg_cron and the function's own continuation call it with x-kount-cron, not a user's sign-in
+verify_jwt = false
+
+[functions.kount-chat-requests]
+# the Teams routine has no Supabase sign-in (0152, not deployed yet)
+verify_jwt = false
+
+[functions.kount-read-purchase-doc]
+verify_jwt = true
+
+[functions.admin-user-mgmt]
+verify_jwt = true
+
+[functions.parse-bottle-label]
+verify_jwt = true
+
+[functions.ask-ai]
+# shared with KevaOS: never deploy it from here without the user's go-ahead
+verify_jwt = true

@@ -22,7 +22,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { awaitingApproval, decideMailDocument, extractTracking, planQuoteApprovals, quoteKey, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { awaitingApproval, decideMailDocument, extractTracking, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -87,7 +87,12 @@ Deno.serve(async (req) => {
     if (action === 'cron' || action === 'continue') {
       const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
       if (!secret || !safeEqual(req.headers.get('x-kount-cron') || '', String(secret))) return reject(401, 'Not allowed');
-      if (action === 'cron' && laParts().hour !== 9) return json(200, { skipped: "not the 9 o'clock hour in Los Angeles" });
+      // 9:00-13:59 in Los Angeles while today's mail is unread: one pull a morning, a missed one retried until 2 pm (0159)
+      if (action === 'cron') {
+        const { data: acctNow, error: aErr } = await sb.from('kount_ot_mail_account').select('last_fetch_at').eq('id', 1).single();
+        if (aErr) throw aErr;
+        if (!scheduledPullDue(acctNow?.last_fetch_at ?? null)) return json(200, { skipped: "outside 9:00-13:59 in Los Angeles, or today's mail is already read" });
+      }
       const { data: locked } = await sb.rpc('kount_ot_mail_begin_run');
       if (locked !== true) return json(200, { skipped: 'a pull is already running' });
       background(runPull(sb, action === 'cron' ? 'morning' : 'continued', action === 'continue' ? Math.min(Number(body.depth) || 1, MAX_CHAIN) : 0));
@@ -246,7 +251,11 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     }
     if (!acct.token_secret_id) { stats.error = 'Outlook is not connected.'; return; }
     const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
-    if (trigger !== 'continued') await fetchPhase(sb, acct, stats, kinds);
+    if (trigger !== 'continued') {
+      await fetchPhase(sb, acct, stats, kinds);
+      // the mail is read: the morning is done for the 9 o'clock job and the admin's warning (0159)
+      await sb.from('kount_ot_mail_account').update({ last_fetch_at: nowIso() }).eq('id', 1);
+    }
     // what waited may match now (an order saved since); then read what is new; then Paid from R365
     await redecidePending(sb, stats, startedMs + READ_BUDGET_MS);
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
@@ -268,7 +277,8 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
   if (chain) {
     const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
     await fetch(SELF_URL, {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-kount-cron': String(secret ?? '') },
+      // the public anon key too: the gateway lets the call through even if verify_jwt is ever switched on (0159)
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-kount-cron': String(secret ?? ''), ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {}) },
       body: JSON.stringify({ action: 'continue', depth: depth + 1 }),
     }).catch(e => console.error('[kount-order-mail] could not continue:', msg(e)));
   }

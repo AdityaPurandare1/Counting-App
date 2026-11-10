@@ -1495,3 +1495,38 @@ export function ordersAwaitingApproval(orders: readonly OtOrder[], lines: readon
   }
   return out.sort((a, b) => b.days - a.days);
 }
+
+/* ── the 9 o'clock pull (0159) ────────────────────────────────────────────
+   The morning pull reads Outlook once a day from 9:00 Los Angeles time. When it has not read the mail by then (the
+   call was refused, Outlook was down), pg_cron tries again every 10 minutes until 2 pm, and from 10:00 the admin
+   says so. "Read" = kount_ot_mail_account.last_fetch_at, stamped when a pull has fetched the mail. */
+
+/** A moment's day ('YYYY-MM-DD') and hour (0-23) in Los Angeles. */
+export function laClock(d: Date): { day: string; hour: number } {
+  const p = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hourCycle: 'h23',
+  }).formatToParts(d);
+  const g = (t: string) => p.find(x => x.type === t)?.value ?? '';
+  return { day: `${g('year')}-${g('month')}-${g('day')}`, hour: Number(g('hour')) % 24 };
+}
+export const PULL_HOUR = 9;
+/** The last hour a missed morning is retried in (its 13:50 call is the last try). */
+export const CATCH_UP_UNTIL = 13;
+
+/** Today's mail was read: a pull fetched it at or after 9:00 today, Los Angeles time. */
+export function morningFetchDone(lastFetchAt: string | null | undefined, now: Date = new Date()): boolean {
+  if (!lastFetchAt || !Number.isFinite(Date.parse(lastFetchAt))) return false;
+  const f = laClock(new Date(lastFetchAt)), n = laClock(now);
+  return f.day === n.day && f.hour >= PULL_HOUR;
+}
+
+/** A scheduled call pulls: from 9:00 to the end of the catch-up hours, while today's mail has not been read. */
+export function scheduledPullDue(lastFetchAt: string | null | undefined, now: Date = new Date()): boolean {
+  const h = laClock(now).hour;
+  return h >= PULL_HOUR && h <= CATCH_UP_UNTIL && !morningFetchDone(lastFetchAt, now);
+}
+
+/** Worth a warning: it is past 10:00 in Los Angeles and today's mail has not been read. */
+export function morningPullMissed(lastFetchAt: string | null | undefined, now: Date = new Date()): boolean {
+  return laClock(now).hour >= PULL_HOUR + 1 && !morningFetchDone(lastFetchAt, now);
+}
