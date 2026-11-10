@@ -860,7 +860,7 @@ export function autoOrderNumber(lines: Array<{ description: string; sku: string 
   const brands = [...new Set([...custom.map(i => normText(i.category)), ...Object.values(VENUE_SHORT).flat()])].filter(Boolean);
   const isCustom = (l: { description: string; sku: string | null; item_id: string | null }) => {
     const t = ` ${normText(`${l.description} ${l.sku ?? ''}`)} `;
-    return /(custom|logo|printed|printing|branded|foil|stamping|embossed)/i.test(t) || brands.some(b => t.includes(` ${b} `))
+    return /\b(custom|logo|printed|printing|branded|foil|stamping|embossed)\b/i.test(t) || brands.some(b => t.includes(` ${b} `))
       || (!!l.item_id && custom.some(i => i.id === l.item_id)) || custom.some(i => !!i.sku && compactSku(i.sku) === compactSku(l.sku))
       || !!matchItem(custom, l.description, l.sku);
   };
