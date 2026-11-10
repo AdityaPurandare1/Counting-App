@@ -1,4 +1,4 @@
-# Settings the Supabase CLI applies on every `supabase functions deploy` from this repo (added 2026-11-10, 0159).
+# Settings the Supabase CLI applies on every `supabase functions deploy` from this repo (added 2026-11-10, 0160).
 #
 # There was no config.toml, so every deploy fell back to verify_jwt = true unless --no-verify-jwt was typed.
 # The 11/09 deploy of kount-order-mail forgot it, and on 11/10 every 9 o'clock pg_cron call (no sign-in,

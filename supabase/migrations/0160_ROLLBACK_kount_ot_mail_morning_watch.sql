@@ -1,4 +1,4 @@
--- Rollback for 0159_kount_ot_mail_morning_watch: the job as it was (9 o'clock hour only, no gate, no anon key),
+-- Rollback for 0160_kount_ot_mail_morning_watch: the job as it was (9 o'clock hour only, no gate, no anon key),
 -- the status RPC as it was, the three columns dropped. Deploy an admin / kount-order-mail that do not read them first.
 -- (The vault secret 'kount_edge_anon_jwt' is left; it is the public anon key.)
 begin;

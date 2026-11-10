@@ -1,5 +1,5 @@
 -- =============================================================================
---  0159_kount_ot_mail_morning_watch   (the 9 o'clock pull cannot stop silently again)
+--  0160_kount_ot_mail_morning_watch   (the 9 o'clock pull cannot stop silently again)
 --
 --  2026-11-10: every 9 o'clock call (8:00-9:50 PT, 12 of them) got 401 "Missing
 --  authorization header" from the edge gateway: the 11/09 deploy of kount-order-mail
@@ -28,9 +28,9 @@ begin;
 alter table public.kount_ot_mail_account add column if not exists last_fetch_at timestamptz;
 alter table public.kount_ot_mail_account add column if not exists morning_request_id bigint;
 alter table public.kount_ot_mail_account add column if not exists morning_called_at timestamptz;
-comment on column public.kount_ot_mail_account.last_fetch_at is 'When a pull last read the mail (0159); the 9 o''clock job retries until 2 pm while it is before 9:00 today';
-comment on column public.kount_ot_mail_account.morning_request_id is 'The 9 o''clock job''s last call (net._http_response.id, 0159), for the admin''s "why"';
-comment on column public.kount_ot_mail_account.morning_called_at is 'When the 9 o''clock job last called the function (0159)';
+comment on column public.kount_ot_mail_account.last_fetch_at is 'When a pull last read the mail (0160); the 9 o''clock job retries until 2 pm while it is before 9:00 today';
+comment on column public.kount_ot_mail_account.morning_request_id is 'The 9 o''clock job''s last call (net._http_response.id, 0160), for the admin''s "why"';
+comment on column public.kount_ot_mail_account.morning_called_at is 'When the 9 o''clock job last called the function (0160)';
 
 -- the last pull that read the mail before this: 11/09 11:34 PT (Aditya's Pull now); 11/10's 9 o'clock never ran
 update public.kount_ot_mail_account set last_fetch_at = '2026-11-09T19:34:02.450Z' where id = 1 and last_fetch_at is null;
@@ -73,7 +73,7 @@ begin
       'fetched_through', a.fetched_through,
       'running', a.running_since is not null and a.running_since > now() - interval '10 minutes',
       'last_run', a.last_run,
-      -- 0159: when the mail was last read, and what the 9 o'clock job's last call got back
+      -- 0160: when the mail was last read, and what the 9 o'clock job's last call got back
       'last_fetch_at', a.last_fetch_at,
       'morning', jsonb_build_object(
         'called_at', a.morning_called_at,

@@ -87,7 +87,7 @@ Deno.serve(async (req) => {
     if (action === 'cron' || action === 'continue') {
       const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
       if (!secret || !safeEqual(req.headers.get('x-kount-cron') || '', String(secret))) return reject(401, 'Not allowed');
-      // 9:00-13:59 in Los Angeles while today's mail is unread: one pull a morning, a missed one retried until 2 pm (0159)
+      // 9:00-13:59 in Los Angeles while today's mail is unread: one pull a morning, a missed one retried until 2 pm (0160)
       if (action === 'cron') {
         const { data: acctNow, error: aErr } = await sb.from('kount_ot_mail_account').select('last_fetch_at').eq('id', 1).single();
         if (aErr) throw aErr;
@@ -253,7 +253,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
     if (trigger !== 'continued') {
       await fetchPhase(sb, acct, stats, kinds);
-      // the mail is read: the morning is done for the 9 o'clock job and the admin's warning (0159)
+      // the mail is read: the morning is done for the 9 o'clock job and the admin's warning (0160)
       await sb.from('kount_ot_mail_account').update({ last_fetch_at: nowIso() }).eq('id', 1);
     }
     // what waited may match now (an order saved since); then read what is new; then Paid from R365
@@ -277,7 +277,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
   if (chain) {
     const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
     await fetch(SELF_URL, {
-      // the public anon key too: the gateway lets the call through even if verify_jwt is ever switched on (0159)
+      // the public anon key too: the gateway lets the call through even if verify_jwt is ever switched on (0160)
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-kount-cron': String(secret ?? ''), ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {}) },
       body: JSON.stringify({ action: 'continue', depth: depth + 1 }),
     }).catch(e => console.error('[kount-order-mail] could not continue:', msg(e)));
