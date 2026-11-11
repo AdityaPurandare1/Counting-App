@@ -46,6 +46,8 @@ const FIRST_LOOKBACK_DAYS = 30;
 // the tracker already has (it waits in the Inbox instead of starting a copy), and older tracking is added to its
 // order without moving the lines. Both only for mail this recent:
 const RECENT_DAYS = 30;
+// a past-e-mails pull's reading of mail, before the PDFs are read (the read phase has its own budget)
+const BACKFILL_FETCH_MS = 90_000;
 const isRecent = (iso: string | null | undefined) => !!iso && Date.now() - Date.parse(iso) <= RECENT_DAYS * 86_400_000;
 
 /** A backfill's first day ('2026-09-01'): a real day, not before 2025, not in the future. 0 = not one. */
@@ -407,7 +409,14 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
     // past e-mails (v1.13): that vendor's (or every listed vendor's) mail since that day, by search — the morning
     // list is everyone's mail with attachments and stops at MAX_MESSAGES; the morning mark (fetched_through) stays
     const vendors = only ? [only] : (acct.vendor_domains ?? []);
-    await backfillPdfs(sb, tok.access_token, vendors, fromMs, stats, kinds);
+    // a time limit (v1.14): the function is stopped after a few minutes; a cut-short pull says so and a second
+    // pull from the same day reads the rest (what was taken is skipped)
+    const until = Date.now() + BACKFILL_FETCH_MS;
+    const done = await backfillPdfs(sb, tok.access_token, vendors, fromMs, stats, kinds, until);
+    if (!done || Date.now() > until) {
+      stats.error = `Pulled part of ${only ?? 'the vendors'}' e-mails (time limit). Pull again from the same day to read the rest — what it already took is skipped.`;
+      return;
+    }
     await trackingPhase(sb, tok.access_token, vendors, fromMs, stats);
     if (!only) await stubPhase(sb, tok.access_token, fromMs, stats);   // our own paystub e-mails: not one vendor's
     return;
@@ -493,7 +502,7 @@ async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Prom
 const OTHER_DAYS = 30;
 /** A past-e-mails pull's PDFs (v1.13): each vendor's e-mails since fromMs (Outlook search), taken as the morning pull
  *  takes them — a PDF already in the Inbox (same e-mail + attachment, or the same file) is skipped. */
-async function backfillPdfs(sb: SupabaseClient, accessToken: string, domains: string[], fromMs: number, stats: Stats, kinds: string[]) {
+async function backfillPdfs(sb: SupabaseClient, accessToken: string, domains: string[], fromMs: number, stats: Stats, kinds: string[], until: number): Promise<boolean> {
   const sinceDay = new Date(fromMs).toISOString().slice(0, 10);
   for (const domain of domains) {
     let url = `/me/messages?$search=${encodeURIComponent(`"from:${domain} received>=${sinceDay}"`)}`
@@ -502,6 +511,7 @@ async function backfillPdfs(sb: SupabaseClient, accessToken: string, domains: st
     while (url && pages++ < 40) {
       const page = await graphGet<{ value?: GraphMessage[]; '@odata.nextLink'?: string }>(accessToken, url);
       for (const m of page.value ?? []) {
+        if (Date.now() > until) return false;
         if (!m.hasAttachments || !onList(domainOf(m.from?.emailAddress?.address), [domain])) continue;
         stats.messages++;
         const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken,
@@ -511,6 +521,7 @@ async function backfillPdfs(sb: SupabaseClient, accessToken: string, domains: st
       url = page['@odata.nextLink'] ?? '';
     }
   }
+  return true;
 }
 
 async function otherPhase(sb: SupabaseClient, stats: Stats) {
@@ -735,15 +746,20 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
   const seenMsg = new Set<string>();
   for (const term of ['paystub', 'pay stub', 'payment stub', 'remittance']) {
     let url = `/me/messages?$search=${encodeURIComponent(`"${term} received>=${sinceDay}"`)}`
-      + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,hasAttachments,uniqueBody&$top=25';
+      + '&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,conversationId,internetMessageId,hasAttachments,uniqueBody&$top=25';
     let pages = 0;
     while (url && pages++ < 10) {
       const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
       for (const m of page.value ?? []) {
         if (seenMsg.has(m.id) || !m.hasAttachments || !isOwnSender(m.from?.emailAddress?.address, OWN_DOMAINS)) continue;
         seenMsg.add(m.id);
-        const invoices = stubInvoices(m.uniqueBody?.content);
+        // E&E's INV-2026-… numbers, and (v1.14) any invoice number a tracked order carries ("I051027", "INV-46284")
+        const invoices = [...new Set([...stubInvoices(m.uniqueBody?.content), ...trackedInvoicesIn(m.uniqueBody?.content, data)])];
         if (!invoices.length) continue;
+        // v1.14: sent to a vendor (anyone outside h.wood), or only passed around inside — then it is on file, not sent
+        const rcpts = [...((m as { toRecipients?: Array<{ emailAddress?: { address?: string } }> }).toRecipients ?? []),
+          ...((m as { ccRecipients?: Array<{ emailAddress?: { address?: string } }> }).ccRecipients ?? [])];
+        const toVendor = rcpts.some(r => { const a = r.emailAddress?.address ?? ''; return a.includes('@') && !isOwnSender(a, OWN_DOMAINS); });
         const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
         for (const a of atts.value ?? []) {
           const type = isStubAttachment(a);
@@ -765,7 +781,7 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
             id, message_id: m.id, attachment_id: a.id, internet_message_id: m.internetMessageId ?? null, conversation_id: m.conversationId ?? null,
             subject: (m.subject ?? '').slice(0, 300), sender_email: m.from?.emailAddress?.address ?? null, sender_name: m.from?.emailAddress?.name ?? null,
             received_at: m.receivedDateTime, file_name: (a.name ?? `paystub.${ext}`).slice(0, 200), size_bytes: a.size ?? bytes.length,
-            content_hash: hash, storage_path: path, state: 'pending', parsed: { kind: 'payment', invoices },
+            content_hash: hash, storage_path: path, state: 'pending', parsed: { kind: 'payment', invoices, to_vendor: toVendor },
             decision: `Check stub for ${invoices.join(', ')}.`,
           };
           const { error } = await sb.from('kount_ot_inbox').insert(row);
@@ -776,6 +792,16 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
       url = page['@odata.nextLink'] ?? '';
     }
   }
+}
+
+/** The invoice numbers tracked orders carry (one token, a digit in it: "I051027", "INV-46284") that a text names as a
+ *  whole word — so a stub e-mail for a vendor with its own numbering is filed too (v1.14). */
+function trackedInvoicesIn(text: string | null | undefined, data: { lines: OtLine[]; orders: OtOrder[] }): string[] {
+  const up = ` ${String(text ?? '').toUpperCase()} `;
+  const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
+  const tokens = new Set(data.lines.filter(l => live.has(l.order_id)).map(l => String(l.invoice_number ?? '').trim().toUpperCase())
+    .filter(t => t.length >= 4 && /\d/.test(t) && /^[A-Z0-9][A-Z0-9-]*$/.test(t)));
+  return [...tokens].filter(t => new RegExp(`[^A-Z0-9-]${t.replace(/-/g, '\\-')}[^A-Z0-9-]`).test(up));
 }
 
 /** A stub onto every live order with one of its invoices; false when none is tracked yet (it keeps waiting). */
@@ -796,7 +822,9 @@ async function attachStub(sb: SupabaseClient, row: { id: string; message_id: str
     if (data.documents.some(d => d.order_id === orderId && d.storage_path === row.storage_path)) continue;
     const { error } = await sb.from('kount_ot_documents').insert({
       order_id: orderId, kind: 'payment', doc_number: invoices.join(', ').slice(0, 200), doc_date: row.received_at ? row.received_at.slice(0, 10) : null,
-      file_name: row.file_name, storage_path: row.storage_path, parsed: { invoices }, source_message_id: row.message_id, source_conversation_id: row.conversation_id,
+      file_name: row.file_name, storage_path: row.storage_path, source_message_id: row.message_id, source_conversation_id: row.conversation_id,
+      // to_vendor (v1.14): false = an internal e-mail — the stub is on file but has not gone to the vendor
+      parsed: { invoices, ...(typeof (row.parsed as { to_vendor?: unknown })?.to_vendor === 'boolean' ? { to_vendor: (row.parsed as { to_vendor: boolean }).to_vendor } : {}) },
     });
     if (error) throw error;
   }
