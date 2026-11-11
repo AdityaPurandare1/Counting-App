@@ -196,6 +196,28 @@ Deno.serve(async (req) => {
       return json(200, { recorded: stats.storage ?? 0, review: stats.storage_review ?? 0, error: stats.storage_error ?? null });
     }
 
+    if (action === 'message_link') {
+      // v1.12: a vendor e-mail opened in Outlook on the web — Reply there keeps the quote approval in its thread
+      // without Mail.Send. Only for the mailbox's owner (the link opens in their own Outlook). Read-only.
+      const mid = typeof (body as { message_id?: unknown }).message_id === 'string' ? String((body as { message_id?: string }).message_id).trim().slice(0, 300) : '';
+      if (!mid) return reject(400, 'message_id is required');
+      const { data: acct, error: aErr } = await sb.from('kount_ot_mail_account').select('mailbox, token_secret_id').eq('id', 1).single();
+      if (aErr) throw aErr;
+      if (!acct?.token_secret_id) return json(200, { link: null, reason: 'not_connected' });
+      if (String(acct.mailbox ?? '').toLowerCase() !== caller.email) return json(200, { link: null, reason: 'not_owner', mailbox: acct.mailbox ?? null });
+      const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+      if (tErr || !refresh) return json(200, { link: null, reason: 'not_connected' });
+      const tok = await refreshAccess(String(refresh));
+      if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+      try {
+        const m = await graphGet<{ webLink?: string }>(tok.access_token, `/me/messages/${encodeURIComponent(mid)}?$select=webLink`);
+        const link = typeof m.webLink === 'string' && /^https:\/\/outlook\.(office365|office|live)\.com\//i.test(m.webLink) ? m.webLink : null;
+        return json(200, { link, ...(link ? {} : { reason: 'gone' }) });
+      } catch (e) {
+        if (e instanceof GraphError && (e.status === 404 || e.status === 400)) return json(200, { link: null, reason: 'gone' });
+        throw e;
+      }
+    }
     if (action === 'approve_quote') {
       // v1.11: the quote approval e-mail, from the connected mailbox, then the lines stamped approved
       const p = body as { order_id?: unknown; line_ids?: unknown; quote_number?: unknown; to?: unknown; cc?: unknown; subject?: unknown; text?: unknown; reply_to?: unknown };
