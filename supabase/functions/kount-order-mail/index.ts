@@ -23,7 +23,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
-import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
+import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, graphPost, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
@@ -196,6 +196,61 @@ Deno.serve(async (req) => {
       return json(200, { recorded: stats.storage ?? 0, review: stats.storage_review ?? 0, error: stats.storage_error ?? null });
     }
 
+    if (action === 'approve_quote') {
+      // v1.11: the quote approval e-mail, from the connected mailbox, then the lines stamped approved
+      const p = body as { order_id?: unknown; line_ids?: unknown; quote_number?: unknown; to?: unknown; cc?: unknown; subject?: unknown; text?: unknown; reply_to?: unknown };
+      const isEmail = (x: unknown) => typeof x === 'string' && /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/.test(x) && x.length <= 200;
+      const uuid = (x: unknown) => typeof x === 'string' && /^[0-9a-f-]{36}$/i.test(x);
+      const to = Array.isArray(p.to) ? p.to : [], cc = Array.isArray(p.cc) ? p.cc : [], ids = Array.isArray(p.line_ids) ? p.line_ids : [];
+      const quote = typeof p.quote_number === 'string' && p.quote_number.trim() ? p.quote_number.trim().slice(0, 100) : null;
+      const subject = typeof p.subject === 'string' ? p.subject.trim().slice(0, 300) : '';
+      const text = typeof p.text === 'string' ? p.text.slice(0, 5000) : '';
+      const replyTo = typeof p.reply_to === 'string' && p.reply_to.trim() ? p.reply_to.trim().slice(0, 300) : null;
+      if (!uuid(p.order_id) || !ids.length || ids.length > 200 || !ids.every(uuid) || !to.length || to.length > 10 || cc.length > 10
+        || ![...to, ...cc].every(isEmail) || !text.trim() || (!replyTo && !subject)) {
+        return reject(400, 'The approval e-mail needs the order, its quoted lines, who it goes to and a message.');
+      }
+      // only the person whose mailbox is connected sends from it; anyone else sends from their own Outlook
+      const { data: acct, error: aErr } = await sb.from('kount_ot_mail_account').select('mailbox, token_secret_id').eq('id', 1).single();
+      if (aErr) throw aErr;
+      if (!acct?.token_secret_id) return json(200, { sent: false, reason: 'not_connected' });
+      if (String(acct.mailbox ?? '').toLowerCase() !== caller.email) return json(200, { sent: false, reason: 'not_owner', mailbox: acct.mailbox ?? null });
+      // the lines must be this order's Quoted lines of that quote, still waiting
+      const { data: ls, error: lErr } = await sb.from('kount_ot_lines').select('id, order_id, status, quote_number').in('id', ids as string[]);
+      if (lErr) throw lErr;
+      if ((ls ?? []).length !== new Set(ids as string[]).size
+        || (ls ?? []).some(l => l.order_id !== p.order_id || l.status !== 'QUOTED' || quoteKey(l.quote_number ?? '') !== quoteKey(quote ?? ''))) {
+        return reject(409, 'Those lines are no longer this quote\'s Quoted lines — reload the order.');
+      }
+      // a Mail.Send token from the stored sign-in; the read token is not touched (and nothing is stored)
+      const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+      if (tErr || !refresh) return json(200, { sent: false, reason: 'not_connected' });
+      let token: string;
+      try {
+        token = (await refreshAccess(String(refresh), SEND_SCOPE)).access_token;
+      } catch (e) {
+        if (e instanceof GraphError) return json(200, { sent: false, reason: 'not_granted', detail: e.message.slice(0, 200) });
+        throw e;
+      }
+      const rcpt = (xs: unknown[]) => xs.map(a => ({ emailAddress: { address: String(a) } }));
+      const message = { toRecipients: rcpt(to), ccRecipients: rcpt(cc), body: { contentType: 'Text', content: text } };
+      try {
+        // in the vendor's quote thread when it came by e-mail (Re: its subject), else a new e-mail; sent once
+        if (replyTo) await graphPost(token, `/me/messages/${encodeURIComponent(replyTo)}/reply`, { message });
+        else await graphPost(token, '/me/sendMail', { message: { ...message, subject }, saveToSentItems: true });
+      } catch (e) {
+        if (e instanceof GraphError && (e.status === 401 || e.status === 403)) return json(200, { sent: false, reason: 'not_granted', detail: e.message.slice(0, 200) });
+        if (e instanceof GraphError) return json(200, { sent: false, detail: e.message.slice(0, 200) });
+        throw e;
+      }
+      // sent: the lines are approved (the same columns the 9 o'clock pull fills from an approval e-mail, 0157)
+      const firstLine = text.split(/\r?\n/).map(s => s.trim()).find(s => /approv/i.test(s)) ?? text.trim().split(/\r?\n/)[0];
+      const { data: upd, error: uErr } = await sb.from('kount_ot_lines')
+        .update({ quote_approved_at: nowIso(), quote_approved_for: quote, quote_approval_note: `Sent from the Order tracker by ${caller.email}: ${firstLine}`.slice(0, 300), quote_approval_message_id: replyTo })
+        .in('id', ids as string[]).eq('status', 'QUOTED').select('id');
+      if (uErr) return json(200, { sent: true, approved: 0, detail: `Sent, but the lines were not marked: ${uErr.message}`.slice(0, 200) });
+      return json(200, { sent: true, approved: upd?.length ?? 0 });
+    }
     if (action === 'approvals') {
       // the Quoted lines' approval e-mails (0157), on demand: "I've sent it - check now"
       const stats = blankStats(`approvals by ${caller.email}`);

@@ -12,6 +12,10 @@ export const CLIENT_ID = 'acd56be2-30a1-4db9-b62d-5f2f9b6d6d85';
 // app, and the tenant then sends the sign-in for admin approval. The mailbox address comes from
 // the sign-in's id token, not from /me (which would need User.Read).
 export const SCOPE = 'Mail.Read openid profile offline_access';
+// v1.11: sending the quote approval e-mail. Asked for ONLY when sending, with the stored refresh token, so the
+// read sign-in above (and the 9 o'clock pull) never changes: until IT grants the Order Tracker app Mail.Send
+// (admin consent), this one request fails and the admin opens the e-mail in Outlook instead.
+export const SEND_SCOPE = 'https://graph.microsoft.com/Mail.Send';
 const AUTH = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0`;
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 
@@ -37,8 +41,8 @@ export const deviceCodePoll = (deviceCode: string) =>
   postForm(`${AUTH}/token`, { grant_type: 'urn:ietf:params:oauth:grant-type:device_code', client_id: CLIENT_ID, device_code: deviceCode });
 
 /** A fresh access token (+ the rotated refresh token). A dead sign-in is a GraphError with reauth = true. */
-export async function refreshAccess(refreshToken: string): Promise<{ access_token: string; refresh_token?: string }> {
-  const r = await postForm(`${AUTH}/token`, { grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: refreshToken, scope: SCOPE });
+export async function refreshAccess(refreshToken: string, scope: string = SCOPE): Promise<{ access_token: string; refresh_token?: string }> {
+  const r = await postForm(`${AUTH}/token`, { grant_type: 'refresh_token', client_id: CLIENT_ID, refresh_token: refreshToken, scope });
   if (r.ok && r.json.access_token) return r.json as unknown as { access_token: string; refresh_token?: string };
   const code = String(r.json.error ?? '');
   const dead = code === 'invalid_grant' || code === 'interaction_required' || code === 'consent_required';
@@ -47,6 +51,19 @@ export async function refreshAccess(refreshToken: string): Promise<{ access_toke
 }
 
 /** GET a Graph path (or a full @odata.nextLink). Immutable ids, so a message moved between folders keeps its id. */
+/** A Graph POST that sends something (a reply, sendMail): tried ONCE — a retry could send the e-mail twice. */
+export async function graphPost(accessToken: string, path: string, body: unknown): Promise<void> {
+  const r = await fetch(GRAPH + path, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', Prefer: 'IdType="ImmutableId"' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const json = await r.json().catch(() => ({})) as { error?: { code?: string; message?: string } };
+    throw new GraphError(r.status, json.error?.code ?? '', `Outlook: ${json.error?.message ?? r.statusText}`.slice(0, 300), false);
+  }
+}
+
 export async function graphGet<T = Record<string, unknown>>(accessToken: string, pathOrUrl: string, opts: { textBody?: boolean } = {}): Promise<T> {
   const url = pathOrUrl.startsWith('https://') ? pathOrUrl : GRAPH + pathOrUrl;
   for (let attempt = 0; ; attempt++) {
