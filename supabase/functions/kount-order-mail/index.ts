@@ -11,6 +11,9 @@
 //   {action:'cron'}      pg_cron 'kount-order-mail-morning' (x-kount-cron secret); works only
 //                        in the 9 o'clock hour in Los Angeles
 //   {action:'continue'}  the pull itself, when PDFs are left to read (same secret)
+//   {action:'pull', since, domain?}  a person: PAST e-mails (v1.13) — that listed vendor's (or every listed vendor's)
+//                        PDFs and tracking since that day, through the same rules; the morning mark is left alone;
+//                        documents older than 30 days start no orders, older tracking moves no lines
 //   {action:'connect_start' | 'connect_poll' | 'pull' | 'redecide'}  a person: JWT of an ACTIVE admin /
 //                        corporate app_users row (deployed with --no-verify-jwt for the cron
 //                        call; every person call is checked here instead)
@@ -39,6 +42,19 @@ const ALLOWED_ROLES = new Set(['admin', 'corporate']);
 const mayUseOrderTracker = (p: { role?: unknown; features?: unknown }) =>
   Array.isArray(p.features) ? (p.features as unknown[]).includes('purchasing:order-tracker') : ALLOWED_ROLES.has(String(p.role));
 const FIRST_LOOKBACK_DAYS = 30;
+// v1.13 past e-mails (a backfill): what it reads is old — an older quote or invoice most likely belongs to an order
+// the tracker already has (it waits in the Inbox instead of starting a copy), and older tracking is added to its
+// order without moving the lines. Both only for mail this recent:
+const RECENT_DAYS = 30;
+const isRecent = (iso: string | null | undefined) => !!iso && Date.now() - Date.parse(iso) <= RECENT_DAYS * 86_400_000;
+
+/** A backfill's first day ('2026-09-01'): a real day, not before 2025, not in the future. 0 = not one. */
+function backfillStart(since: unknown): number {
+  const v = String(since ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return 0;
+  const ms = Date.parse(`${v}T00:00:00Z`);
+  return Number.isFinite(ms) && ms >= Date.parse('2025-01-01T00:00:00Z') && ms <= Date.now() ? ms : 0;
+}
 const OVERLAP_MS = 2 * 3600_000;       // re-look 2 h back: Outlook indexes late; duplicates are skipped
 const READ_BUDGET_MS = 100_000;        // stop STARTING reads after this; the rest go on in a chained call
 const READ_CONCURRENCY = 3;
@@ -78,7 +94,7 @@ async function corporateCaller(req: Request, sb: SupabaseClient): Promise<{ emai
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST') return reject(405, 'Method not allowed');
-  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number; number?: string; document_id?: string };
+  const body = await req.json().catch(() => ({})) as { action?: string; depth?: number; number?: string; document_id?: string; since?: string; domain?: string };
   const action = String(body.action ?? '');
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
 
@@ -138,9 +154,22 @@ Deno.serve(async (req) => {
     }
 
     if (action === 'pull') {
+      // v1.13: since (+ domain) = PAST e-mails: that listed vendor's quotes, invoices, shipping notices and tracking since
+      // that day (the user: "when I add another domain, i want to be able to pull emails from that domain only. Along
+      // with marking since what date"). Without a domain, every listed vendor. The morning mark is not moved.
+      const fromMs = body.since == null || body.since === '' ? 0 : backfillStart(body.since);
+      if (body.since && !fromMs) return reject(400, 'Pick a day from 2025 on, not in the future.');
+      let only: string | null = null;
+      if (body.domain != null && body.domain !== '') {
+        if (!fromMs) return reject(400, 'Pick the day to pull that domain\'s e-mails from.');
+        only = String(body.domain).trim().toLowerCase();
+        const { data: acctD, error: dErr } = await sb.from('kount_ot_mail_account').select('vendor_domains').eq('id', 1).single();
+        if (dErr) throw dErr;
+        if (!((acctD?.vendor_domains ?? []) as string[]).map(d => String(d).toLowerCase()).includes(only)) return reject(400, `${only} is not on the vendor list. Add it first.`);
+      }
       const { data: locked } = await sb.rpc('kount_ot_mail_begin_run');
       if (locked !== true) return json(200, { started: false, reason: 'A pull is already running.' });
-      background(runPull(sb, `by ${caller.email}`, 0));
+      background(runPull(sb, fromMs ? `past e-mails: ${only ?? 'every listed vendor'} since ${body.since} (by ${caller.email})` : `by ${caller.email}`, 0, fromMs, only));
       return json(202, { started: true });
     }
 
@@ -313,7 +342,8 @@ interface Stats {
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
 /** Runs with the lock held (kount_ot_mail_begin_run returned true) and always releases it. */
-async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
+/** fromMs / only = a past-e-mails pull (v1.13): one listed vendor (or all) since that day; 0 = the normal pull. */
+async function runPull(sb: SupabaseClient, trigger: string, depth: number, fromMs = 0, only: string | null = null) {
   const startedMs = Date.now();
   const stats = blankStats(trigger);
   let chain = false;
@@ -331,9 +361,10 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
     if (!acct.token_secret_id) { stats.error = 'Outlook is not connected.'; return; }
     const kinds: string[] = Array.isArray(acct.doc_kinds) && acct.doc_kinds.length ? acct.doc_kinds : [...ALL_DOC_KINDS];
     if (trigger !== 'continued') {
-      await fetchPhase(sb, acct, stats, kinds);
-      // the mail is read: the morning is done for the 9 o'clock job and the admin's warning (0160)
-      await sb.from('kount_ot_mail_account').update({ last_fetch_at: nowIso() }).eq('id', 1);
+      await fetchPhase(sb, acct, stats, kinds, fromMs, only);
+      // the mail is read: the morning is done for the 9 o'clock job and the admin's warning (0160) — not by a
+      // past-e-mails pull, which reads old mail only (v1.13: one at 8:00 must not stand in for the 9 o'clock pull)
+      if (!fromMs) await sb.from('kount_ot_mail_account').update({ last_fetch_at: nowIso() }).eq('id', 1);
     }
     // what waited may match now (an order saved since); then read what is new; then Paid from R365
     await redecidePending(sb, stats, startedMs + READ_BUDGET_MS);
@@ -366,12 +397,21 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number) {
 interface Account { vendor_domains: string[] | null; doc_kinds?: string[] | null; suggested_domains: Record<string, number> | null; fetched_through: string | null }
 interface GraphMessage { id: string; subject?: string; receivedDateTime: string; conversationId?: string; internetMessageId?: string; hasAttachments?: boolean; bodyPreview?: string; from?: { emailAddress?: { address?: string; name?: string } } }
 
-async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds: string[]) {
+async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds: string[], fromMs = 0, only: string | null = null) {
   const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
   if (error) throw error;
   if (!refresh) throw new Error('Outlook is not connected.');
   const tok = await refreshAccess(String(refresh));
   if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+  if (fromMs) {
+    // past e-mails (v1.13): that vendor's (or every listed vendor's) mail since that day, by search — the morning
+    // list is everyone's mail with attachments and stops at MAX_MESSAGES; the morning mark (fetched_through) stays
+    const vendors = only ? [only] : (acct.vendor_domains ?? []);
+    await backfillPdfs(sb, tok.access_token, vendors, fromMs, stats, kinds);
+    await trackingPhase(sb, tok.access_token, vendors, fromMs, stats);
+    if (!only) await stubPhase(sb, tok.access_token, fromMs, stats);   // our own paystub e-mails: not one vendor's
+    return;
+  }
 
   const prevThrough = acct.fetched_through ? Date.parse(acct.fetched_through) : 0;
   const sinceMs = prevThrough ? prevThrough - OVERLAP_MS : Date.now() - FIRST_LOOKBACK_DAYS * 86_400_000;
@@ -451,6 +491,28 @@ async function findPhase(sb: SupabaseClient, number: string, stats: Stats): Prom
  *  'other' documents (0142), and a spreadsheet's tracking numbers onto that order too. An e-mail whose order
  *  is not known yet is looked at again each morning while it is in the window. Never fails the pull. */
 const OTHER_DAYS = 30;
+/** A past-e-mails pull's PDFs (v1.13): each vendor's e-mails since fromMs (Outlook search), taken as the morning pull
+ *  takes them — a PDF already in the Inbox (same e-mail + attachment, or the same file) is skipped. */
+async function backfillPdfs(sb: SupabaseClient, accessToken: string, domains: string[], fromMs: number, stats: Stats, kinds: string[]) {
+  const sinceDay = new Date(fromMs).toISOString().slice(0, 10);
+  for (const domain of domains) {
+    let url = `/me/messages?$search=${encodeURIComponent(`"from:${domain} received>=${sinceDay}"`)}`
+      + '&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,hasAttachments&$top=25';
+    let pages = 0;
+    while (url && pages++ < 40) {
+      const page = await graphGet<{ value?: GraphMessage[]; '@odata.nextLink'?: string }>(accessToken, url);
+      for (const m of page.value ?? []) {
+        if (!m.hasAttachments || !onList(domainOf(m.from?.emailAddress?.address), [domain])) continue;
+        stats.messages++;
+        const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken,
+          `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
+        for (const a of (atts.value ?? []).filter(isPdfAttachment)) if (wantsAttachment(kinds, m.subject, a.name)) await takePdf(sb, accessToken, m, a, stats);
+      }
+      url = page['@odata.nextLink'] ?? '';
+    }
+  }
+}
+
 async function otherPhase(sb: SupabaseClient, stats: Stats) {
   try {
     const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains').eq('id', 1).single();
@@ -594,7 +656,7 @@ async function trackingPhase(sb: SupabaseClient, accessToken: string, domains: s
           decision: order ? null : 'Tracking number in the email, but which order is not clear — pick it.', order_id: null,
         });
         if (error) { if (error.code === '23505') continue; throw error; }
-        if (order && await applyTracking(sb, id, order, hits, m.subject ?? '', m.id, m.conversationId ?? null)) {
+        if (order && await applyTracking(sb, id, order, hits, m.subject ?? '', m.id, m.conversationId ?? null, isRecent(m.receivedDateTime))) {
           stats.tracking++; data = await loadTracker(sb);
         } else stats.pending++;
       }
@@ -651,10 +713,11 @@ async function payRequestPhase(sb: SupabaseClient, accessToken: string, sinceMs:
   }
 }
 
-async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder, hits: TrackingHit[], subject: string, messageId: string, conversationId: string | null) {
+/** shipLines = move the order's unshipped lines to Shipped (only for recent mail — see RECENT_DAYS). */
+async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder, hits: TrackingHit[], subject: string, messageId: string, conversationId: string | null, shipLines = true) {
   const { error } = await sb.rpc('kount_ot_add_tracking', { p: {
     order_id: order.id, numbers: hits, inbox_id: inboxId, source: 'email', message_id: messageId, conversation_id: conversationId,
-    note: `Tracking from email: ${subject}`.slice(0, 200), ship_lines: true,
+    note: `Tracking from email: ${subject}`.slice(0, 200), ship_lines: shipLines,
     decision: `Tracking ${hits.map(h => h.number).join(', ')} added to ${order.order_number || `the ${order.vendor_name} order`}.`,
   } });
   if (error) {
@@ -766,11 +829,11 @@ async function redecidePending(sb: SupabaseClient, stats: Stats, deadline: numbe
     if (r.attachment_id === 'body') {
       const hits = (r.parsed.tracking ?? []) as TrackingHit[];
       const order = orderForEmail(r.conversation_id, String(r.parsed.excerpt ?? r.subject ?? ''), data);
-      if (order && hits.length && await applyTracking(sb, r.id, order, hits, r.subject ?? '', r.message_id, r.conversation_id)) { stats.tracking++; data = await loadTracker(sb); }
+      if (order && hits.length && await applyTracking(sb, r.id, order, hits, r.subject ?? '', r.message_id, r.conversation_id, isRecent(r.received_at))) { stats.tracking++; data = await loadTracker(sb); }
       continue;
     }
     const d = decideMailDocument(r.parsed as unknown as ReadDoc, { id: r.id, message_id: r.message_id, conversation_id: r.conversation_id, file_name: r.file_name, storage_path: r.storage_path },
-      data, today, fmtMoney, opts);
+      data, today, fmtMoney, optsFor(opts, r.received_at));
     if (d.state === 'applied') {
       const { error: aErr } = await sb.rpc('kount_ot_apply_document', { p: d.payload });
       if (!aErr) { stats.applied++; data = await loadTracker(sb); }
@@ -810,7 +873,12 @@ async function takePdf(sb: SupabaseClient, accessToken: string, m: GraphMessage,
   stats.new_pdfs++;
 }
 
-interface InboxRow { id: string; message_id: string; conversation_id: string | null; file_name: string | null; storage_path: string; attempts: number }
+interface InboxRow { id: string; message_id: string; conversation_id: string | null; file_name: string | null; storage_path: string; attempts: number; received_at: string | null }
+
+/** This document's options: no new order from one received more than RECENT_DAYS ago (v1.13: past e-mails). */
+function optsFor(opts: MailDecideOptions, receivedAt: string | null): MailDecideOptions {
+  return opts.autoCreate && !isRecent(receivedAt) ? { ...opts, autoCreate: false } : opts;
+}
 
 const KIND_PLURAL: Record<string, string> = { quote: 'quotes', confirmation: 'order confirmations', invoice: 'invoices', shipping: 'shipping notices' };
 
@@ -828,7 +896,7 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kin
   const opts = await decideOptions(sb);
   const today = laParts().isoDate;
   while (Date.now() < deadline) {
-    const { data: batch, error } = await sb.from('kount_ot_inbox').select('id, message_id, conversation_id, file_name, storage_path, attempts')
+    const { data: batch, error } = await sb.from('kount_ot_inbox').select('id, message_id, conversation_id, file_name, storage_path, attempts, received_at')
       .eq('state', 'unread').lt('attempts', MAX_ATTEMPTS).order('received_at', { ascending: true }).limit(READ_CONCURRENCY);
     if (error) throw error;
     if (!batch?.length) break;
@@ -865,7 +933,7 @@ async function readPhase(sb: SupabaseClient, stats: Stats, deadline: number, kin
         continue;
       }
       const d = decideMailDocument(r.doc, { id: r.b.id, message_id: r.b.message_id, conversation_id: r.b.conversation_id, file_name: r.b.file_name, storage_path: r.b.storage_path },
-        data, today, fmtMoney, opts);
+        data, today, fmtMoney, optsFor(opts, r.b.received_at));
       if (d.state === 'applied') {
         const { error: aErr } = await sb.rpc('kount_ot_apply_document', { p: d.payload });
         if (!aErr) { stats.applied++; data = await loadTracker(sb); continue; }
