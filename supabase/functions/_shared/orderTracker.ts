@@ -1009,6 +1009,25 @@ export function trackingUrl(h: { number: string; carrier: string | null }): stri
   }
 }
 
+/** The invoice / quote numbers written in a text (INV-2026-280738, Q-2026-1021-5051), upper-cased, once each. */
+export function docRefs(text: string): string[] {
+  return [...new Set([...String(text).matchAll(/\b(INV-\d{4}-\d{5,7}|Q-\d{4}-\d{4}-\d{4})\b/gi)].map(m => m[1].toUpperCase()))];
+}
+
+/** A payment request to AP (the team's "Payment Request - EE Mercantile (...) INV-2026-086418 - $2,397.33", or AP's
+ *  "RE:Payment Request ... 'Query No=005-485-081'" reply): the invoices it asks to pay and AP's query number (0153).
+ *  A batch that names no invoice in its subject ("(... Delivery/Warehousing Fees) 5 Invoices - $1,183.11") is read
+ *  from its body. null when it is not one (a vendor's "New payment request from ARC - invoice 1684871" names none). */
+export function paymentRequestOf(subject: string | null | undefined, body?: string | null): { invoices: string[]; queryNo: string | null } | null {
+  const s = String(subject ?? '');
+  if (!/payment\s+request/i.test(s)) return null;
+  let invoices = docRefs(s).filter(r => r.startsWith('INV-'));
+  if (!invoices.length && body) invoices = docRefs(body).filter(r => r.startsWith('INV-'));
+  if (!invoices.length) return null;
+  const q = s.match(/Query\s*No\s*=\s*([\d-]+)/i);
+  return { invoices, queryNo: q ? q[1] : null };
+}
+
 /** The order a vendor email is about: an earlier saved document of the same email thread, else
  *  an invoice / quote number written in it that is on exactly one order. null when unsure. */
 export function orderForEmail(conversationId: string | null, text: string,
@@ -1349,6 +1368,13 @@ const onDomains = (a: string | null | undefined, list: readonly string[]) => {
   return !!d && list.some(x => d === x || d.endsWith('.' + x));
 };
 
+/** One of us as the sender: an address on our domains, or Exchange's internal form of a mailbox in our own
+ *  organisation ("/O=EXCHANGELABS/OU=.../CN=RECIPIENTS/CN=..."), which Outlook gives some of the mail we send
+ *  ourselves (seen 11/10 on Aditya's 10/27 payment request). Only our own tenant's mailboxes have that form. */
+export function isOwnSender(a: string | null | undefined, own: readonly string[] = OWN_MAIL_DOMAINS): boolean {
+  return onDomains(a, own) || /^\/o=/i.test(String(a ?? '').trim());
+}
+
 /** A quote number, for comparing: 'Q-2026-1028-9329' = 'q 2026 1028 9329'. */
 export const quoteKey = (q: string | null | undefined) => String(q ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
 
@@ -1421,12 +1447,14 @@ const sentAt = (m: MailMessage) => Date.parse(m.sentDateTime ?? m.receivedDateTi
  *  `afterMs`, that approves (approvalPhrase). */
 export function findApproval(messages: readonly MailMessage[], afterMs: number, own: readonly string[] = OWN_MAIL_DOMAINS): QuoteApproval | null {
   const ours = messages
-    .filter(m => !m.isDraft && Number.isFinite(sentAt(m)) && sentAt(m) > afterMs && onDomains(m.from?.emailAddress?.address, own)
+    .filter(m => !m.isDraft && Number.isFinite(sentAt(m)) && sentAt(m) > afterMs && isOwnSender(m.from?.emailAddress?.address, own)
       && [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].some(r => !!mailDomain(r.emailAddress?.address) && !onDomains(r.emailAddress?.address, own)))
     .sort((a, b) => sentAt(a) - sentAt(b));
   for (const m of ours) {
     const said = approvalPhrase(m.uniqueBody?.content ?? m.bodyPreview ?? '');
-    if (said) return { at: new Date(sentAt(m)).toISOString(), by: String(m.from?.emailAddress?.address ?? '').toLowerCase(), messageId: m.id ?? null, note: said };
+    // by = the address, or the name when Outlook gave the internal form (11/10)
+    const addr = String(m.from?.emailAddress?.address ?? '');
+    if (said) return { at: new Date(sentAt(m)).toISOString(), by: (addr.includes('@') ? addr : m.from?.emailAddress?.name ?? addr).toLowerCase(), messageId: m.id ?? null, note: said };
   }
   return null;
 }

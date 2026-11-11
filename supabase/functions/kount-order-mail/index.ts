@@ -22,7 +22,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { awaitingApproval, decideMailDocument, extractTracking, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, refreshAccess } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -230,6 +230,8 @@ interface Stats {
   sent?: number; sent_error?: string;
   /** Quoted lines whose approval e-mail was found (0157) / why the step failed */
   approved?: number; approval_error?: string;
+  /** lines marked as payment-requested from the team's e-mails to AP (0153) / why the step failed */
+  pay_requests?: number; pay_requests_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -327,6 +329,7 @@ async function fetchPhase(sb: SupabaseClient, acct: Account, stats: Stats, kinds
   }
   await trackingPhase(sb, tok.access_token, domains, sinceMs, stats);
   await stubPhase(sb, tok.access_token, sinceMs, stats);
+  await payRequestPhase(sb, tok.access_token, sinceMs, stats);
   const { error: upErr } = await sb.from('kount_ot_mail_account').update({
     fetched_through: newest ? new Date(newest).toISOString() : null, suggested_domains: suggested, updated_at: nowIso(),
   }).eq('id', 1);
@@ -487,6 +490,8 @@ interface BodyMessage extends GraphMessage { uniqueBody?: { content?: string } }
 async function trackingPhase(sb: SupabaseClient, accessToken: string, domains: string[], sinceMs: number, stats: Stats) {
   const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
   let data = await loadTracker(sb);
+  // the vendor's latest e-mail per order (0153): a reply ("production finishes this week") is an update, so no follow-up
+  const lastMail = new Map<string, string>();
   for (const domain of domains) {
     const search = encodeURIComponent(`"from:${domain} received>=${sinceDay}"`);
     let url = `/me/messages?$search=${search}&$select=id,subject,from,receivedDateTime,conversationId,internetMessageId,uniqueBody&$top=25`;
@@ -496,6 +501,8 @@ async function trackingPhase(sb: SupabaseClient, accessToken: string, domains: s
       for (const m of page.value ?? []) {
         if (!onList(domainOf(m.from?.emailAddress?.address), [domain])) continue;
         const text = `${m.subject ?? ''}\n${m.uniqueBody?.content ?? ''}`;
+        const about = orderForEmail(m.conversationId ?? null, text, data);
+        if (about && m.receivedDateTime > (lastMail.get(about.id) ?? '')) lastMail.set(about.id, m.receivedDateTime);
         const hits = extractTracking(text);
         if (!hits.length) continue;
         const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', 'body').maybeSingle();
@@ -516,6 +523,54 @@ async function trackingPhase(sb: SupabaseClient, accessToken: string, domains: s
       }
       url = page['@odata.nextLink'] ?? '';
     }
+  }
+  for (const [orderId, at] of lastMail) {
+    await sb.from('kount_ot_orders').update({ last_vendor_email_at: at }).eq('id', orderId).or(`last_vendor_email_at.is.null,last_vendor_email_at.lt.${at}`);
+  }
+}
+
+/** The team's payment requests to AP, and AP's "RE:Payment Request ... 'Query No=...'" replies (0153): their invoices'
+ *  lines get pay_requested_at (the first one) and AP's query number, so To send does not ask again. It always looks
+ *  back PAY_LOOKBACK_DAYS, so requests sent before this step existed (or by someone else, with us on copy) are found;
+ *  a batch naming no invoice in its subject is read from its body. Never fails the pull. */
+const PAY_LOOKBACK_DAYS = 90;
+async function payRequestPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats) {
+  try {
+    const fromMs = Math.min(sinceMs || Date.now(), Date.now() - PAY_LOOKBACK_DAYS * 86_400_000);
+    const sinceDay = new Date(fromMs).toISOString().slice(0, 10);
+    const found = new Map<string, { at: string; queryNo: string | null }>();
+    let url = `/me/messages?$search=${encodeURIComponent(`"payment request received>=${sinceDay}"`)}&$select=id,subject,from,receivedDateTime,uniqueBody&$top=25`;
+    let pages = 0;
+    while (url && pages++ < 30) {
+      const page = await graphGet<{ value?: BodyMessage[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+      for (const m of page.value ?? []) {
+        const addr = m.from?.emailAddress?.address;
+        if (!isOwnSender(addr, OWN_DOMAINS) && !onList(domainOf(addr), ['iqbackoffice.com'])) continue;
+        const pr = paymentRequestOf(m.subject, m.uniqueBody?.content);
+        if (!pr) continue;
+        for (const inv of pr.invoices) {
+          const had = found.get(inv);
+          found.set(inv, { at: had && had.at < m.receivedDateTime ? had.at : m.receivedDateTime, queryNo: had?.queryNo ?? pr.queryNo });
+        }
+      }
+      url = page['@odata.nextLink'] ?? '';
+    }
+    if (!found.size) return;
+    const { data: lines, error } = await sb.from('kount_ot_lines').select('id, invoice_number, pay_requested_at, ap_query_no').in('invoice_number', [...found.keys()]);
+    if (error) throw error;
+    for (const l of lines ?? []) {
+      const f = found.get(String(l.invoice_number).toUpperCase());
+      if (!f) continue;
+      const at = l.pay_requested_at && l.pay_requested_at < f.at ? l.pay_requested_at : f.at;
+      const q = l.ap_query_no ?? f.queryNo;
+      if (at === l.pay_requested_at && q === l.ap_query_no) continue;
+      const { error: uErr } = await sb.from('kount_ot_lines').update({ pay_requested_at: at, ap_query_no: q }).eq('id', l.id);
+      if (uErr) throw uErr;
+      stats.pay_requests = (stats.pay_requests ?? 0) + 1;
+    }
+  } catch (e) {
+    stats.pay_requests_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] payment requests failed:', stats.pay_requests_error);
   }
 }
 
@@ -545,7 +600,7 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
     while (url && pages++ < 10) {
       const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
       for (const m of page.value ?? []) {
-        if (seenMsg.has(m.id) || !m.hasAttachments || !onList(domainOf(m.from?.emailAddress?.address), OWN_DOMAINS)) continue;
+        if (seenMsg.has(m.id) || !m.hasAttachments || !isOwnSender(m.from?.emailAddress?.address, OWN_DOMAINS)) continue;
         seenMsg.add(m.id);
         const invoices = stubInvoices(m.uniqueBody?.content);
         if (!invoices.length) continue;
