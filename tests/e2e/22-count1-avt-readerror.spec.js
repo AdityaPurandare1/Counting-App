@@ -61,7 +61,7 @@ test.describe('v1.98 Count 1 close: AVT read-replica lag', () => {
         { timeout: 5000 })
       .toBeGreaterThan(0);
 
-    // All-items fallback list is populated so the counter isn't stranded.
+    // v2.33: the database built the list when the AVT landed; the phone loaded it, so the counter isn't stranded.
     const recountCount = await page.evaluate(() => Object.keys((appState.audit && appState.audit.recounts) || {}).length);
     expect(recountCount).toBeGreaterThan(0);
   });
