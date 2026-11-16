@@ -1062,10 +1062,11 @@ export function accountingLabel(...parts: ReadonlyArray<string | null | undefine
 }
 
 /** The tracked invoice numbers a text names (an e-mail's subject, body or attachment names), each as given once.
- *  Upper-case compare; the number must stand alone — nothing letter, digit or hyphen-joined right after it, and
- *  before it nothing but a separator, or for a number starting with a letter a word and a hyphen
- *  ("Invoice-INV-2026-423679_84….pdf"). A number of digits only needs 5+ of them and a clean edge on both sides, so
- *  it is never read inside another ("INV-2026-1685034") or out of a phone number ("310.859.1011"). */
+ *  Upper-case compare; the number must stand alone: right after it no letter or digit, nor a hyphen and a digit
+ *  ("INV-46284-2" is another number; "INV-2026-423679-Delilah.pdf" names it), nor a dot and a digit; before it a
+ *  separator, or a word and a hyphen ("Invoice-INV-2026-423679_84….pdf", "ARC_Invoice-1685034.pdf"). A number of
+ *  digits only needs 5+ of them and is never read inside another ("INV-2026-1685034"), out of a phone number
+ *  ("310.859.1011") or an amount ("$12345"), or after "=" ("Query No=1685034"); "No.1685034" names it. */
 export function invoicesNamedIn(text: string | null | undefined, tracked: Iterable<string | null | undefined>): string[] {
   const up = ` ${String(text ?? '').toUpperCase()} `;
   const out: string[] = [];
@@ -1077,10 +1078,59 @@ export function invoicesNamedIn(text: string | null | undefined, tracked: Iterab
     if (!/^[A-Z0-9][A-Z0-9-]*$/.test(t) || !/[0-9]/.test(t)) continue;
     const digits = /^[0-9]+$/.test(t);
     if (digits ? t.length < 5 : t.length < 4) continue;
-    const before = digits ? '[^A-Z0-9.-]' : '(?:[^A-Z0-9-]|[A-Z]-)';
-    if (new RegExp(`${before}${t}(?![A-Z0-9])(?!-[A-Z0-9])(?![.][0-9])`).test(up)) out.push(String(raw).trim());
+    const before = digits ? '(?:[^A-Z0-9.$=-]|[A-Z]-|NO[.])' : '(?:[^A-Z0-9-]|[A-Z]-)';
+    if (new RegExp(before + t + '(?![A-Z0-9])(?!-[0-9])(?![.][0-9])').test(up)) out.push(String(raw).trim());
   }
   return out;
+}
+
+/** Words that say which vendor it is ("Everything Promo" -> EVERYTHING, PROMO), for a number of digits only that
+ *  any vendor might use: 4+ letters, not the generic ones. None left (a short name) = cannot tell, so it passes. */
+const VENDOR_FILLER = new Set(['THE', 'AND', 'INC', 'LLC', 'LTD', 'CORP', 'COMPANY', 'GROUP', 'SUPPLY', 'SUPPLIES', 'SOLUTIONS', 'SERVICES', 'TRADING', 'INTERNATIONAL', 'HOLDINGS']);
+export function vendorMentioned(vendorName: string | null | undefined, text: string | null | undefined): boolean {
+  const words = String(vendorName ?? '').toUpperCase().split(/[^A-Z]+/).filter(w => w.length >= 4 && !VENDOR_FILLER.has(w));
+  if (!words.length) return true;
+  const up = String(text ?? '').toUpperCase();
+  return words.some(w => up.includes(w));
+}
+
+/** An e-mail Outlook found by an invoice number (subject, body or attachment text), as the accounting check reads it. */
+export interface AcctMail {
+  id: string; receivedDateTime: string; subject?: string | null; body?: string | null; hasAttachments?: boolean; isDraft?: boolean;
+  from?: string | null; fromName?: string | null; recipients: ReadonlyArray<string | null | undefined>;
+}
+
+/** Did this e-mail take the invoice to accounting (0174)? Sent (not a draft) to AP or GA, and naming the number in
+ *  its subject or body, else in an attachment's name: 'attachments' = read its attachment names and ask again. A
+ *  number with letters that only Outlook found (inside the attached PDF's text) counts; a number of digits only must
+ *  be named where we can read it, beside the vendor's name. */
+export function acctMailVerdict(token: string, vendorName: string | null | undefined, m: AcctMail,
+                                attachmentNames: ReadonlyArray<string> | null = null): 'yes' | 'no' | 'attachments' {
+  if (m.isDraft || !accountingBoxes(m.recipients).length) return 'no';
+  const digits = /^[0-9]+$/.test(String(token).trim());
+  const text = `${m.subject ?? ''} ${m.body ?? ''}`;
+  const names = (attachmentNames ?? []).join(' ');
+  const vendorOk = () => !digits || vendorMentioned(vendorName, `${text} ${m.fromName ?? ''} ${m.from ?? ''} ${names}`);
+  if (invoicesNamedIn(text, [token]).length) return vendorOk() ? 'yes' : 'no';
+  if (!m.hasAttachments) return 'no';
+  if (!attachmentNames) return 'attachments';
+  if (invoicesNamedIn(names, [token]).length) return vendorOk() ? 'yes' : 'no';
+  return digits ? 'no' : 'yes';
+}
+
+/** What an invoice's lines keep from the e-mails that took it to accounting: the first one (when, who, subject, id),
+ *  every mailbox any of them went to, and when one of us first sent it (ownAt — our own e-mail to AP / GA is the
+ *  payment request). null when there are none. */
+export interface AcctHit { at: string; to: string; by: string | null; subject: string; messageId: string; ownAt: string | null }
+export function firstAccountingMail(mails: ReadonlyArray<AcctMail>, own: readonly string[] = OWN_MAIL_DOMAINS): AcctHit | null {
+  if (!mails.length) return null;
+  const sorted = [...mails].sort((a, b) => Date.parse(a.receivedDateTime) - Date.parse(b.receivedDateTime));
+  const f = sorted[0];
+  return {
+    at: f.receivedDateTime, to: accountingLabel(...sorted.flatMap(m => accountingBoxes(m.recipients))),
+    by: f.fromName || f.from || null, subject: String(f.subject ?? '').slice(0, 300), messageId: f.id,
+    ownAt: sorted.find(m => isOwnSender(m.from, own))?.receivedDateTime ?? null,
+  };
 }
 
 /** The order a vendor email is about: an earlier saved document of the same email thread, else

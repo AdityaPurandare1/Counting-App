@@ -6,6 +6,7 @@ drop trigger if exists kount_ot_lines_touch on public.kount_ot_lines;
 create trigger kount_ot_lines_touch before update on public.kount_ot_lines
   for each row execute function public.kount_ot_touch();
 drop function if exists public.kount_ot_line_touch();
+drop function if exists public.kount_ot_inv_token(text);
 
 alter table public.kount_ot_lines drop column if exists acct_sent_at;
 alter table public.kount_ot_lines drop column if exists acct_sent_to;

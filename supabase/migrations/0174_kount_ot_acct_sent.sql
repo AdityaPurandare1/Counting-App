@@ -17,7 +17,14 @@
 --        updated_at alone — the first pull stamps 90 days of e-mails, which must not
 --        make every order look updated today (Updated column, follow-up timers).
 --        Every other update (a no-op one too) still touches updated_at as
---        kount_ot_touch() does.
+--        kount_ot_touch() does. A line whose invoice # changes to another
+--        invoice loses the stamps (and 0153's pay_requested_at / ap_query_no),
+--        so the new invoice is never shown as sent on the old one's e-mail.
+--    kount_ot_inv_token(text)   the pull's invoiceToken, for that comparison
+--
+--  The pull (kount-order-mail accountingPhase) searches Outlook per unpaid,
+--  not-yet-found invoice; our own e-mail to AP / GA also sets pay_requested_at
+--  (it is the payment request), a vendor's own does not.
 --
 --  Read = the table's existing grants / RLS (purchasing:order-tracker); only the
 --  function writes these columns. No data changes.
@@ -35,9 +42,21 @@ comment on column public.kount_ot_lines.acct_sent_by is 'Who sent that first e-m
 comment on column public.kount_ot_lines.acct_sent_subject is 'That e-mail''s subject (0174)';
 comment on column public.kount_ot_lines.acct_message_id is 'That e-mail''s Outlook (immutable) id (0174)';
 
+-- an invoice # as the pull compares them (invoiceToken): E&E's INV-2026-123456 out of a longer text, else upper-trimmed
+create or replace function public.kount_ot_inv_token(p text)
+returns text language sql immutable set search_path to 'public', 'pg_temp' as $fn$
+  select coalesce(substring(upper(coalesce(p, '')) from 'INV-[0-9]{4}-[0-9]{5,7}'), upper(trim(coalesce(p, ''))))
+$fn$;
+
 create or replace function public.kount_ot_line_touch()
 returns trigger language plpgsql set search_path to 'public', 'pg_temp' as $fn$
 begin
+  -- a line moved to another invoice keeps nothing found for the old one: sent to accounting (0174) and the payment
+  -- request (0153) are found again for the new number by the next pull
+  if public.kount_ot_inv_token(new.invoice_number) is distinct from public.kount_ot_inv_token(old.invoice_number) then
+    new.acct_sent_at := null; new.acct_sent_to := null; new.acct_sent_by := null; new.acct_sent_subject := null; new.acct_message_id := null;
+    new.pay_requested_at := null; new.ap_query_no := null;
+  end if;
   -- the mail pull's sent-to-accounting stamps (0174) alone are not an update of the line (any other update,
   -- a no-op one included, touches it as before)
   if (new.acct_sent_at, new.acct_sent_to, new.acct_sent_by, new.acct_sent_subject, new.acct_message_id)
