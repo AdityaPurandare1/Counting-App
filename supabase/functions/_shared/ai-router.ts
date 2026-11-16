@@ -27,6 +27,19 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
+// 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
+// keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
+function newApiKey(mapEnv: string, names: string[], legacyEnv: string): string {
+  try {
+    const m = JSON.parse(Deno.env.get(mapEnv) ?? "{}") as Record<string, string>;
+    for (const n of names) if (typeof m?.[n] === "string" && m[n]) return m[n];
+  } catch { /* fall through */ }
+  return Deno.env.get(legacyEnv) ?? "";
+}
+const NEW_SECRET_KEY = () => newApiKey("SUPABASE_SECRET_KEYS", ["keva_secret_2026_11", "default"], "SUPABASE_SERVICE_ROLE_KEY");
+const NEW_PUBLISHABLE_KEY = () => newApiKey("SUPABASE_PUBLISHABLE_KEYS", ["default"], "SUPABASE_ANON_KEY");
+
+
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5' | 'claude-opus-5-5';
 
 const KEVAOS_DEFAULT_URL = 'https://kevaos.ai/api/external/counting/ai';
@@ -409,7 +422,7 @@ declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 /** Fire-and-forget usage row. Never throws into the caller. */
 function logAttempt(req: AiRequest, route: Route, a: Attempt, latencyMs: number, extra: Record<string, unknown>) {
   const url = Deno.env.get('SUPABASE_URL');
-  const key = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+  const key = NEW_SECRET_KEY();
   if (!url || !key) return;
   const costUsd = route === 'anthropic' ? estimateCost(req.model, a.usage)
     : route === 'openrouter' ? (a.costUsd ?? estimateCost(req.model, a.usage)) : 0;

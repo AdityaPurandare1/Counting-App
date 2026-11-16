@@ -29,11 +29,24 @@ import { awaitingApproval, decideMailDocument, extractTracking, isOwnSender, pay
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, graphPost, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
+// 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
+// keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
+function newApiKey(mapEnv: string, names: string[], legacyEnv: string): string {
+  try {
+    const m = JSON.parse(Deno.env.get(mapEnv) ?? "{}") as Record<string, string>;
+    for (const n of names) if (typeof m?.[n] === "string" && m[n]) return m[n];
+  } catch { /* fall through */ }
+  return Deno.env.get(legacyEnv) ?? "";
+}
+const NEW_SECRET_KEY = () => newApiKey("SUPABASE_SECRET_KEYS", ["keva_secret_2026_11", "default"], "SUPABASE_SERVICE_ROLE_KEY");
+const NEW_PUBLISHABLE_KEY = () => newApiKey("SUPABASE_PUBLISHABLE_KEYS", ["default"], "SUPABASE_ANON_KEY");
+
+
 declare const EdgeRuntime: { waitUntil(p: Promise<unknown>): void } | undefined;
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
-const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+const SUPABASE_ANON_KEY = NEW_PUBLISHABLE_KEY();
+const SUPABASE_SERVICE_ROLE_KEY = NEW_SECRET_KEY();
 const SELF_URL = `${SUPABASE_URL}/functions/v1/kount-order-mail`;
 
 const BUCKET = 'kount-order-docs';
@@ -390,7 +403,7 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number, fromM
     const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
     await fetch(SELF_URL, {
       // the public anon key too: the gateway lets the call through even if verify_jwt is ever switched on (0160)
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-kount-cron': String(secret ?? ''), ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {}) },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-kount-cron': String(secret ?? ''), ...(SUPABASE_ANON_KEY ? { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } : {}) },
       body: JSON.stringify({ action: 'continue', depth: depth + 1 }),
     }).catch(e => console.error('[kount-order-mail] could not continue:', msg(e)));
   }
