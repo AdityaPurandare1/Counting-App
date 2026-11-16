@@ -25,7 +25,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { acctMailVerdict, firstAccountingMail, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, graphPost, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -742,16 +742,17 @@ async function payRequestPhase(sb: SupabaseClient, accessToken: string, sinceMs:
 }
 
 /** Invoices sent to accounting (0174). The user, 11/16: "scan if those invoices are being sent to accounting.
- *  hwoodap@iqbackoffice.com and hwoodga@iqbackoffice.com". Each tracked invoice not paid yet and not found yet is
- *  searched in Outlook by its number (subject, body and attachment text, any age); an e-mail counts when it went (to /
- *  cc / bcc, not a draft) to AP or GA and names it (acctMailVerdict) - ours, a colleague's, or the vendor's own with us
- *  on copy. Its lines get the first such e-mail and every mailbox they went to; the first one of ours also counts as
- *  the payment request (pay_requested_at). Found invoices are not searched again (a line added later copies the
- *  stamp), so the work is the open invoices, not the mail. A daily rotation when they do not all fit; a time limit
- *  from the run's start; one invoice failing skips only it. Never fails the pull. */
+ *  hwoodap@iqbackoffice.com and hwoodga@iqbackoffice.com". Each tracked invoice not paid yet is searched in Outlook
+ *  by its number - once as words (from, subject, body) and once in attachments (attachment:) - until it is found
+ *  sent and, if a vendor sent it, until one of ours is found too. An e-mail counts when it went (to / cc / bcc, not a
+ *  draft) to AP or GA and names the invoice (acctMailVerdict) - ours, a colleague's, or the vendor's own with us on
+ *  copy. Its lines get the first such e-mail and every mailbox they went to; the first one of ours is also the
+ *  payment request (pay_requested_at), in the same update (0174 keeps updated_at for both). A line added later
+ *  copies the stamp. The work is the open invoices, not the mail: in number order from where the last pull stopped
+ *  (acct_cursor), within a time limit from the run's start; one invoice failing skips only it. Never fails the pull. */
 const ACCT_BUDGET_MS = 45_000;
 const ACCT_RUN_LIMIT_MS = 240_000;     // and not past 4 minutes into the run
-const ACCT_PAGES = 4;                   // 100 e-mails naming one invoice number
+const ACCT_PAGES = 4;                   // 100 e-mails per search
 interface AcctGraphMessage extends GraphMessage {
   isDraft?: boolean;
   body?: { content?: string };
@@ -762,6 +763,8 @@ interface AcctGraphMessage extends GraphMessage {
 async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: number) {
   const until = Math.min(Date.now() + ACCT_BUDGET_MS, startedMs + ACCT_RUN_LIMIT_MS);
   if (until - Date.now() < 10_000) { stats.acct_error = 'Not checked: the pull ran long. The next pull checks.'; return; }
+  let failed = 0, lastErr = '';
+  const fail = (e: unknown) => { failed++; lastErr = msg(e).slice(0, 160); };
   try {
     const data = await loadTracker(sb);
     const orders = new Map(data.orders.filter(o => !o.archived_at).map(o => [o.id, o]));
@@ -769,82 +772,103 @@ async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: numb
     for (const l of data.lines) {
       if (!l.invoice_number || l.status === 'CANCELLED' || !orders.has(l.order_id)) continue;
       const t = invoiceToken(l.invoice_number);
+      if (!trackableInvoice(t)) continue;                                         // "TBD", "INV 46284": not searchable
       (byTok.get(t) ?? byTok.set(t, []).get(t)!).push(l);
     }
-    const todo: Array<{ tok: string; ls: OtLine[]; vendor: string }> = [];
+    const todo: Array<{ tok: string; ls: OtLine[]; vendor: string; stamped: boolean }> = [];
     for (const [tok, ls] of byTok) {
       if (ls.some(l => statusRank(l.status) >= statusRank('PAID'))) continue;      // paid: accounting had it
       const found = ls.find(l => l.acct_sent_at);
       if (found) {
+        // a line added after the invoice was found gets the same stamp
         const missing = ls.filter(l => !l.acct_sent_at).map(l => l.id);
         if (missing.length) {
           const { error } = await sb.from('kount_ot_lines').update({ acct_sent_at: found.acct_sent_at, acct_sent_to: found.acct_sent_to,
             acct_sent_by: found.acct_sent_by, acct_sent_subject: found.acct_sent_subject, acct_message_id: found.acct_message_id }).in('id', missing);
-          if (error) throw error;
-          stats.acct_sent = (stats.acct_sent ?? 0) + missing.length;
+          if (error) fail(error); else stats.acct_sent = (stats.acct_sent ?? 0) + missing.length;
         }
-        continue;
+        // found, and our own payment request too: done
+        if (ls.every(l => l.pay_requested_at)) continue;
       }
-      todo.push({ tok, ls, vendor: orders.get(ls[0].order_id)!.vendor_name });
+      todo.push({ tok, ls, vendor: orders.get(ls[0].order_id)!.vendor_name, stamped: !!found });
     }
-    if (!todo.length) return;
+    if (!todo.length) { if (failed) stats.acct_error = `${failed} could not be updated (${lastErr})`; return; }
     const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
     if (tErr) throw tErr;
     if (!refresh) return;
     const tok = await refreshAccess(String(refresh));
     if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
-    // a different first invoice each day, so a list too long for one pull is still covered
+    // in number order, from just after the last one the previous pull checked, so a list too long for one pull is
+    // gone through in turn
+    const { data: acctRow } = await sb.from('kount_ot_mail_account').select('acct_cursor').eq('id', 1).maybeSingle();
+    const cursor = String((acctRow as { acct_cursor?: string | null } | null)?.acct_cursor ?? '');
     todo.sort((a, b) => a.tok.localeCompare(b.tok));
-    const start = Math.floor(Date.now() / 86_400_000) % todo.length;
-    const order = [...todo.slice(start), ...todo.slice(0, start)];
-    let checked = 0, failed = 0, lastErr = '';
+    const after = todo.findIndex(t => t.tok.localeCompare(cursor) > 0);
+    const order = after > 0 ? [...todo.slice(after), ...todo.slice(0, after)] : todo;
+    let checked = 0, lastTok = '';
     for (const t of order) {
       if (Date.now() > until) break;
       checked++;
+      lastTok = t.tok;
       try {
         const hits: AcctMail[] = [];
-        let url = `/me/messages?$search=${encodeURIComponent(`"${t.tok.replace(/"/g, '')}"`)}`
-          + '&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,hasAttachments,isDraft,body&$top=25';
-        let pages = 0;
-        while (url && pages++ < ACCT_PAGES) {
-          const page = await graphGet<{ value?: AcctGraphMessage[]; '@odata.nextLink'?: string }>(tok.access_token, url, { textBody: true });
-          for (const m of page.value ?? []) {
-            const mail: AcctMail = {
-              id: m.id, receivedDateTime: m.receivedDateTime, subject: m.subject ?? null, body: m.body?.content ?? null, hasAttachments: m.hasAttachments,
-              isDraft: m.isDraft, from: m.from?.emailAddress?.address ?? null, fromName: m.from?.emailAddress?.name ?? null,
-              recipients: [...(m.toRecipients ?? []), ...(m.ccRecipients ?? []), ...(m.bccRecipients ?? [])].map(r => r.emailAddress?.address),
-            };
-            let v = acctMailVerdict(t.tok, t.vendor, mail);
-            if (v === 'attachments') {
-              const atts = await graphGet<{ value?: GraphAttachment[] }>(tok.access_token, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name`);
-              v = acctMailVerdict(t.tok, t.vendor, mail, (atts.value ?? []).map(a => a.name ?? ''));
+        const seen = new Set<string>();
+        const q = t.tok.replace(/"/g, '');
+        // as words (Outlook's default: from, subject, body), then in attachments (names and text)
+        for (const term of [q, `attachment:${q}`]) {
+          try {
+          let url = `/me/messages?$search=${encodeURIComponent(`"${term}"`)}`
+            + '&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,hasAttachments,isDraft,body&$top=25';
+          let pages = 0;
+          while (url && pages++ < ACCT_PAGES) {
+            const page = await graphGet<{ value?: AcctGraphMessage[]; '@odata.nextLink'?: string }>(tok.access_token, url, { textBody: true });
+            for (const m of page.value ?? []) {
+              if (seen.has(m.id)) continue;
+              seen.add(m.id);
+              const mail: AcctMail = {
+                id: m.id, receivedDateTime: m.receivedDateTime, subject: m.subject ?? null, body: m.body?.content ?? null, hasAttachments: m.hasAttachments,
+                isDraft: m.isDraft, from: m.from?.emailAddress?.address ?? null, fromName: m.from?.emailAddress?.name ?? null,
+                recipients: [...(m.toRecipients ?? []), ...(m.ccRecipients ?? []), ...(m.bccRecipients ?? [])].map(r => r.emailAddress?.address),
+              };
+              let v = acctMailVerdict(t.tok, t.vendor, mail);
+              if (v === 'attachments') {
+                const atts = await graphGet<{ value?: GraphAttachment[] }>(tok.access_token, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name`);
+                v = acctMailVerdict(t.tok, t.vendor, mail, (atts.value ?? []).map(a => a.name ?? ''));
+              }
+              if (v === 'yes') hits.push(mail);
             }
-            if (v === 'yes') hits.push(mail);
+            url = page['@odata.nextLink'] ?? '';
           }
-          url = page['@odata.nextLink'] ?? '';
+          } catch (e) {
+            // the attachment search failing keeps what the plain one found (counted as a failure)
+            if (term === q) throw e;
+            fail(e);
+          }
         }
         const hit = firstAccountingMail(hits, OWN_DOMAINS);
         if (!hit) continue;
-        const ids = t.ls.map(l => l.id);
-        const { error } = await sb.from('kount_ot_lines').update({ acct_sent_at: hit.at, acct_sent_to: hit.to, acct_sent_by: hit.by,
-          acct_sent_subject: hit.subject, acct_message_id: hit.messageId }).in('id', ids);
-        if (error) throw error;
-        stats.acct_sent = (stats.acct_sent ?? 0) + ids.length;
-        // our own e-mail to AP / GA with the invoice is its payment request: To send stops asking for one
         const ownAt = hit.ownAt;
-        const unrequested = ownAt ? t.ls.filter(l => !l.pay_requested_at || Date.parse(ownAt) < Date.parse(l.pay_requested_at)).map(l => l.id) : [];
-        if (ownAt && unrequested.length) {
-          const { error: pErr } = await sb.from('kount_ot_lines').update({ pay_requested_at: ownAt }).in('id', unrequested);
-          if (pErr) throw pErr;
+        // our own e-mail to AP / GA with the invoice is its payment request (the earliest one is kept)
+        const requested = ownAt ? t.ls.filter(l => !l.pay_requested_at || Date.parse(ownAt) < Date.parse(l.pay_requested_at)).map(l => l.id) : [];
+        const stamp = t.stamped ? {} : { acct_sent_at: hit.at, acct_sent_to: hit.to, acct_sent_by: hit.by, acct_sent_subject: hit.subject, acct_message_id: hit.messageId };
+        const rest = t.ls.map(l => l.id).filter(id => !requested.includes(id));
+        if (requested.length) {
+          const { error } = await sb.from('kount_ot_lines').update({ ...stamp, pay_requested_at: ownAt }).in('id', requested);
+          if (error) throw error;
         }
+        if (!t.stamped && rest.length) {
+          const { error } = await sb.from('kount_ot_lines').update(stamp).in('id', rest);
+          if (error) throw error;
+        }
+        if (!t.stamped) stats.acct_sent = (stats.acct_sent ?? 0) + t.ls.length;
       } catch (e) {
-        failed++;
-        lastErr = msg(e).slice(0, 160);
+        fail(e);
       }
     }
+    if (lastTok) await sb.from('kount_ot_mail_account').update({ acct_cursor: checked < order.length ? lastTok : null }).eq('id', 1);
     stats.acct_checked = (stats.acct_checked ?? 0) + checked;
-    const notes = [checked < order.length && `checked ${checked} of ${order.length} unpaid invoices (time limit); the rest on the next pulls`,
-      failed && `${failed} could not be searched (${lastErr})`].filter(Boolean);
+    const notes = [checked < order.length && `checked ${checked} of ${order.length} unpaid invoices (time limit); the next pull goes on from there`,
+      failed && `${failed} could not be searched or updated (${lastErr})`].filter(Boolean);
     if (notes.length) stats.acct_error = notes.join('; ');
   } catch (e) {
     stats.acct_error = msg(e).slice(0, 300);

@@ -13,5 +13,6 @@ alter table public.kount_ot_lines drop column if exists acct_sent_to;
 alter table public.kount_ot_lines drop column if exists acct_sent_by;
 alter table public.kount_ot_lines drop column if exists acct_sent_subject;
 alter table public.kount_ot_lines drop column if exists acct_message_id;
+alter table public.kount_ot_mail_account drop column if exists acct_cursor;
 
 commit;

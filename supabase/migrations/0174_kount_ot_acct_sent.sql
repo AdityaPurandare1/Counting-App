@@ -21,6 +21,11 @@
 --        invoice loses the stamps (and 0153's pay_requested_at / ap_query_no),
 --        so the new invoice is never shown as sent on the old one's e-mail.
 --    kount_ot_inv_token(text)   the pull's invoiceToken, for that comparison
+--    kount_ot_mail_account.acct_cursor
+--        where the check stopped when a pull ran out of time (invoices in
+--        number order); the next pull goes on after it
+--    The stamps of 0153 (pay_requested_at, ap_query_no) also leave updated_at
+--    alone now: they too record an e-mail of the past.
 --
 --  The pull (kount-order-mail accountingPhase) searches Outlook per unpaid,
 --  not-yet-found invoice; our own e-mail to AP / GA also sets pay_requested_at
@@ -41,6 +46,8 @@ comment on column public.kount_ot_lines.acct_sent_to is 'Which accounting mailbo
 comment on column public.kount_ot_lines.acct_sent_by is 'Who sent that first e-mail to accounting (0174)';
 comment on column public.kount_ot_lines.acct_sent_subject is 'That e-mail''s subject (0174)';
 comment on column public.kount_ot_lines.acct_message_id is 'That e-mail''s Outlook (immutable) id (0174)';
+alter table public.kount_ot_mail_account add column if not exists acct_cursor text;
+comment on column public.kount_ot_mail_account.acct_cursor is 'The last invoice # the accounting check searched when a pull ran out of time; the next pull goes on after it (0174). null = it got through them all';
 
 -- an invoice # as the pull compares them (invoiceToken): E&E's INV-2026-123456 out of a longer text, else upper-trimmed
 create or replace function public.kount_ot_inv_token(p text)
@@ -57,12 +64,12 @@ begin
     new.acct_sent_at := null; new.acct_sent_to := null; new.acct_sent_by := null; new.acct_sent_subject := null; new.acct_message_id := null;
     new.pay_requested_at := null; new.ap_query_no := null;
   end if;
-  -- the mail pull's sent-to-accounting stamps (0174) alone are not an update of the line (any other update,
-  -- a no-op one included, touches it as before)
-  if (new.acct_sent_at, new.acct_sent_to, new.acct_sent_by, new.acct_sent_subject, new.acct_message_id)
-       is distinct from (old.acct_sent_at, old.acct_sent_to, old.acct_sent_by, old.acct_sent_subject, old.acct_message_id)
-     and (to_jsonb(new) - '{updated_at,acct_sent_at,acct_sent_to,acct_sent_by,acct_sent_subject,acct_message_id}'::text[])
-       = (to_jsonb(old) - '{updated_at,acct_sent_at,acct_sent_to,acct_sent_by,acct_sent_subject,acct_message_id}'::text[]) then
+  -- the mail pull's stamps alone - sent to accounting (0174), the payment request and AP's query # (0153) - are not
+  -- an update of the line (any other update, a no-op one included, touches it as before)
+  if (new.acct_sent_at, new.acct_sent_to, new.acct_sent_by, new.acct_sent_subject, new.acct_message_id, new.pay_requested_at, new.ap_query_no)
+       is distinct from (old.acct_sent_at, old.acct_sent_to, old.acct_sent_by, old.acct_sent_subject, old.acct_message_id, old.pay_requested_at, old.ap_query_no)
+     and (to_jsonb(new) - '{updated_at,acct_sent_at,acct_sent_to,acct_sent_by,acct_sent_subject,acct_message_id,pay_requested_at,ap_query_no}'::text[])
+       = (to_jsonb(old) - '{updated_at,acct_sent_at,acct_sent_to,acct_sent_by,acct_sent_subject,acct_message_id,pay_requested_at,ap_query_no}'::text[]) then
     new.updated_at := old.updated_at;
     return new;
   end if;
@@ -82,6 +89,9 @@ begin
   if (select count(*) from information_schema.columns where table_schema = 'public' and table_name = 'kount_ot_lines'
         and column_name in ('acct_sent_at', 'acct_sent_to', 'acct_sent_by', 'acct_sent_subject', 'acct_message_id')) <> 5 then
     raise exception '0174: expected the 5 acct_ columns on kount_ot_lines';
+  end if;
+  if not exists (select 1 from information_schema.columns where table_schema = 'public' and table_name = 'kount_ot_mail_account' and column_name = 'acct_cursor') then
+    raise exception '0174: expected kount_ot_mail_account.acct_cursor';
   end if;
   if not exists (select 1 from pg_trigger where tgname = 'kount_ot_lines_touch' and tgrelid = 'public.kount_ot_lines'::regclass
                    and tgfoid = 'public.kount_ot_line_touch'::regproc) then

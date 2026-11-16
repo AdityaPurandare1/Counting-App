@@ -1067,6 +1067,14 @@ export function accountingLabel(...parts: ReadonlyArray<string | null | undefine
  *  separator, or a word and a hyphen ("Invoice-INV-2026-423679_84….pdf", "ARC_Invoice-1685034.pdf"). A number of
  *  digits only needs 5+ of them and is never read inside another ("INV-2026-1685034"), out of a phone number
  *  ("310.859.1011") or an amount ("$12345"), or after "=" ("Query No=1685034"); "No.1685034" names it. */
+/** An invoice # the accounting check can look for: letters, digits and hyphens with a digit in it, 4+ long (5+ when
+ *  digits only). "TBD", "INV 46284", "SEE PDF" are not. */
+export function trackableInvoice(n: string | null | undefined): boolean {
+  const t = String(n ?? '').trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9-]*$/.test(t) || !/[0-9]/.test(t)) return false;
+  return /^[0-9]+$/.test(t) ? t.length >= 5 : t.length >= 4;
+}
+
 export function invoicesNamedIn(text: string | null | undefined, tracked: Iterable<string | null | undefined>): string[] {
   const up = ` ${String(text ?? '').toUpperCase()} `;
   const out: string[] = [];
@@ -1075,9 +1083,8 @@ export function invoicesNamedIn(text: string | null | undefined, tracked: Iterab
     const t = String(raw ?? '').trim().toUpperCase();
     if (done.has(t)) continue;
     done.add(t);
-    if (!/^[A-Z0-9][A-Z0-9-]*$/.test(t) || !/[0-9]/.test(t)) continue;
+    if (!trackableInvoice(t)) continue;
     const digits = /^[0-9]+$/.test(t);
-    if (digits ? t.length < 5 : t.length < 4) continue;
     const before = digits ? '(?:[^A-Z0-9.$=-]|[A-Z]-|NO[.])' : '(?:[^A-Z0-9-]|[A-Z]-)';
     if (new RegExp(before + t + '(?![A-Z0-9])(?!-[0-9])(?![.][0-9])').test(up)) out.push(String(raw).trim());
   }
@@ -1102,11 +1109,12 @@ export interface AcctMail {
 
 /** Did this e-mail take the invoice to accounting (0174)? Sent (not a draft) to AP or GA, and naming the number in
  *  its subject or body, else in an attachment's name: 'attachments' = read its attachment names and ask again. A
- *  number with letters that only Outlook found (inside the attached PDF's text) counts; a number of digits only must
- *  be named where we can read it, beside the vendor's name. */
+ *  number with letters that only Outlook found (inside the attached PDF's text) counts — unless it is written where
+ *  we can read it only as part of another number ("INV-46284-2" for INV-46284): then it is that other invoice. A
+ *  number of digits only must be named where we can read it, beside the vendor's name. */
 export function acctMailVerdict(token: string, vendorName: string | null | undefined, m: AcctMail,
                                 attachmentNames: ReadonlyArray<string> | null = null): 'yes' | 'no' | 'attachments' {
-  if (m.isDraft || !accountingBoxes(m.recipients).length) return 'no';
+  if (!trackableInvoice(token) || m.isDraft || !accountingBoxes(m.recipients).length) return 'no';
   const digits = /^[0-9]+$/.test(String(token).trim());
   const text = `${m.subject ?? ''} ${m.body ?? ''}`;
   const names = (attachmentNames ?? []).join(' ');
@@ -1115,6 +1123,7 @@ export function acctMailVerdict(token: string, vendorName: string | null | undef
   if (!m.hasAttachments) return 'no';
   if (!attachmentNames) return 'attachments';
   if (invoicesNamedIn(names, [token]).length) return vendorOk() ? 'yes' : 'no';
+  if (`${text} ${names}`.toUpperCase().includes(String(token).trim().toUpperCase())) return 'no';
   return digits ? 'no' : 'yes';
 }
 
