@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
+import { isInvoiceFile, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -176,4 +176,42 @@ Deno.test('the e-mail day replaces the sheet / PO day only when earlier and near
   assert(!takeEmailSentDay('2026-10-12', '2026-09-28', '2026-10-13'), 'later than the sheet: a follow-up');
   assert(!takeEmailSentDay('2026-04-21', '2026-08-16', '2026-08-16'), 'four months before the invoice: a thread busy since spring');
   assert(!takeEmailSentDay(null, '2026-08-16', '2026-08-16'));
+});
+
+// 11/16: "This was paid. PFA the proof of payment." + Check Stub Reprint (22).pdf, a reply in the INV-2026-086418 thread
+Deno.test("a stub e-mail naming no invoice: the paid invoice of its thread, else the paid ones its quoted text names", () => {
+  const data = {
+    orders: [{ id: "o29", archived_at: null }, { id: "o30", archived_at: null }, { id: "old", archived_at: "2026-10-01T00:00:00Z" }],
+    lines: [
+      { order_id: "o29", invoice_number: "INV-2026-086418", status: "PAID", r365_payments: [{ number: "ACH - 24989" }] },
+      { order_id: "o29", invoice_number: "INV-2026-086418", status: "PAID", r365_payments: null },
+      { order_id: "o29", invoice_number: "INV-2026-111111", status: "INVOICED", r365_payments: null },
+      { order_id: "o30", invoice_number: "I051432", status: "SHIPPED", r365_payments: null },
+      { order_id: "old", invoice_number: "INV-2026-999999", status: "PAID", r365_payments: null },
+    ],
+    documents: [
+      { order_id: "o29", kind: "invoice", doc_number: "INV-2026-086418", source_conversation_id: "conv-ll" },
+      { order_id: "o29", kind: "invoice", doc_number: "INV-2026-111111", source_conversation_id: "conv-ll" },
+      { order_id: "o29", kind: "quote", doc_number: "563", source_conversation_id: "conv-ll" },
+      { order_id: "old", kind: "invoice", doc_number: "INV-2026-999999", source_conversation_id: "conv-old" },
+    ],
+  };
+  // the thread holds a paid and an unpaid invoice: the paid one
+  assertEquals(stubThreadInvoices("conv-ll", "This was paid. PFA the proof of payment.", data), ["INV-2026-086418"]);
+  // only unpaid ones in the thread: those
+  assertEquals(stubThreadInvoices("conv-ll", null, { ...data, lines: data.lines.map(l => ({ ...l, status: "INVOICED", r365_payments: null })) }), ["INV-2026-086418", "INV-2026-111111"]);
+  // an archived order's thread is not used; no thread -> the paid invoices the quoted text names
+  assertEquals(stubThreadInvoices("conv-old", "", data), []);
+  assertEquals(stubThreadInvoices(null, "On Nov 3 Aleli wrote: Please see the attached invoice INV-2026-086418 and INV-2026-111111. Also i051432.", data), ["I051432", "INV-2026-086418"]);
+  // nothing to go on -> [] (the e-mail is left alone)
+  assertEquals(stubThreadInvoices("conv-none", "thanks", data), []);
+});
+
+Deno.test("the invoice PDF riding along a proof of payment is not a stub", () => {
+  assert(isInvoiceFile("Invoice-INV-2026-348798.pdf"));
+  assert(isInvoiceFile("Quote-Q-2026-1115-0002.pdf"));
+  assert(!isInvoiceFile("Check Stub Reprint (22).pdf"));
+  assert(!isInvoiceFile("Payment stub INV-2026-086418.pdf"));
+  assert(!isInvoiceFile("Screenshot 2026-10-29 122852.png"));
+  assert(!isInvoiceFile("image (3).png"));
 });

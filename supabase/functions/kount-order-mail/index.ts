@@ -27,7 +27,7 @@ import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, graphPost, refreshAccess, SEND_SCOPE } from './graph.ts';
-import { ALL_DOC_KINDS, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
+import { ALL_DOC_KINDS, isInvoiceFile, stubThreadInvoices, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 // 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
 // keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
@@ -905,22 +905,33 @@ async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder
 }
 
 /** h.wood's own "Please find the attached paystub for INV-…" emails: the stub file goes onto every order
- *  holding one of those invoices (a 'payment' document). Stubs for invoices not tracked yet wait (redecide). */
+ *  holding one of those invoices (a 'payment' document). Stubs for invoices not tracked yet wait (redecide).
+ *  11/16: also "This was paid. PFA the proof of payment." with "Check Stub Reprint (22).pdf" - found by "check stub",
+ *  "proof of payment" and an attachment named "...stub..." (attachment:stub; a plain search is from / subject / body
+ *  only), its invoice taken from the thread when its own words name none (stubThreadInvoices). Every pull looks back
+ *  STUB_LOOKBACK_DAYS; an e-mail whose stub is already in the Inbox is passed over. */
+const STUB_LOOKBACK_DAYS = 30;
+const STUB_TERMS = ['paystub', 'pay stub', 'payment stub', 'check stub', 'remittance', 'proof of payment', 'attachment:stub'];
 async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats) {
-  const sinceDay = new Date(sinceMs).toISOString().slice(0, 10);
+  const sinceDay = new Date(Math.min(sinceMs || Date.now(), Date.now() - STUB_LOOKBACK_DAYS * 86_400_000)).toISOString().slice(0, 10);
   let data = await loadTracker(sb);
   const seenMsg = new Set<string>();
-  for (const term of ['paystub', 'pay stub', 'payment stub', 'remittance']) {
+  for (const term of STUB_TERMS) {
     let url = `/me/messages?$search=${encodeURIComponent(`"${term} received>=${sinceDay}"`)}`
-      + '&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,conversationId,internetMessageId,hasAttachments,uniqueBody&$top=25';
+      + '&$select=id,subject,from,toRecipients,ccRecipients,receivedDateTime,conversationId,internetMessageId,hasAttachments,uniqueBody,body&$top=25';
     let pages = 0;
     while (url && pages++ < 10) {
-      const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+      const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean; body?: { content?: string } })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
       for (const m of page.value ?? []) {
         if (seenMsg.has(m.id) || !m.hasAttachments || !isOwnSender(m.from?.emailAddress?.address, OWN_DOMAINS)) continue;
         seenMsg.add(m.id);
-        // E&E's INV-2026-… numbers, and (v1.14) any invoice number a tracked order carries ("I051027", "INV-46284")
-        const invoices = [...new Set([...stubInvoices(m.uniqueBody?.content), ...trackedInvoicesIn(m.uniqueBody?.content, data)])];
+        // filed already (a look-back pull meets it again): nothing to fetch
+        const { data: filed } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).limit(1);
+        if (filed?.length) continue;
+        // E&E's INV-2026-… numbers, and (v1.14) any invoice number a tracked order carries ("I051027", "INV-46284");
+        // none in its own words -> the invoice of its thread / named in the quoted text (11/16)
+        let invoices = [...new Set([...stubInvoices(m.uniqueBody?.content), ...trackedInvoicesIn(m.uniqueBody?.content, data)])];
+        if (!invoices.length) invoices = stubThreadInvoices(m.conversationId ?? null, m.body?.content ?? null, data);
         if (!invoices.length) continue;
         // v1.14: sent to a vendor (anyone outside h.wood), or only passed around inside — then it is on file, not sent
         const rcpts = [...((m as { toRecipients?: Array<{ emailAddress?: { address?: string } }> }).toRecipients ?? []),
@@ -929,7 +940,7 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
         const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
         for (const a of atts.value ?? []) {
           const type = isStubAttachment(a);
-          if (!type) continue;
+          if (!type || isInvoiceFile(a.name)) continue;
           const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', a.id).maybeSingle();
           if (seen) continue;
           const full = await graphGet<{ contentBytes?: string }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(a.id)}`);

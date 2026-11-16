@@ -4,6 +4,8 @@
 // taken, what "9 o'clock in Los Angeles" is, and small byte helpers. Tested in
 // rules.test.ts (deno test).
 
+import { invoicesNamedIn } from '../_shared/orderTracker.ts';
+
 /** h.wood's own mail is never a vendor document (forwards and replies are copies). */
 export const OWN_DOMAINS = ['hwoodgroup.com'];
 
@@ -234,6 +236,38 @@ export function isStubAttachment(a: GraphAttachment): string | null {
 /** The invoice numbers a stub email is for — only what THAT email says (uniqueBody), not the quoted thread. */
 export function stubInvoices(text: string | null | undefined): string[] {
   return [...new Set([...String(text ?? '').matchAll(/INV-\d{4}-\d{5,7}/gi)].map(m => m[0].toUpperCase()))];
+}
+
+const PAID_OR_LATER = new Set(['PAID', 'SHIPPED', 'DELIVERED', 'RECEIVED']);
+interface StubThreadData {
+  orders: ReadonlyArray<{ id: string; archived_at?: string | null }>;
+  lines: ReadonlyArray<{ order_id: string; invoice_number?: string | null; status: string; r365_payments?: ReadonlyArray<unknown> | null }>;
+  documents: ReadonlyArray<{ order_id?: string | null; kind: string; doc_number?: string | null; source_conversation_id?: string | null }>;
+}
+/** The invoices a check-stub e-mail of ours is for when its own words name none (11/16: "This was paid. PFA the proof
+ *  of payment." with "Check Stub Reprint (22).pdf", a reply in E&E's INV-2026-086418 thread): the invoices the tracker
+ *  saved from that same thread - the paid ones when any are - else the paid tracked invoices its quoted text names.
+ *  [] = cannot tell (the e-mail is left alone). */
+export function stubThreadInvoices(conversationId: string | null | undefined, quoted: string | null | undefined, data: StubThreadData): string[] {
+  const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
+  const linesOf = (t: string) => data.lines.filter(l => live.has(l.order_id) && l.status !== 'CANCELLED' && !!l.invoice_number && invoiceToken(l.invoice_number) === t);
+  const paid = (t: string) => linesOf(t).some(l => PAID_OR_LATER.has(l.status) || (l.r365_payments?.length ?? 0) > 0);
+  if (conversationId) {
+    const inThread = [...new Set(data.documents.filter(d => d.kind === 'invoice' && !!d.order_id && live.has(d.order_id) && d.source_conversation_id === conversationId && !!d.doc_number)
+      .map(d => invoiceToken(d.doc_number)))].filter(t => linesOf(t).length > 0).sort();
+    const paidOnes = inThread.filter(paid);
+    if (paidOnes.length) return paidOnes;
+    if (inThread.length) return inThread;
+  }
+  const tracked = [...new Set(data.lines.filter(l => live.has(l.order_id) && !!l.invoice_number).map(l => invoiceToken(l.invoice_number)))];
+  return invoicesNamedIn(quoted, tracked).filter(paid).sort();
+}
+
+/** An attachment named as the invoice or quote itself ("Invoice-INV-2026-348798.pdf"), not a stub: a proof-of-payment
+ *  e-mail sometimes carries the invoice too. A name that also says stub / remittance / payment / receipt is a stub. */
+export function isInvoiceFile(name: string | null | undefined): boolean {
+  const n = String(name ?? '');
+  return /(invoice|quote|estimate|INV-[0-9]{4}-|Q-[0-9]{4}-)/i.test(n) && !/(stub|remit|payment|receipt|proof)/i.test(n);
 }
 
 /** Constant-time string compare (the cron secret). */
