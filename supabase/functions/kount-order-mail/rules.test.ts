@@ -147,7 +147,7 @@ Deno.test('check stubs: which files, which invoices', () => {
   assertEquals(stubInvoices('Please find the attached paystub for this invoice. Let us know the ETA'), []);
 });
 
-Deno.test('sent to the vendor: the exchange that led to the order's first document', () => {
+Deno.test("sent to the vendor: the exchange that led to the order's first document", () => {
   const at = (id: string, iso: string, from: string, to: string[], cc: string[] = [], draft = false) => ({
     id, sentDateTime: iso, isDraft: draft, from: { emailAddress: { address: from } },
     toRecipients: to.map(address => ({ emailAddress: { address } })), ccRecipients: cc.map(address => ({ emailAddress: { address } })),
