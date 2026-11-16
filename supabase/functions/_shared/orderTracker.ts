@@ -107,6 +107,17 @@ export interface OtLine {
   quote_approved_for?: string | null;
   quote_approval_note?: string | null;
   quote_approval_message_id?: string | null;
+  /** a payment request for its invoice found in the mailbox (0153), and AP's query number for it */
+  pay_requested_at?: string | null;
+  ap_query_no?: string | null;
+  /** its invoice sent to accounting (0174): the first e-mail to hwoodap@ / hwoodga@iqbackoffice.com naming the
+   *  invoice, found by the mail pull — when, which of the two ('AP', 'GA', 'AP, GA' = every one it went to), who
+   *  sent it, its subject and its Outlook id. null = none seen in the connected mailbox. */
+  acct_sent_at?: string | null;
+  acct_sent_to?: string | null;
+  acct_sent_by?: string | null;
+  acct_sent_subject?: string | null;
+  acct_message_id?: string | null;
 }
 
 export interface OtMove {
@@ -1026,6 +1037,50 @@ export function paymentRequestOf(subject: string | null | undefined, body?: stri
   if (!invoices.length) return null;
   const q = s.match(/Query\s*No\s*=\s*([\d-]+)/i);
   return { invoices, queryNo: q ? q[1] : null };
+}
+
+/* ── sent to accounting (0174) ────────────────────────────────────────── */
+
+/** IQ Back Office's two h.wood mailboxes (the user, 11/16: "These are the 2 emails where things go either of them"):
+ *  an invoice e-mailed to either one has gone to accounting — sent by us, by a colleague, or by the vendor itself
+ *  with us on copy. */
+export const ACCOUNTING_MAILBOXES: ReadonlyArray<{ address: string; label: string }> = [
+  { address: 'hwoodap@iqbackoffice.com', label: 'AP' },
+  { address: 'hwoodga@iqbackoffice.com', label: 'GA' },
+];
+
+/** Which of the accounting mailboxes are among these addresses: their labels, in ACCOUNTING_MAILBOXES order. */
+export function accountingBoxes(addresses: ReadonlyArray<string | null | undefined>): string[] {
+  const got = new Set(addresses.map(a => String(a ?? '').trim().toLowerCase()));
+  return ACCOUNTING_MAILBOXES.filter(b => got.has(b.address)).map(b => b.label);
+}
+
+/** 'AP, GA' from labels (any order, repeats, a stored 'AP, GA'), in ACCOUNTING_MAILBOXES order; '' for none. */
+export function accountingLabel(...parts: ReadonlyArray<string | null | undefined>): string {
+  const got = new Set(parts.flatMap(p => String(p ?? '').split(',')).map(s => s.trim().toUpperCase()).filter(Boolean));
+  return ACCOUNTING_MAILBOXES.map(b => b.label).filter(l => got.has(l)).join(', ');
+}
+
+/** The tracked invoice numbers a text names (an e-mail's subject, body or attachment names), each as given once.
+ *  Upper-case compare; the number must stand alone — nothing letter, digit or hyphen-joined right after it, and
+ *  before it nothing but a separator, or for a number starting with a letter a word and a hyphen
+ *  ("Invoice-INV-2026-423679_84….pdf"). A number of digits only needs 5+ of them and a clean edge on both sides, so
+ *  it is never read inside another ("INV-2026-1685034") or out of a phone number ("310.859.1011"). */
+export function invoicesNamedIn(text: string | null | undefined, tracked: Iterable<string | null | undefined>): string[] {
+  const up = ` ${String(text ?? '').toUpperCase()} `;
+  const out: string[] = [];
+  const done = new Set<string>();
+  for (const raw of tracked) {
+    const t = String(raw ?? '').trim().toUpperCase();
+    if (done.has(t)) continue;
+    done.add(t);
+    if (!/^[A-Z0-9][A-Z0-9-]*$/.test(t) || !/[0-9]/.test(t)) continue;
+    const digits = /^[0-9]+$/.test(t);
+    if (digits ? t.length < 5 : t.length < 4) continue;
+    const before = digits ? '[^A-Z0-9.-]' : '(?:[^A-Z0-9-]|[A-Z]-)';
+    if (new RegExp(`${before}${t}(?![A-Z0-9])(?!-[A-Z0-9])(?![.][0-9])`).test(up)) out.push(String(raw).trim());
+  }
+  return out;
 }
 
 /** The order a vendor email is about: an earlier saved document of the same email thread, else
