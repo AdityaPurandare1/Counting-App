@@ -324,6 +324,15 @@ Deno.serve(async (req) => {
       return json(200, { approved: stats.approved ?? 0, error: stats.approval_error ?? null });
     }
 
+    if (action === 'accounting') {
+      // v1.21: one order's invoices sent to accounting (0174), on demand: "I've sent it - check now"
+      const orderId = String((body as { order_id?: unknown }).order_id ?? '').trim();
+      if (!orderId) return reject(400, 'order_id is required');
+      const stats = blankStats(`accounting by ${caller.email}`);
+      await accountingPhase(sb, stats, Date.now(), orderId);
+      return json(200, { found: stats.acct_sent ?? 0, requested: stats.acct_requested ?? 0, checked: stats.acct_checked ?? 0, error: stats.acct_error ?? null });
+    }
+
     if (action === 'sent') {
       // when each order went to the vendor, from its e-mail threads (0147)
       const stats = blankStats(`sent dates by ${caller.email}`);
@@ -355,6 +364,8 @@ interface Stats {
   pay_requests?: number; pay_requests_error?: string;
   /** unpaid invoices searched / their lines stamped as sent to AP or GA (0174) / what was left or failed */
   acct_checked?: number; acct_sent?: number; acct_error?: string;
+  /** lines whose payment request was found as our own e-mail to AP / GA (0174) */
+  acct_requested?: number;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -760,7 +771,8 @@ interface AcctGraphMessage extends GraphMessage {
   ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
   bccRecipients?: Array<{ emailAddress?: { address?: string } }>;
 }
-async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: number) {
+/** onlyOrder (v1.21 "check now"): just that order's invoices, the pulls' place in the list left alone. */
+async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: number, onlyOrder: string | null = null) {
   const until = Math.min(Date.now() + ACCT_BUDGET_MS, startedMs + ACCT_RUN_LIMIT_MS);
   if (until - Date.now() < 10_000) { stats.acct_error = 'Not checked: the pull ran long. The next pull checks.'; return; }
   let failed = 0, lastErr = '';
@@ -777,6 +789,7 @@ async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: numb
     }
     const todo: Array<{ tok: string; ls: OtLine[]; vendor: string; stamped: boolean }> = [];
     for (const [tok, ls] of byTok) {
+      if (onlyOrder && !ls.some(l => l.order_id === onlyOrder)) continue;
       if (ls.some(l => statusRank(l.status) >= statusRank('PAID'))) continue;      // paid: accounting had it
       const found = ls.find(l => l.acct_sent_at);
       if (found) {
@@ -800,7 +813,7 @@ async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: numb
     if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
     // in number order, from just after the last one the previous pull checked, so a list too long for one pull is
     // gone through in turn
-    const { data: acctRow } = await sb.from('kount_ot_mail_account').select('acct_cursor').eq('id', 1).maybeSingle();
+    const { data: acctRow } = onlyOrder ? { data: null } : await sb.from('kount_ot_mail_account').select('acct_cursor').eq('id', 1).maybeSingle();
     const cursor = String((acctRow as { acct_cursor?: string | null } | null)?.acct_cursor ?? '');
     todo.sort((a, b) => a.tok.localeCompare(b.tok));
     const after = todo.findIndex(t => t.tok.localeCompare(cursor) > 0);
@@ -855,6 +868,7 @@ async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: numb
         if (requested.length) {
           const { error } = await sb.from('kount_ot_lines').update({ ...stamp, pay_requested_at: ownAt }).in('id', requested);
           if (error) throw error;
+          stats.acct_requested = (stats.acct_requested ?? 0) + requested.length;
         }
         if (!t.stamped && rest.length) {
           const { error } = await sb.from('kount_ot_lines').update(stamp).in('id', rest);
@@ -865,7 +879,7 @@ async function accountingPhase(sb: SupabaseClient, stats: Stats, startedMs: numb
         fail(e);
       }
     }
-    if (lastTok) await sb.from('kount_ot_mail_account').update({ acct_cursor: checked < order.length ? lastTok : null }).eq('id', 1);
+    if (lastTok && !onlyOrder) await sb.from('kount_ot_mail_account').update({ acct_cursor: checked < order.length ? lastTok : null }).eq('id', 1);
     stats.acct_checked = (stats.acct_checked ?? 0) + checked;
     const notes = [checked < order.length && `checked ${checked} of ${order.length} unpaid invoices (time limit); the next pull goes on from there`,
       failed && `${failed} could not be searched or updated (${lastErr})`].filter(Boolean);
