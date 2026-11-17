@@ -34,6 +34,7 @@ export const SCHEMA = {
     refers_to: { type: 'array', items: { type: 'string' }, description: 'Numbers of OTHER invoices / quotes / orders this document says it belongs to, often in the notes near the bottom (e.g. "Shipping Fee - For Items Under INV-2026-368461", "Balance of INV-...", "Re: Quote Q-..."), exactly as printed. Never the document\'s own number or the PO number (order_number). Empty array if none.' },
     subtotal: { type: 'number', description: 'Subtotal before tax / freight exactly as printed; 0 if none printed.' },
     total: { type: 'number', description: 'Grand total exactly as printed; 0 if none printed.' },
+    terms: { type: 'string', description: 'Payment terms exactly as printed (e.g. "Due on Receipt", "Net 30", "50% deposit"). Empty string if none printed.' },
     lines: {
       type: 'array',
       description: 'Every line on the document, in order. Merge a line that wraps over several rows into one.',
@@ -54,7 +55,7 @@ export const SCHEMA = {
       },
     },
   },
-  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'refers_to', 'subtotal', 'total', 'lines'],
+  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'refers_to', 'subtotal', 'total', 'terms', 'lines'],
 } as const;
 
 export const SYSTEM =
