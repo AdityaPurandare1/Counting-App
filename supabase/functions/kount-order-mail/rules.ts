@@ -229,7 +229,8 @@ export function isStubAttachment(a: GraphAttachment): string | null {
     : /png/i.test(a.contentType ?? '') || name.endsWith('.png') ? 'image/png'
     : /jpe?g/i.test(a.contentType ?? '') || /\.jpe?g$/.test(name) ? 'image/jpeg' : null;
   if (!type || (a.size ?? 0) > MAX_PDF_BYTES) return null;
-  if (a.isInline && (type !== 'application/pdf') && (a.size ?? 0) < 60_000) return null;
+  // a pasted screenshot is inline too (11/17: payment proofs of 56-63 KB); the signature logos are 11-23 KB
+  if (a.isInline && (type !== 'application/pdf') && (a.size ?? 0) < 30_000) return null;
   return type;
 }
 
@@ -248,7 +249,7 @@ interface StubThreadData {
  *  of payment." with "Check Stub Reprint (22).pdf", a reply in E&E's INV-2026-086418 thread): the invoices the tracker
  *  saved from that same thread - the paid ones when any are - else the paid tracked invoices its quoted text names.
  *  [] = cannot tell (the e-mail is left alone). */
-export function stubThreadInvoices(conversationId: string | null | undefined, quoted: string | null | undefined, data: StubThreadData): string[] {
+export function stubThreadInvoices(conversationId: string | null | undefined, quoted: string | null | undefined, data: StubThreadData, unpaidToo = false): string[] {
   const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
   const linesOf = (t: string) => data.lines.filter(l => live.has(l.order_id) && l.status !== 'CANCELLED' && !!l.invoice_number && invoiceToken(l.invoice_number) === t);
   const paid = (t: string) => linesOf(t).some(l => PAID_OR_LATER.has(l.status) || (l.r365_payments?.length ?? 0) > 0);
@@ -257,7 +258,9 @@ export function stubThreadInvoices(conversationId: string | null | undefined, qu
       .map(d => invoiceToken(d.doc_number)))].filter(t => linesOf(t).length > 0).sort();
     const paidOnes = inThread.filter(paid);
     if (paidOnes.length) return paidOnes;
-    if (inThread.length) return inThread;
+    // unpaid ones only for a proof of a payment R365 never sees (card / online, 11/17); an R365 check stub naming no
+    // invoice in the e-mail is not put on unpaid ones (11/16: July's stubs sent in the October order's thread)
+    if (unpaidToo && inThread.length) return inThread;
   }
   const tracked = [...new Set(data.lines.filter(l => live.has(l.order_id) && !!l.invoice_number).map(l => invoiceToken(l.invoice_number)))];
   return invoicesNamedIn(quoted, tracked).filter(paid).sort();
@@ -268,6 +271,13 @@ export function stubThreadInvoices(conversationId: string | null | undefined, qu
 export function isInvoiceFile(name: string | null | undefined): boolean {
   const n = String(name ?? '');
   return /(invoice|quote|estimate|INV-[0-9]{4}-|Q-[0-9]{4}-)/i.test(n) && !/(stub|remit|payment|receipt|proof)/i.test(n);
+}
+
+/** Our own words say it is paid ("The payments have been processed, PFA the proofs below", "These were paid for.",
+ *  "This was paid. PFA the proof of payment.") - in a sentence that is not a question ("Has this been paid?"). */
+const PAID_SAID = /\b(?:has|have|was|were) (?:been )?paid\b|\bpaid (?:for|it|this|these|them|via|by|with|today|in full)\b|\bpayments? (?:has|have|was|were|is|are) (?:been )?(?:processed|made|sent|completed|done)\b|\bproofs? of payment\b|\bpayment (?:proofs?|confirmations?|receipts?)\b|\bremittance\b|\bpay ?stubs?\b|\bpayment stubs?\b|\bcheck stubs?\b/i;
+export function saysPaid(text: string | null | undefined): boolean {
+  return String(text ?? '').split(/(?<=[.!?])\s+|\n+/).some(s => PAID_SAID.test(s) && !/\?\s*$/.test(s.trim()));
 }
 
 /** Constant-time string compare (the cron secret). */

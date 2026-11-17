@@ -25,9 +25,9 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, DRAFT_SCOPE, GraphError, graphGet, graphPost, graphPostJson, refreshAccess, SEND_SCOPE } from './graph.ts';
-import { ALL_DOC_KINDS, isInvoiceFile, stubThreadInvoices, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
+import { ALL_DOC_KINDS, isInvoiceFile, saysPaid, stubThreadInvoices, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 // 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
 // keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
@@ -418,6 +418,8 @@ interface Stats {
   approved?: number; approval_error?: string;
   /** lines marked as payment-requested from the team's e-mails to AP (0153) / why the step failed */
   pay_requests?: number; pay_requests_error?: string;
+  /** invoice lines marked Paid from our own proof of a card / online payment e-mailed in their thread (11/17) */
+  paid_by_proof?: number;
   /** unpaid invoices searched / their lines stamped as sent to AP or GA (0174) / what was left or failed */
   acct_checked?: number; acct_sent?: number; acct_error?: string;
   /** lines whose payment request was found as our own e-mail to AP / GA (0174) */
@@ -967,7 +969,9 @@ async function applyTracking(sb: SupabaseClient, inboxId: string, order: OtOrder
  *  only), its invoice taken from the thread when its own words name none (stubThreadInvoices). Every pull looks back
  *  STUB_LOOKBACK_DAYS; an e-mail whose stub is already in the Inbox is passed over. */
 const STUB_LOOKBACK_DAYS = 30;
-const STUB_TERMS = ['paystub', 'pay stub', 'payment stub', 'check stub', 'remittance', 'proof of payment', 'attachment:stub'];
+// 11/17 the user: "I had paid for this using the credit card and also shared the proof of payments as screenshots. those
+// were not pulled in" ("The payments have been processed, PFA the proofs below", screenshots pasted in the e-mail)
+const STUB_TERMS = ['paystub', 'pay stub', 'payment stub', 'check stub', 'remittance', 'proof of payment', 'attachment:stub', 'paid', 'payments processed', 'payment processed'];
 async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats) {
   const sinceDay = new Date(Math.min(sinceMs || Date.now(), Date.now() - STUB_LOOKBACK_DAYS * 86_400_000)).toISOString().slice(0, 10);
   let data = await loadTracker(sb);
@@ -979,24 +983,34 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
     while (url && pages++ < 10) {
       const page = await graphGet<{ value?: (BodyMessage & { hasAttachments?: boolean; body?: { content?: string } })[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
       for (const m of page.value ?? []) {
-        if (seenMsg.has(m.id) || !m.hasAttachments || !isOwnSender(m.from?.emailAddress?.address, OWN_DOMAINS)) continue;
+        if (seenMsg.has(m.id) || !isOwnSender(m.from?.emailAddress?.address, OWN_DOMAINS)) continue;
         seenMsg.add(m.id);
-        // filed already (a look-back pull meets it again): nothing to fetch
-        const { data: filed } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).limit(1);
-        if (filed?.length) continue;
-        // E&E's INV-2026-… numbers, and (v1.14) any invoice number a tracked order carries ("I051027", "INV-46284");
-        // none in its own words -> the invoice of its thread / named in the quoted text (11/16)
-        let invoices = [...new Set([...stubInvoices(m.uniqueBody?.content), ...trackedInvoicesIn(m.uniqueBody?.content, data)])];
-        if (!invoices.length) invoices = stubThreadInvoices(m.conversationId ?? null, m.body?.content ?? null, data);
-        if (!invoices.length) continue;
+        const own = String(m.uniqueBody?.content ?? '');
+        const paidSaid = saysPaid(own);
+        // screenshots pasted in the e-mail do not count as attachments (hasAttachments false): read on when it says paid
+        if (!m.hasAttachments && !paidSaid) continue;
         // v1.14: sent to a vendor (anyone outside h.wood), or only passed around inside — then it is on file, not sent
         const rcpts = [...((m as { toRecipients?: Array<{ emailAddress?: { address?: string } }> }).toRecipients ?? []),
           ...((m as { ccRecipients?: Array<{ emailAddress?: { address?: string } }> }).ccRecipients ?? [])];
+        // a payment request to AP / GA (the invoice attached) is not a stub
+        if (accountingBoxes(rcpts.map(r => r.emailAddress?.address)).length || /^\s*(?:(?:re|fw|fwd):\s*)*payment request/i.test(m.subject ?? '')) continue;
         const toVendor = rcpts.some(r => { const a = r.emailAddress?.address ?? ''; return a.includes('@') && !isOwnSender(a, OWN_DOMAINS); });
+        // filed already (a look-back pull meets it again): nothing to fetch
+        const { data: filed } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).limit(1);
+        if (filed?.length) continue;
         const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
-        for (const a of atts.value ?? []) {
+        const files = (atts.value ?? []).filter(a => isStubAttachment(a) && !isInvoiceFile(a.name));
+        if (!files.length) continue;
+        // screenshots only = a card / online payment's proof (R365 never sees it); a PDF = R365's check stub
+        const shots = files.every(a => isStubAttachment(a) !== 'application/pdf');
+        // E&E's INV-2026-… numbers, and (v1.14) any invoice number a tracked order carries ("I051027", "INV-46284");
+        // none in its own words -> when it says paid, the invoice of its thread / named in the quoted text (11/16)
+        let invoices = [...new Set([...stubInvoices(own), ...trackedInvoicesIn(own, data)])];
+        if (!invoices.length && paidSaid) invoices = stubThreadInvoices(m.conversationId ?? null, m.body?.content ?? null, data, shots);
+        if (!invoices.length) continue;
+        for (const a of files) {
           const type = isStubAttachment(a);
-          if (!type || isInvoiceFile(a.name)) continue;
+          if (!type) continue;
           const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', a.id).maybeSingle();
           if (seen) continue;
           const full = await graphGet<{ contentBytes?: string }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(a.id)}`);
@@ -1021,10 +1035,31 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
           if (error) { await sb.storage.from(BUCKET).remove([path]); if (error.code === '23505') continue; throw error; }
           if (await attachStub(sb, row, data)) { stats.stubs++; data = await loadTracker(sb); }
         }
+        // 11/17: a card / online payment proven to the vendor by screenshots - its invoices are paid (the person had to
+        // mark CUS-0044 by hand); not an R365 check stub, whose payment the R365 step reads
+        if (shots && paidSaid && toVendor) {
+          const n = await markPaidByProof(sb, invoices, m.receivedDateTime, data);
+          if (n) { stats.paid_by_proof = (stats.paid_by_proof ?? 0) + n; data = await loadTracker(sb); }
+        }
       }
       url = page['@odata.nextLink'] ?? '';
     }
   }
+}
+
+/** The invoices' lines still at Invoiced, with no R365 payment, marked Paid from our own proof of a card / online payment
+ *  e-mailed in their thread (11/17); the note says so. Returns the lines marked. */
+async function markPaidByProof(sb: SupabaseClient, invoices: string[], at: string, data: { lines: OtLine[]; orders: OtOrder[] }): Promise<number> {
+  const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
+  const toks = new Set(invoices.map(invoiceToken));
+  const ids = data.lines.filter(l => live.has(l.order_id) && l.status === 'INVOICED' && !!l.invoice_number && toks.has(invoiceToken(l.invoice_number))
+    && !(l.r365_payments?.length)).map(l => l.id);
+  if (!ids.length) return 0;
+  const day = new Date(at).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'numeric', day: 'numeric' });
+  const { error } = await sb.from('kount_ot_lines').update({ status: 'PAID', status_source: 'document',
+    status_note: `Paid by card / online: the payment proof (screenshots) e-mailed to the vendor on ${day}` }).in('id', ids);
+  if (error) throw error;
+  return ids.length;
 }
 
 /** The invoice numbers tracked orders carry (one token, a digit in it: "I051027", "INV-46284") that a text names as a

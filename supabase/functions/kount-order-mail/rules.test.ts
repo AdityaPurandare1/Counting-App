@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { isInvoiceFile, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
+import { isInvoiceFile, saysPaid, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -199,7 +199,11 @@ Deno.test("a stub e-mail naming no invoice: the paid invoice of its thread, else
   // the thread holds a paid and an unpaid invoice: the paid one
   assertEquals(stubThreadInvoices("conv-ll", "This was paid. PFA the proof of payment.", data), ["INV-2026-086418"]);
   // only unpaid ones in the thread: those
-  assertEquals(stubThreadInvoices("conv-ll", null, { ...data, lines: data.lines.map(l => ({ ...l, status: "INVOICED", r365_payments: null })) }), ["INV-2026-086418", "INV-2026-111111"]);
+  // only unpaid ones in the thread: an R365 stub is not put on them (11/16: July's stubs in the October thread) ...
+  const unpaid = { ...data, lines: data.lines.map(l => ({ ...l, status: "INVOICED", r365_payments: null })) };
+  assertEquals(stubThreadInvoices("conv-ll", null, unpaid), []);
+  // ... a card / online payment's proof (screenshots) is (11/17: CUS-0044's mints, paid by card)
+  assertEquals(stubThreadInvoices("conv-ll", null, unpaid, true), ["INV-2026-086418", "INV-2026-111111"]);
   // an archived order's thread is not used; no thread -> the paid invoices the quoted text names
   assertEquals(stubThreadInvoices("conv-old", "", data), []);
   assertEquals(stubThreadInvoices(null, "On Nov 3 Aleli wrote: Please see the attached invoice INV-2026-086418 and INV-2026-111111. Also i051432.", data), ["I051432", "INV-2026-086418"]);
@@ -214,4 +218,21 @@ Deno.test("the invoice PDF riding along a proof of payment is not a stub", () =>
   assert(!isInvoiceFile("Payment stub INV-2026-086418.pdf"));
   assert(!isInvoiceFile("Screenshot 2026-10-29 122852.png"));
   assert(!isInvoiceFile("image (3).png"));
+});
+
+// 11/17: "I had paid for this using the credit card and also shared the proof of payments as screenshots"
+Deno.test("our own words say it is paid - not a question, not a design proof", () => {
+  for (const t of ["Hi, The payments have been processed, PFA the proofs below  Thankyou,", "Hi, These were paid for. PFA the proof of payment.",
+    "This was paid. PFA the proof of payment.", "Hi Jemma, The payment has been processed, please find attached the proof of payment below.",
+    "Please find the attached paystub for INV-2026-086418", "Attached the check stub."]) assert(saysPaid(t), t);
+  for (const t of ["Has this been paid?", "Hi, can you confirm the payment has been processed?", "PFA the proofs for approval",
+    "Could you please advise me on the quantity in 1 case for coasters and napkins ?", "", "Please process the payment for the attached invoice."]) assert(!saysPaid(t), t);
+});
+
+Deno.test("a screenshot pasted in the e-mail is a stub; a signature logo is not", () => {
+  const att = (o: Record<string, unknown>) => ({ id: "a", name: "image.png", contentType: "image/png", size: 56_233, isInline: true, ...o });
+  assertEquals(isStubAttachment(att({})), "image/png");
+  assertEquals(isStubAttachment(att({ size: 62_868 })), "image/png");
+  assertEquals(isStubAttachment(att({ size: 22_943 })), null);
+  assertEquals(isStubAttachment(att({ size: 11_764, name: "img-34d9e196.png" })), null);
 });
