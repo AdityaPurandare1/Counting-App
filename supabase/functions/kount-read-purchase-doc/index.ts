@@ -18,9 +18,22 @@ import { corsHeaders } from '../_shared/cors.ts';
 import { AiRouterError } from '../_shared/ai-router.ts';
 import { MAX_BASE64_CHARS, readPurchasePdf } from '../_shared/purchase-doc.ts';
 
+// 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
+// keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
+function newApiKey(mapEnv: string, names: string[], legacyEnv: string): string {
+  try {
+    const m = JSON.parse(Deno.env.get(mapEnv) ?? "{}") as Record<string, string>;
+    for (const n of names) if (typeof m?.[n] === "string" && m[n]) return m[n];
+  } catch { /* fall through */ }
+  return Deno.env.get(legacyEnv) ?? "";
+}
+const NEW_SECRET_KEY = () => newApiKey("SUPABASE_SECRET_KEYS", ["keva_secret_2026_11", "default"], "SUPABASE_SERVICE_ROLE_KEY");
+const NEW_PUBLISHABLE_KEY = () => newApiKey("SUPABASE_PUBLISHABLE_KEYS", ["default"], "SUPABASE_ANON_KEY");
+
+
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || '';
-const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY') || '';
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
+const SUPABASE_ANON_KEY = NEW_PUBLISHABLE_KEY();
+const SUPABASE_SERVICE_ROLE_KEY = NEW_SECRET_KEY();
 
 const ALLOWED_ROLES = new Set(['admin', 'corporate']);
 // v0.96 (0148): the Order tracker permission; a row from before 0148 (no list) by its role, as before
