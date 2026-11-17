@@ -16,6 +16,9 @@ export const SCOPE = 'Mail.Read openid profile offline_access';
 // read sign-in above (and the 9 o'clock pull) never changes: until IT grants the Order Tracker app Mail.Send
 // (admin consent), this one request fails and the admin opens the e-mail in Outlook instead.
 export const SEND_SCOPE = 'https://graph.microsoft.com/Mail.Send';
+// v1.21: a draft in the connected mailbox (the payment request to AP with the invoice PDF attached), opened in
+// Outlook for the person to send. Asked for only then, like SEND_SCOPE; needs IT's consent for Mail.ReadWrite.
+export const DRAFT_SCOPE = 'https://graph.microsoft.com/Mail.ReadWrite';
 const AUTH = `https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0`;
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 
@@ -48,6 +51,18 @@ export async function refreshAccess(refreshToken: string, scope: string = SCOPE)
   const dead = code === 'invalid_grant' || code === 'interaction_required' || code === 'consent_required';
   throw new GraphError(r.status, code, dead ? 'The Outlook sign-in has expired — reconnect Outlook in the Order tracker Inbox.'
     : String(r.json.error_description ?? 'Could not refresh the Outlook sign-in').slice(0, 300), dead);
+}
+
+/** A Graph POST whose reply is wanted (a new draft: its id and Outlook link). Tried once. */
+export async function graphPostJson<T = Record<string, unknown>>(accessToken: string, path: string, body: unknown): Promise<T> {
+  const r = await fetch(GRAPH + path, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', Prefer: 'IdType="ImmutableId"' },
+    body: JSON.stringify(body),
+  });
+  const json = await r.json().catch(() => ({})) as T & { error?: { code?: string; message?: string } };
+  if (!r.ok) throw new GraphError(r.status, json.error?.code ?? '', `Outlook: ${json.error?.message ?? r.statusText}`.slice(0, 300), false);
+  return json;
 }
 
 /** GET a Graph path (or a full @odata.nextLink). Immutable ids, so a message moved between folders keeps its id. */

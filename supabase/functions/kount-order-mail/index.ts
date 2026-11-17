@@ -26,7 +26,7 @@ import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
-import { deviceCodePoll, deviceCodeStart, GraphError, graphGet, graphPost, refreshAccess, SEND_SCOPE } from './graph.ts';
+import { deviceCodePoll, deviceCodeStart, DRAFT_SCOPE, GraphError, graphGet, graphPost, graphPostJson, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { ALL_DOC_KINDS, isInvoiceFile, stubThreadInvoices, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 // 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
@@ -322,6 +322,62 @@ Deno.serve(async (req) => {
       const stats = blankStats(`approvals by ${caller.email}`);
       await approvalPhase(sb, stats);
       return json(200, { approved: stats.approved ?? 0, error: stats.approval_error ?? null });
+    }
+
+    if (action === 'draft_mail') {
+      // v1.21 the user: "new emails can be drafted in the app and opened in outlook to be sent" - the payment request
+      // to AP as a real draft in the connected mailbox, the invoice PDFs attached; the person sends it from Outlook.
+      // drafted = false with a reason when it can't (not_granted: IT has not given the app Mail.ReadWrite) - the admin
+      // then opens a new e-mail and downloads the PDFs instead.
+      const p = body as { to?: unknown; cc?: unknown; subject?: unknown; text?: unknown; document_ids?: unknown };
+      const isEmail = (x: unknown) => typeof x === 'string' && /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]+$/.test(x) && x.length <= 200;
+      const uuid = (x: unknown) => typeof x === 'string' && /^[0-9a-f-]{36}$/i.test(x);
+      const to = Array.isArray(p.to) ? p.to : [], cc = Array.isArray(p.cc) ? p.cc : [], docIds = Array.isArray(p.document_ids) ? p.document_ids : [];
+      const subject = typeof p.subject === 'string' ? p.subject.trim().slice(0, 300) : '';
+      const text = typeof p.text === 'string' ? p.text.slice(0, 8000) : '';
+      if (!to.length || to.length > 10 || cc.length > 10 || ![...to, ...cc].every(isEmail) || !subject || !text.trim() || docIds.length > 5 || !docIds.every(uuid)) {
+        return reject(400, 'The draft needs who it goes to, a subject, a message, and at most 5 documents.');
+      }
+      const { data: acct, error: aErr } = await sb.from('kount_ot_mail_account').select('mailbox, token_secret_id').eq('id', 1).single();
+      if (aErr) throw aErr;
+      if (!acct?.token_secret_id) return json(200, { drafted: false, reason: 'not_connected' });
+      if (String(acct.mailbox ?? '').toLowerCase() !== caller.email) return json(200, { drafted: false, reason: 'not_owner', mailbox: acct.mailbox ?? null });
+      const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+      if (tErr || !refresh) return json(200, { drafted: false, reason: 'not_connected' });
+      let token: string;
+      try {
+        token = (await refreshAccess(String(refresh), DRAFT_SCOPE)).access_token;
+      } catch (e) {
+        if (e instanceof GraphError) return json(200, { drafted: false, reason: 'not_granted', detail: e.message.slice(0, 200) });
+        throw e;
+      }
+      // the tracker's own documents only (an invoice / quote / stub saved on an order), as files on the draft
+      const attachments: Array<Record<string, unknown>> = [];
+      const skipped: string[] = [];
+      if (docIds.length) {
+        const { data: docs, error: dErr } = await sb.from('kount_ot_documents').select('id, kind, doc_number, file_name, storage_path, order_id').in('id', docIds as string[]);
+        if (dErr) throw dErr;
+        for (const d of docs ?? []) {
+          if (!d.storage_path || !d.order_id) continue;
+          const name = String(d.file_name || `${d.doc_number ?? d.kind}.pdf`).slice(0, 200);
+          const { data: blob, error: sErr } = await sb.storage.from(BUCKET).download(d.storage_path);
+          if (sErr || !blob) { skipped.push(name); continue; }
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          if (bytes.length > 3 * 1024 * 1024) { skipped.push(name); continue; }      // Graph's limit for a file sent inline
+          attachments.push({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: blob.type || 'application/pdf', contentBytes: toBase64(bytes) });
+        }
+      }
+      const rcpt = (xs: unknown[]) => xs.map(a => ({ emailAddress: { address: String(a) } }));
+      try {
+        const draft = await graphPostJson<{ id?: string; webLink?: string }>(token, '/me/messages', {
+          subject, body: { contentType: 'Text', content: text }, toRecipients: rcpt(to), ccRecipients: rcpt(cc), attachments,
+        });
+        return json(200, { drafted: true, link: draft.webLink ?? null, attached: attachments.length, skipped });
+      } catch (e) {
+        if (e instanceof GraphError && (e.status === 401 || e.status === 403)) return json(200, { drafted: false, reason: 'not_granted', detail: e.message.slice(0, 200) });
+        if (e instanceof GraphError) return json(200, { drafted: false, detail: e.message.slice(0, 200) });
+        throw e;
+      }
     }
 
     if (action === 'accounting') {
