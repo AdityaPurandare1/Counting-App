@@ -273,6 +273,50 @@ export function isInvoiceFile(name: string | null | undefined): boolean {
   return /(invoice|quote|estimate|INV-[0-9]{4}-|Q-[0-9]{4}-)/i.test(n) && !/(stub|remit|payment|receipt|proof)/i.test(n);
 }
 
+/** What the reader says a file proves (purchase-doc SCHEMA: payment_proof, paid_invoices, payment_reference). */
+export interface ProofRead {
+  doc_kind?: string;
+  payment_proof?: boolean;
+  paid_invoices?: ReadonlyArray<{ invoice_number?: string; amount?: number }>;
+  payment_reference?: string;
+}
+export interface ProofMatch { token: string; amount: number; total: number | null; full: boolean }
+interface ProofData {
+  orders: ReadonlyArray<{ id: string; archived_at?: string | null }>;
+  lines: ReadonlyArray<{ order_id: string; invoice_number?: string | null; status: string; qty?: number | null; unit_price?: number | null }>;
+  documents: ReadonlyArray<{ order_id?: string | null; kind: string; doc_number?: string | null; total?: number | null }>;
+}
+/** The tracked invoices a read payment proof pays (11/17: "Payment Received! ... invoice INV-2026-581270, Amount $547.90"):
+ *  each printed invoice # a live order carries (compared as the pull compares them), the amount paid toward it and the
+ *  invoice's total (its PDF's, else its lines'); full = the whole invoice is paid (the PDF total within $1 or 1%, or at
+ *  least the lines' total, which leaves out tax and shipping). A part payment
+ *  (a deposit) is not full; neither is one with no amount or no total to check against. */
+export function proofMatches(proof: ProofRead | null | undefined, data: ProofData): ProofMatch[] {
+  if (!proof?.payment_proof) return [];
+  const live = new Set(data.orders.filter(o => !o.archived_at).map(o => o.id));
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  const out = new Map<string, ProofMatch>();
+  for (const p of proof.paid_invoices ?? []) {
+    const tok = invoiceToken(p.invoice_number);
+    if (!tok) continue;
+    const ls = data.lines.filter(l => live.has(l.order_id) && l.status !== 'CANCELLED' && !!l.invoice_number && invoiceToken(l.invoice_number) === tok);
+    if (!ls.length) continue;
+    const doc = data.documents.find(d => d.kind === 'invoice' && !!d.order_id && live.has(d.order_id) && invoiceToken(d.doc_number) === tok && Number(d.total) > 0);
+    const total = doc ? r2(Number(doc.total)) : (r2(ls.reduce((t, l) => t + (Number(l.qty) || 0) * (Number(l.unit_price) || 0), 0)) || null);
+    const amount = r2((out.get(tok)?.amount ?? 0) + (Number(p.amount) || 0));
+    const tol = total ? Math.max(1, total * 0.01) : 0;
+    // the PDF's total is what was owed; the lines leave out tax / shipping, so against them paying at least as much is in full
+    const full = !!total && amount > 0 && (doc ? Math.abs(amount - total) <= tol : amount >= total - tol);
+    out.set(tok, { token: tok, amount, total, full });
+  }
+  return [...out.values()];
+}
+
+/** The invoice numbers a payment proof prints, normalized (for a proof whose invoices are not tracked yet). */
+export function proofPrinted(proof: ProofRead | null | undefined): string[] {
+  return [...new Set((proof?.paid_invoices ?? []).map(p => invoiceToken(p.invoice_number)).filter(Boolean))];
+}
+
 /** Our own words say it is paid ("The payments have been processed, PFA the proofs below", "These were paid for.",
  *  "This was paid. PFA the proof of payment.") - in a sentence that is not a question ("Has this been paid?"). */
 const PAID_SAID = /\b(?:has|have|was|were) (?:been )?paid\b|\bpaid (?:for|it|this|these|them|via|by|with|today|in full)\b|\bpayments? (?:has|have|was|were|is|are) (?:been )?(?:processed|made|sent|completed|done)\b|\bproofs? of payment\b|\bpayment (?:proofs?|confirmations?|receipts?)\b|\bremittance\b|\bpay ?stubs?\b|\bpayment stubs?\b|\bcheck stubs?\b/i;

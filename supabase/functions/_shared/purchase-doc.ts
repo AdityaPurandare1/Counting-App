@@ -35,6 +35,21 @@ export const SCHEMA = {
     subtotal: { type: 'number', description: 'Subtotal before tax / freight exactly as printed; 0 if none printed.' },
     total: { type: 'number', description: 'Grand total exactly as printed; 0 if none printed.' },
     terms: { type: 'string', description: 'Payment terms exactly as printed (e.g. "Due on Receipt", "Net 30", "50% deposit"). Empty string if none printed.' },
+    payment_proof: { type: 'boolean', description: 'true when this records a payment already MADE or RECEIVED: a payment receipt or confirmation ("Payment Received", "Thank you for your payment", "Payment successful"), a card or bank receipt, a remittance advice or check stub, an invoice stamped PAID with nothing left due. false for an invoice or quote still asking for payment, artwork / design proofs, product photos, logos, signatures, anything else.' },
+    paid_invoices: {
+      type: 'array',
+      description: 'When payment_proof is true: every invoice the payment is for, with the amount paid for it, exactly as printed (a check stub may list several). Empty array when payment_proof is false.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          invoice_number: { type: 'string', description: 'The invoice number as printed (e.g. "INV-2026-581270", "i051027"). Empty string if none is printed.' },
+          amount: { type: 'number', description: 'The amount paid toward that invoice as printed; 0 if not printed.' },
+        },
+        required: ['invoice_number', 'amount'],
+      },
+    },
+    payment_reference: { type: 'string', description: 'The payment, check, ACH or confirmation number printed on a payment proof (e.g. "ACH - 23402"); empty string if none or not a payment proof.' },
     lines: {
       type: 'array',
       description: 'Every line on the document, in order. Merge a line that wraps over several rows into one.',
@@ -55,7 +70,7 @@ export const SCHEMA = {
       },
     },
   },
-  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'refers_to', 'subtotal', 'total', 'terms', 'lines'],
+  required: ['doc_kind', 'is_credit', 'vendor_name', 'doc_number', 'doc_date', 'order_number', 'bill_to', 'ship_to', 'expected_date', 'tracking_numbers', 'refers_to', 'subtotal', 'total', 'terms', 'payment_proof', 'paid_invoices', 'payment_reference', 'lines'],
 } as const;
 
 export const SYSTEM =
@@ -64,10 +79,25 @@ export const SYSTEM =
   'printed, per the response schema. Report numbers as printed even when they do not add up -- a person reviews the result and ' +
   'checks it against the PDF, so a silently corrected number is worse than a visible mismatch. Numbers are plain (no currency ' +
   'symbols, no thousands separators). Keep the document\'s own number (doc_number) separate from the customer purchase order ' +
-  'number it references (order_number), and from other invoices it says it is for (refers_to).';
+  'number it references (order_number), and from other invoices it says it is for (refers_to). It may instead be a proof that a ' +
+  'payment was made -- a "Payment Received" confirmation page (often a screenshot of the vendor payment page), a card receipt, ' +
+  'a remittance or a check stub: then set payment_proof and list each invoice it paid with its amount (paid_invoices), as printed. ' +
+  'A design or artwork "proof" sent for approval is not a payment proof.';
 
 /** base64 of a PDF -> the document as SCHEMA describes it. Throws AiRouterError. */
 export async function readPurchasePdf(a: { pdf: string; fileName: string; flow: string; actorId?: string; metadata?: Record<string, unknown> }) {
+  return readPurchaseFile({ data: a.pdf, mediaType: 'application/pdf', fileName: a.fileName, flow: a.flow, actorId: a.actorId, metadata: a.metadata });
+}
+
+/** The image types Claude reads (a payment screenshot, a photo of a receipt). */
+export const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+/** base64 of a PDF or an image (11/17: card-payment proofs are screenshots) -> the document as SCHEMA describes it.
+ *  Throws AiRouterError. */
+export async function readPurchaseFile(a: { data: string; mediaType: string; fileName: string; flow: string; actorId?: string; metadata?: Record<string, unknown> }) {
+  const file = a.mediaType === 'application/pdf'
+    ? { type: 'document' as const, source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: a.data }, title: a.fileName }
+    : { type: 'image' as const, source: { type: 'base64' as const, media_type: IMAGE_TYPES.includes(a.mediaType) ? a.mediaType : 'image/png', data: a.data } };
   const result = await routeClaude({
     flow: a.flow,
     kevaosFlow: 'ask',
@@ -77,7 +107,7 @@ export async function readPurchasePdf(a: { pdf: string; fileName: string; flow: 
     messages: [{
       role: 'user',
       content: [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: a.pdf }, title: a.fileName },
+        file,
         { type: 'text', text: 'Extract this document per the schema.' },
       ],
     }],

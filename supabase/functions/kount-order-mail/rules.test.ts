@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { isInvoiceFile, saysPaid, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
+import { isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -235,4 +235,68 @@ Deno.test("a screenshot pasted in the e-mail is a stub; a signature logo is not"
   assertEquals(isStubAttachment(att({ size: 62_868 })), "image/png");
   assertEquals(isStubAttachment(att({ size: 22_943 })), null);
   assertEquals(isStubAttachment(att({ size: 11_764, name: "img-34d9e196.png" })), null);
+});
+
+// 11/17: CUS-0044's mints, paid by card - the proofs are "Payment Received!" screenshots of E&E's pay page
+const PROOF_DATA = {
+  orders: [{ id: "cus44" }, { id: "ose40" }, { id: "old", archived_at: "2026-10-01" }],
+  lines: [
+    ...["INV-2026-208456", "INV-2026-581270", "INV-2026-913653"].map(n => ({ order_id: "cus44", invoice_number: n, status: "INVOICED", qty: 5, unit_price: 98.72 })),
+    { order_id: "ose40", invoice_number: "i051027", status: "INVOICED", qty: 10000, unit_price: 0.31 },
+    { order_id: "old", invoice_number: "INV-2026-782617", status: "INVOICED", qty: 1, unit_price: 528.15 },
+  ],
+  documents: [
+    { order_id: "cus44", kind: "invoice", doc_number: "INV-2026-208456", total: 547.9 },
+    { order_id: "cus44", kind: "invoice", doc_number: "INV-2026-581270", total: 547.9 },
+    { order_id: "cus44", kind: "invoice", doc_number: "INV-2026-913653", total: 533.09 },
+    { order_id: "ose40", kind: "invoice", doc_number: "i051027", total: 3100 },
+  ],
+};
+
+Deno.test("a payment screenshot pays the tracked invoice it prints, in full", () => {
+  const shot = (n: string, amount: number) => ({ doc_kind: "other", payment_proof: true, paid_invoices: [{ invoice_number: n, amount }], payment_reference: "" });
+  assertEquals(proofMatches(shot("INV-2026-913653", 533.09), PROOF_DATA), [{ token: "INV-2026-913653", amount: 533.09, total: 533.09, full: true }]);
+  assertEquals(proofMatches(shot("INV-2026-208456", 547.9), PROOF_DATA), [{ token: "INV-2026-208456", amount: 547.9, total: 547.9, full: true }]);
+  // the PDF's total wins over the lines' (5 x $98.72 = $493.60 before tax / shipping)
+  assertEquals(proofMatches(shot("inv-2026-581270", 547.9), PROOF_DATA)[0].total, 547.9);
+  // an invoice on no live order (archived, or not tracked at all) is not matched ...
+  assertEquals(proofMatches(shot("INV-2026-782617", 528.15), PROOF_DATA), []);
+  assertEquals(proofMatches(shot("INV-2026-999999", 10), PROOF_DATA), []);
+  // ... but its number is still printed, for the e-mail / thread fallback
+  assertEquals(proofPrinted(shot("INV-2026-782617 ", 528.15)), ["INV-2026-782617"]);
+});
+
+Deno.test("a vendor's receipt pays its invoice whatever the case (Everything Promo: I051027 vs i051027)", () => {
+  const r = proofMatches({ doc_kind: "receipt", payment_proof: true, paid_invoices: [{ invoice_number: "I051027", amount: 3100 }] }, PROOF_DATA);
+  assertEquals(r, [{ token: "I051027", amount: 3100, total: 3100, full: true }]);
+});
+
+Deno.test("not paid in full: a deposit, a different amount, no amount, not a payment proof", () => {
+  const one = (amount: number, payment_proof = true) => proofMatches({ payment_proof, paid_invoices: [{ invoice_number: "I051027", amount }] }, PROOF_DATA);
+  assertEquals(one(1550)[0].full, false, "a 50% deposit");
+  assertEquals(one(3150)[0].full, false, "more than the invoice");
+  assertEquals(one(3099.5)[0].full, true, "within a dollar");
+  assertEquals(one(0)[0].full, false, "no amount printed");
+  assertEquals(one(3100, false), [], "a design proof / anything that is not a payment");
+  assertEquals(proofMatches(null, PROOF_DATA), []);
+  assertEquals(proofPrinted({ payment_proof: false, paid_invoices: [] }), []);
+});
+
+Deno.test("a stub paying several invoices; two payments toward one invoice add up", () => {
+  const r = proofMatches({ payment_proof: true, payment_reference: "ACH - 23402", paid_invoices: [
+    { invoice_number: "INV-2026-208456", amount: 547.9 }, { invoice_number: "INV-2026-913653", amount: 300 }, { invoice_number: "INV-2026-913653", amount: 233.09 },
+    { invoice_number: "", amount: 12 },
+  ] }, PROOF_DATA);
+  assertEquals(r.map(m => [m.token, m.amount, m.full]), [["INV-2026-208456", 547.9, true], ["INV-2026-913653", 533.09, true]]);
+});
+
+Deno.test("no invoice PDF: against the lines (no tax / shipping) paying at least their total is in full", () => {
+  const data = { ...PROOF_DATA, documents: [] };
+  const one = (amount: number) => proofMatches({ payment_proof: true, paid_invoices: [{ invoice_number: "INV-2026-913653", amount }] }, data)[0];
+  assertEquals(one(533.09), { token: "INV-2026-913653", amount: 533.09, total: 493.6, full: true });
+  assertEquals(one(493.6).full, true);
+  assertEquals(one(250).full, false, "a deposit");
+  // a cancelled line does not count toward the total; an order with only cancelled lines is not matched
+  const cancelled = { ...data, lines: data.lines.map(l => l.order_id === "cus44" ? { ...l, status: "CANCELLED" } : l) };
+  assertEquals(proofMatches({ payment_proof: true, paid_invoices: [{ invoice_number: "INV-2026-913653", amount: 533.09 }] }, cancelled), []);
 });
