@@ -11,6 +11,9 @@
 //   {action:'cron'}      pg_cron 'kount-order-mail-morning' (x-kount-cron secret); works only
 //                        in the 9 o'clock hour in Los Angeles
 //   {action:'continue'}  the pull itself, when PDFs are left to read (same secret)
+//   {action:'stub_check'} pg_cron 'kount-order-mail-stubs' (0175, same secret): once an hour 10:30-17:30 in Los
+//                        Angeles after the morning pull, our own e-mails of the last 2 days are read for check stubs /
+//                        payment proofs again (the stub step alone), so a stub sent during the day is seen that day
 //   {action:'pull', since, domain?}  a person: PAST e-mails (v1.13) — that listed vendor's (or every listed vendor's)
 //                        PDFs and tracking since that day, through the same rules; the morning mark is left alone;
 //                        documents older than 30 days start no orders, older tracking moves no lines
@@ -25,7 +28,7 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchaseFile, readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, stubCheckDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, DRAFT_SCOPE, GraphError, graphGet, graphPost, graphPostJson, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { ALL_DOC_KINDS, isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, type ProofMatch, type ProofRead, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -115,9 +118,19 @@ Deno.serve(async (req) => {
 
   try {
     // ── the scheduled job (and its own continuation) ──
-    if (action === 'cron' || action === 'continue') {
+    if (action === 'cron' || action === 'continue' || action === 'stub_check') {
       const { data: secret } = await sb.rpc('kount_ot_mail_cron_secret');
       if (!secret || !safeEqual(req.headers.get('x-kount-cron') || '', String(secret))) return reject(401, 'Not allowed');
+      // 0175: the stubs checked again during the day - after the morning pull, 10:00-17:59 in Los Angeles
+      if (action === 'stub_check') {
+        const { data: acctNow, error: aErr } = await sb.from('kount_ot_mail_account').select('last_fetch_at').eq('id', 1).single();
+        if (aErr) throw aErr;
+        if (!stubCheckDue(acctNow?.last_fetch_at ?? null)) return json(200, { skipped: "outside 10:00-17:59 in Los Angeles, or today's morning pull has not run" });
+        const { data: locked } = await sb.rpc('kount_ot_mail_begin_run');
+        if (locked !== true) return json(200, { skipped: 'a pull is already running' });
+        background(runStubCheck(sb));
+        return json(202, { started: true });
+      }
       // 9:00-13:59 in Los Angeles while today's mail is unread: one pull a morning, a missed one retried until 2 pm (0160)
       if (action === 'cron') {
         const { data: acctNow, error: aErr } = await sb.from('kount_ot_mail_account').select('last_fetch_at').eq('id', 1).single();
@@ -422,6 +435,8 @@ interface Stats {
   paid_by_proof?: number;
   /** payment proof files read by the reader (v1.21) / why the stub step stopped short */
   proofs_read?: number; stub_note?: string;
+  /** stubs already on file from an e-mail inside h.wood, now found sent on to the vendor (0175) */
+  stubs_sent?: number;
   /** unpaid invoices searched / their lines stamped as sent to AP or GA (0174) / what was left or failed */
   acct_checked?: number; acct_sent?: number; acct_error?: string;
   /** lines whose payment request was found as our own e-mail to AP / GA (0174) */
@@ -977,8 +992,8 @@ const STUB_TERMS = ['paystub', 'pay stub', 'payment stub', 'check stub', 'remitt
 // each candidate file is read by the reader (v1.21): at most this many per pull, within this time; the rest next pull
 const STUB_READS_MAX = 10;
 const STUB_BUDGET_MS = 75_000;
-async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats) {
-  const sinceDay = new Date(Math.min(sinceMs || Date.now(), Date.now() - STUB_LOOKBACK_DAYS * 86_400_000)).toISOString().slice(0, 10);
+async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: number, stats: Stats, lookbackDays = STUB_LOOKBACK_DAYS) {
+  const sinceDay = new Date(Math.min(sinceMs || Date.now(), Date.now() - lookbackDays * 86_400_000)).toISOString().slice(0, 10);
   const until = Date.now() + STUB_BUDGET_MS;
   let data = await loadTracker(sb);
   const seenMsg = new Set<string>();
@@ -1008,6 +1023,9 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
         // filed already (a look-back pull meets it again): nothing to fetch
         const { data: filed } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).limit(1);
         if (filed?.length) continue;
+        // the limit is checked between e-mails, never inside one: an e-mail with a row is not looked at again, so all of
+        // its files are read in the same pull
+        if (reads >= STUB_READS_MAX || Date.now() > until) { cut = true; break; }
         const atts = await graphGet<{ value?: GraphAttachment[] }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments?$select=id,name,contentType,size,isInline`);
         const files = (atts.value ?? []).filter(a => isStubAttachment(a) && !isInvoiceFile(a.name));
         if (!files.length) continue;
@@ -1016,15 +1034,21 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
         for (const a of files) {
           const type = isStubAttachment(a);
           if (!type) continue;
-          if (reads >= STUB_READS_MAX || Date.now() > until) { cut = true; break; }
           const { data: seen } = await sb.from('kount_ot_inbox').select('id').eq('message_id', m.id).eq('attachment_id', a.id).maybeSingle();
           if (seen) continue;
           const full = await graphGet<{ contentBytes?: string }>(accessToken, `/me/messages/${encodeURIComponent(m.id)}/attachments/${encodeURIComponent(a.id)}`);
           if (!full.contentBytes) continue;
           const bytes = fromBase64(full.contentBytes);
           const hash = `stub:${await sha256Hex(bytes)}`;
-          const { data: dup } = await sb.from('kount_ot_inbox').select('id').eq('content_hash', hash).maybeSingle();
-          if (dup) continue;                                  // the same stub sent again
+          const { data: dup } = await sb.from('kount_ot_inbox').select('id, storage_path').eq('content_hash', hash).maybeSingle();
+          if (dup) {
+            // the same stub again (0175): filed from an e-mail inside h.wood, now sent on to the vendor -> it counts as sent
+            if (toVendor && dup.storage_path) {
+              const n = await markStubSent(sb, String(dup.storage_path), m.id);
+              if (n) { stats.stubs_sent = (stats.stubs_sent ?? 0) + n; data = await loadTracker(sb); }
+            }
+            continue;
+          }
           // v1.21 the reader: what this file proves - the invoices and amounts printed on it ("Payment Received!
           // ... INV-2026-581270 ... $547.90"), or that it is no payment proof at all (a logo, a design proof)
           let proof: ProofRead | null = null;
@@ -1060,7 +1084,14 @@ async function stubPhase(sb: SupabaseClient, accessToken: string, sinceMs: numbe
           if (!invoices.length) invoices = proofPrinted(proof);
           if (!invoices.length) invoices = ownRefs;
           if (!invoices.length && paidSaid) invoices = stubThreadInvoices(m.conversationId ?? null, m.body?.content ?? null, data);
-          if (!invoices.length) { await sb.storage.from(BUCKET).remove([path]); continue; }
+          if (!invoices.length) {
+            if (!proof) { await sb.storage.from(BUCKET).remove([path]); continue; }       // not read: tried again next pull
+            // read, a payment, but no invoice to put it on: kept as passed over (0175: the hourly check must not re-read it)
+            const { error } = await sb.from('kount_ot_inbox').insert({ ...base, state: 'ignored', parsed: { kind: 'payment', invoices: [], to_vendor: toVendor, read: proof },
+              decision: 'A payment proof naming no invoice the tracker knows (read by the tracker).', decided_by: 'morning mail pull' });
+            if (error && error.code !== '23505') throw error;
+            continue;
+          }
           const row = { ...base, state: 'pending', parsed: { kind: 'payment', invoices, to_vendor: toVendor, ...(proof ? { read: proof } : {}) },
             decision: `${proof?.payment_proof ? 'Payment proof' : 'Check stub'} for ${invoices.join(', ')}.` };
           const { error } = await sb.from('kount_ot_inbox').insert(row);
@@ -1099,6 +1130,49 @@ async function markPaidFromProof(sb: SupabaseClient, matches: ProofMatch[], proo
     n += ids.length;
   }
   return n;
+}
+
+/** The stub documents filed from this file (its storage path) that went only to people inside h.wood (to_vendor false):
+ *  sent to the vendor now, by e-mail `messageId` -> to_vendor true, so "Stubs to send" lets them go. Returns how many. */
+async function markStubSent(sb: SupabaseClient, storagePath: string, messageId: string): Promise<number> {
+  const { data: docs, error } = await sb.from('kount_ot_documents').select('id, parsed').eq('kind', 'payment').eq('storage_path', storagePath);
+  if (error) throw error;
+  let n = 0;
+  for (const d of (docs ?? []) as Array<{ id: string; parsed: Record<string, unknown> | null }>) {
+    if (d.parsed?.to_vendor !== false) continue;
+    const { error: upErr } = await sb.from('kount_ot_documents').update({ parsed: { ...d.parsed, to_vendor: true, sent_message_id: messageId } }).eq('id', d.id);
+    if (upErr) throw upErr;
+    n++;
+  }
+  return n;
+}
+
+/** 0175: the stubs checked again during the day. Our own e-mails of the last STUB_CHECK_DAYS days, the stub step alone
+ *  (no vendor PDFs, R365, accounting): a stub sent to the vendor at 2 pm leaves "Stubs to send" by 2:30. The morning's
+ *  last_run stays; this check is kept in it as stub_check. Runs under the pull lock (kount_ot_mail_begin_run). */
+const STUB_CHECK_DAYS = 2;
+async function runStubCheck(sb: SupabaseClient) {
+  const startedAt = nowIso();
+  const stats = blankStats('stub check');
+  try {
+    const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
+    if (error) throw error;
+    if (!refresh) throw new Error('Outlook is not connected.');
+    const tok = await refreshAccess(String(refresh));
+    if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+    await stubPhase(sb, tok.access_token, 0, stats, STUB_CHECK_DAYS);
+  } catch (e) {
+    stats.error = msg(e);
+    stats.reconnect = e instanceof GraphError && e.reauth;
+    console.error('[kount-order-mail] stub check failed:', stats.error);
+  } finally {
+    const check = { started_at: startedAt, finished_at: nowIso(), stubs: stats.stubs, stubs_sent: stats.stubs_sent ?? 0, proofs_read: stats.proofs_read ?? 0,
+      paid_by_proof: stats.paid_by_proof ?? 0, note: stats.stub_note ?? null, error: stats.error, reconnect: stats.reconnect };
+    const { data: a } = await sb.from('kount_ot_mail_account').select('last_run').eq('id', 1).single();
+    const prev = (a?.last_run ?? null) as Record<string, unknown> | null;
+    await sb.from('kount_ot_mail_account').update({ running_since: null, last_run: prev ? { ...prev, stub_check: check } : { ...stats, finished_at: nowIso(), stub_check: check },
+      updated_at: nowIso() }).eq('id', 1);
+  }
 }
 
 /** A vendor's own payment receipt (Everything Promo's "i051027 - Payment Receipt", 11/04, read as 'other' and passed

@@ -1672,3 +1672,18 @@ export function scheduledPullDue(lastFetchAt: string | null | undefined, now: Da
 export function morningPullMissed(lastFetchAt: string | null | undefined, now: Date = new Date()): boolean {
   return laClock(now).hour >= PULL_HOUR + 1 && !morningFetchDone(lastFetchAt, now);
 }
+
+/* ── stubs checked again during the day (0175) ───────────────────────────
+   The user, 11/17: "if the stubs are sent, can we get them checked again during the day after the daily run". After
+   the morning pull, pg_cron calls the stub step alone once an hour at :30, 10:30-17:30 Los Angeles time: our own
+   e-mails of the last 2 days, so a stub sent to the vendor during the day leaves "Stubs to send" within the hour. */
+export const STUB_CHECK_FROM = 10;
+/** The last hour a stub check runs in (its 17:30 call). */
+export const STUB_CHECK_UNTIL = 17;
+
+/** A daytime stub check is due: 10:00-17:59 in Los Angeles, once today's morning pull has read the mail (until then
+ *  the morning pull, which reads the stubs too, is still to come). */
+export function stubCheckDue(lastFetchAt: string | null | undefined, now: Date = new Date()): boolean {
+  const h = laClock(now).hour;
+  return h >= STUB_CHECK_FROM && h <= STUB_CHECK_UNTIL && morningFetchDone(lastFetchAt, now);
+}
