@@ -22,7 +22,7 @@
 // on a pinned model, data_collection=deny, usage logged), with Anthropic
 // direct as the fallback:
 //
-//   supabase secrets set KEVAOS_COUNTING_AI_KEY=...   ANTHROPIC_API_KEY=...
+//   supabase secrets set OPENROUTER_API_KEY=...   (the router is OpenRouter only since 2026-11-17)
 //
 // AUTH MODEL — deliberately stricter than parse-bottle-label
 // Supabase's default verify_jwt accepts the ANON key, which is public (it

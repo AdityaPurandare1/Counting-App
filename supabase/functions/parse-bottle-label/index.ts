@@ -4,11 +4,11 @@
 // structured JSON the mobile app can drop straight into the photo-entry form.
 //
 // Replaces the on-device Tesseract path AND the browser-side OpenAI path.
-// Routed through KevaOS's central AI connection (../_shared/ai-router.ts:
-// OpenRouter on a pinned model, data_collection=deny, usage logged), with
-// Anthropic direct as the fallback. Keys stay in Supabase secrets:
+// Routed through ../_shared/ai-router.ts: OpenRouter ONLY since 2026-11-17 (no
+// Claude / Anthropic key is used; data_collection=deny, usage logged). The key
+// stays in Supabase secrets:
 //
-//   supabase secrets set KEVAOS_COUNTING_AI_KEY=...   ANTHROPIC_API_KEY=...
+//   supabase secrets set OPENROUTER_API_KEY=...
 //
 // Why Sonnet 4.6: tradeoff chosen in favor of accuracy on harder labels
 // (faded print, partial views, ambiguous catalog matches) where Haiku 4.5

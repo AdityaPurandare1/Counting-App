@@ -1,29 +1,17 @@
 // supabase/functions/_shared/ai-router.ts
 //
-// One AI path for the counting apps: KevaOS's central AI connection.
+// One AI path for the counting apps: OPENROUTER ONLY.
 //
-//   1. KevaOS first -- POST /api/external/counting/ai (Restaurant-App), which
-//      runs the call through lib/ai/gateway: OpenRouter on the task's pinned
-//      model with data_collection=deny, KevaOS's Anthropic key as its fallback,
-//      usage logged by KevaOS to platform_ai_usage_events. Auth is a KevaOS
-//      partner API key with scope counting:ai, held here as a secret:
+// The user, 2026-11-17: "can we please check if any of the process is falling into claude API key ? I want all
+// the key usage to be open router only." Until then a call went KevaOS's gateway (when KEVAOS_COUNTING_AI_KEY was
+// set; its own fallback is KevaOS's Anthropic key), then OpenRouter, then Anthropic direct with ANTHROPIC_API_KEY.
+// The 30 days before showed 63 photo-label calls falling from OpenRouter (402 no credit, 401) to the Anthropic key
+// (all 401). Now every call goes to OpenRouter with the key in this project's Edge Function secrets
+// (OPENROUTER_API_KEY): Claude models by OpenRouter's ids, structured output via response_format json_schema,
+// provider.data_collection = 'deny'. When OpenRouter fails the call fails (AiRouterError with its status) -- the
+// callers already cope (photo labels fall back to on-device OCR). Nothing here reads ANTHROPIC_API_KEY.
 //
-//        KEVAOS_COUNTING_AI_KEY   (required for this step; unset = skipped)
-//        KEVAOS_AI_URL            (optional, default https://kevaos.ai/api/external/counting/ai)
-//
-//   2. OpenRouter direct with the OpenRouter key held in this project's Edge
-//      Function secrets (OPENROUTER_API_KEY), when KevaOS is not configured or
-//      fails. Same Claude models (anthropic/claude-sonnet-4.6 / haiku-4.5),
-//      structured output via response_format json_schema, and KevaOS's policy
-//      provider.data_collection = 'deny'. Added 2026-10-26: the Anthropic
-//      account ran out of credits and photo labels fell back to on-device OCR.
-//
-//   3. Anthropic direct with our own key (ANTHROPIC_API_KEY) when neither of
-//      the above is configured or both fail. Structured output is enforced
-//      natively on this path.
-//
-// KevaOS logs the calls it serves; this module logs only what KevaOS did not:
-// a failed KevaOS attempt, and every OpenRouter / Anthropic-direct call.
+// Every call is logged to platform_ai_usage_events (module 'counting', metadata.provider 'openrouter').
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
@@ -42,8 +30,6 @@ const NEW_PUBLISHABLE_KEY = () => newApiKey("SUPABASE_PUBLISHABLE_KEYS", ["defau
 
 export type ClaudeModel = 'claude-sonnet-4-6' | 'claude-haiku-4-5' | 'claude-opus-5-5';
 
-const KEVAOS_DEFAULT_URL = 'https://kevaos.ai/api/external/counting/ai';
-const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
 // The same models, by OpenRouter's ids (both take images and structured output).
@@ -60,11 +46,7 @@ const PRICE: Record<ClaudeModel, { input: number; output: number; cacheRead: num
   'claude-opus-5-5': { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 },
 };
 
-// KevaOS gets a shorter leash so a slow attempt still leaves time for the
-// Anthropic fallback inside the Edge Function's wall clock.
-const KEVAOS_TIMEOUT_MS = 45_000;
 const OPENROUTER_TIMEOUT_MS = 50_000;
-const ANTHROPIC_TIMEOUT_MS = 60_000;
 
 export type TextBlock = { type: 'text'; text: string };
 export type ImageBlock = { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
@@ -80,9 +62,9 @@ export interface ChatMessage {
 export interface AiRequest {
   /** Stable code-path name, logged as flow_name (e.g. 'counting-photo-label'). */
   flow: string;
-  /** Which KevaOS counting flow serves this call (picks the gateway task there). */
-  kevaosFlow: 'photo-label' | 'ask';
-  /** Model for the Anthropic-direct fallback. KevaOS picks its own (the task's pinned model). */
+  /** Which KevaOS counting flow this was (kept for the callers; unused since the router is OpenRouter only). */
+  kevaosFlow?: 'photo-label' | 'ask';
+  /** The Claude model, sent to OpenRouter by its id (OPENROUTER_MODEL). */
   model: ClaudeModel;
   maxTokens: number;
   /** System prompt parts. `cache: true` puts a prompt-cache breakpoint after that part. */
@@ -106,13 +88,13 @@ export interface AiResult {
   /** Parsed reply, present when jsonSchema was given. */
   json?: unknown;
   route: Route;
-  /** The model that answered (KevaOS reports the one its gateway used). */
+  /** The model that answered (as OpenRouter reports it). */
   model: string;
-  /** Token usage of the Anthropic-direct path; zero when KevaOS served the call (it logs its own). */
+  /** Token usage as OpenRouter reports it. */
   usage: AiUsage;
 }
 
-export type Route = 'kevaos' | 'openrouter' | 'anthropic';
+export type Route = 'openrouter';
 
 export class AiRouterError extends Error {
   constructor(message: string, readonly status: number) {
@@ -148,24 +130,6 @@ export function estimateCost(model: ClaudeModel, u: AiUsage): number {
   return Math.round(usd * 1e6) / 1e6;
 }
 
-export function buildAnthropicBody(req: AiRequest): Record<string, unknown> {
-  const body: Record<string, unknown> = {
-    model: req.model,
-    max_tokens: req.maxTokens,
-    messages: req.messages,
-  };
-  if (req.system && req.system.length > 0) {
-    body.system = req.system.map((s) =>
-      s.cache ? { type: 'text', text: s.text, cache_control: { type: 'ephemeral' } } : { type: 'text', text: s.text }
-    );
-  }
-  if (req.jsonSchema) body.output_config = { format: { type: 'json_schema', schema: req.jsonSchema.schema } };
-  // Opus 5.5 can decline in its safety categories; let the server retry on its
-  // default fallback instead of returning a refusal (beta header added in callAnthropic).
-  if (req.model === 'claude-opus-5-5') body.fallbacks = 'default';
-  return body;
-}
-
 /** True when any message carries a PDF document block. */
 export function hasDocument(req: AiRequest): boolean {
   return req.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'document'));
@@ -176,123 +140,6 @@ function num(v: unknown): number {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
-/** The structured-output contract, stated in the prompt for the KevaOS path (its gateway returns text). */
-export function jsonInstruction(schema: Record<string, unknown>): string {
-  return 'Respond with ONLY a JSON object -- no prose, no markdown, no code fences -- that matches this JSON Schema exactly:\n' +
-    JSON.stringify(schema);
-}
-
-/** The KevaOS request body. System parts are joined; the schema contract is appended to them. */
-export function buildKevaosBody(req: AiRequest): Record<string, unknown> {
-  const parts = (req.system || []).map((s) => s.text);
-  if (req.jsonSchema) parts.push(jsonInstruction(req.jsonSchema.schema));
-  const body: Record<string, unknown> = {
-    flow: req.kevaosFlow,
-    messages: req.messages,
-    max_tokens: req.maxTokens,
-  };
-  if (parts.length > 0) body.system = parts.join('\n\n');
-  if (req.actorId) body.actor_id = req.actorId;
-  return body;
-}
-
-async function callKevaos(req: AiRequest, key: string, url: string): Promise<Attempt> {
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + key },
-      body: JSON.stringify(buildKevaosBody(req)),
-      signal: AbortSignal.timeout(KEVAOS_TIMEOUT_MS),
-    });
-  } catch (e) {
-    return { ok: false, status: 0, model: 'kevaos', usage: { ...ZERO_USAGE }, error: 'fetch: ' + (e as Error).message };
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    return { ok: false, status: res.status, model: 'kevaos', usage: { ...ZERO_USAGE }, error: detail.slice(0, 300) };
-  }
-  let data: Record<string, unknown>;
-  try {
-    data = await res.json();
-  } catch {
-    return { ok: false, status: res.status, model: 'kevaos', usage: { ...ZERO_USAGE }, error: 'non-JSON response' };
-  }
-  const text = typeof data.text === 'string' ? data.text : '';
-  const model = typeof data.model === 'string' && data.model ? data.model : 'kevaos';
-  if (!text) return { ok: false, status: 200, model, usage: { ...ZERO_USAGE }, error: 'empty reply' };
-  const attempt: Attempt = { ok: true, status: 200, text, model, usage: { ...ZERO_USAGE } };
-  if (req.jsonSchema) {
-    try {
-      attempt.json = parseJsonReply(text);
-    } catch {
-      return { ...attempt, ok: false, error: 'reply was not valid JSON' };
-    }
-  }
-  return attempt;
-}
-
-async function callAnthropic(req: AiRequest, key: string): Promise<Attempt> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'x-api-key': key,
-    'anthropic-version': '2023-06-01',
-  };
-  // Raw HTTP needs the beta flags sent by hand (the SDKs add them).
-  const betas: string[] = [];
-  if (req.jsonSchema) betas.push('structured-outputs-2025-11-13');
-  if (req.model === 'claude-opus-5-5') betas.push('server-side-fallback-2026-07-01');
-  if (betas.length) headers['anthropic-beta'] = betas.join(',');
-  let res: Response;
-  try {
-    res = await fetch(ANTHROPIC_URL, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(buildAnthropicBody(req)),
-      signal: AbortSignal.timeout(ANTHROPIC_TIMEOUT_MS),
-    });
-  } catch (e) {
-    return { ok: false, status: 0, model: req.model, usage: { ...ZERO_USAGE }, error: 'fetch: ' + (e as Error).message };
-  }
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '');
-    return { ok: false, status: res.status, model: req.model, usage: { ...ZERO_USAGE }, error: detail.slice(0, 300) };
-  }
-  let data: Record<string, unknown>;
-  try {
-    data = await res.json();
-  } catch {
-    return { ok: false, status: res.status, model: req.model, usage: { ...ZERO_USAGE }, error: 'non-JSON response' };
-  }
-  const u = (data.usage || {}) as Record<string, unknown>;
-  const usage: AiUsage = {
-    inputTokens: num(u.input_tokens),
-    outputTokens: num(u.output_tokens),
-    cacheReadTokens: num(u.cache_read_input_tokens),
-    cacheWriteTokens: num(u.cache_creation_input_tokens),
-  };
-  // A refusal is HTTP 200 with stop_reason 'refusal' -- never read its content as an answer.
-  if (data.stop_reason === 'refusal') {
-    return { ok: false, status: 422, model: req.model, usage, requestId: (data.id as string) || null, error: 'refusal' };
-  }
-  let text = '';
-  if (Array.isArray(data.content)) {
-    for (const b of data.content as Array<{ type?: string; text?: string }>) {
-      if (b && b.type === 'text' && typeof b.text === 'string') text += b.text;
-    }
-  }
-  const attempt: Attempt = { ok: true, status: 200, text, model: req.model, usage, requestId: (data.id as string) || null };
-  if (req.jsonSchema) {
-    try {
-      attempt.json = parseJsonReply(text);
-    } catch {
-      return { ...attempt, ok: false, error: 'reply was not valid JSON' };
-    }
-  }
-  return attempt;
-}
-
-/** One Anthropic-style content block in OpenRouter's (OpenAI chat) shape. */
 function toOpenRouterPart(b: ContentBlock): Record<string, unknown> {
   if (b.type === 'image') {
     return { type: 'image_url', image_url: { url: 'data:' + b.source.media_type + ';base64,' + b.source.data } };
@@ -424,15 +271,13 @@ function logAttempt(req: AiRequest, route: Route, a: Attempt, latencyMs: number,
   const url = Deno.env.get('SUPABASE_URL');
   const key = NEW_SECRET_KEY();
   if (!url || !key) return;
-  const costUsd = route === 'anthropic' ? estimateCost(req.model, a.usage)
-    : route === 'openrouter' ? (a.costUsd ?? estimateCost(req.model, a.usage)) : 0;
+  const costUsd = a.costUsd ?? estimateCost(req.model, a.usage);
   const row = {
     business_date: businessDate(),
     actor_id: req.actorId ?? null,
     actor_type: 'manual',
-    // The table's CHECK allows anthropic/openai/other; a failed KevaOS hop is
-    // 'other' with the route in metadata, as KevaOS logs non-listed providers.
-    provider: route === 'anthropic' ? 'anthropic' : 'other',
+    // The table's CHECK allows anthropic/openai/other: OpenRouter is 'other', the route in metadata.
+    provider: 'other',
     model: a.model,
     flow_name: req.flow,
     module: 'counting',
@@ -463,55 +308,18 @@ function logAttempt(req: AiRequest, route: Route, a: Attempt, latencyMs: number,
 }
 
 /**
- * Run one Claude request: KevaOS's central AI connection first, then OpenRouter
- * direct, then Anthropic direct -- each tried only when its secret is set, and
- * the next one on any failure. Throws AiRouterError (with the last upstream
- * status) only when every configured path fails.
+ * Run one Claude request on OpenRouter (the only path, 11/17). Throws AiRouterError with OpenRouter's status when
+ * it fails or the key is not set.
  */
 export async function routeClaude(req: AiRequest): Promise<AiResult> {
-  const kvKey = (Deno.env.get('KEVAOS_COUNTING_AI_KEY') || '').trim();
-  const kvUrl = (Deno.env.get('KEVAOS_AI_URL') || '').trim() || KEVAOS_DEFAULT_URL;
   const orKey = (Deno.env.get('OPENROUTER_API_KEY') || '').trim();
-  const anKey = (Deno.env.get('ANTHROPIC_API_KEY') || '').trim();
-  if (!kvKey && !orKey && !anKey) {
-    throw new AiRouterError('No AI configured in Edge Function secrets (KEVAOS_COUNTING_AI_KEY, OPENROUTER_API_KEY or ANTHROPIC_API_KEY)', 500);
-  }
-
-  let fellBackFrom: string | null = null;
-  let lastStatus = 502;
-  if (kvKey && !hasDocument(req)) {
-    const t0 = Date.now();
-    const a = await callKevaos(req, kvKey, kvUrl);
-    if (a.ok) {
-      // KevaOS's gateway logged this call; logging it here would count it twice.
-      return { text: a.text || '', json: a.json, route: 'kevaos', model: a.model, usage: a.usage };
-    }
-    logAttempt(req, 'kevaos', a, Date.now() - t0, {});
-    console.warn('[ai-router] kevaos failed, falling back:', a.status, a.error);
-    fellBackFrom = 'kevaos ' + (a.status || 'network') + ': ' + (a.error || '').slice(0, 120);
-    lastStatus = a.status || 502;
-  }
-
-  if (orKey) {
-    const t0 = Date.now();
-    const o = await callOpenRouter(req, orKey);
-    logAttempt(req, 'openrouter', o, Date.now() - t0, fellBackFrom ? { fell_back_from: fellBackFrom } : {});
-    if (o.ok) {
-      return { text: o.text || '', json: o.json, route: 'openrouter', model: o.model, usage: o.usage };
-    }
-    console.warn('[ai-router] openrouter failed, falling back:', o.status, o.error);
-    fellBackFrom = 'openrouter ' + (o.status || 'network') + ': ' + (o.error || '').slice(0, 120);
-    lastStatus = o.status || 502;
-  }
-
-  if (!anKey) throw new AiRouterError('AI request failed', lastStatus);
-
+  if (!orKey) throw new AiRouterError('No AI configured: OPENROUTER_API_KEY is not set in the Edge Function secrets', 500);
   const t0 = Date.now();
-  const b = await callAnthropic(req, anKey);
-  logAttempt(req, 'anthropic', b, Date.now() - t0, fellBackFrom ? { fell_back_from: fellBackFrom } : {});
-  if (!b.ok) {
-    console.error('[ai-router] anthropic failed:', b.status, b.error);
-    throw new AiRouterError('AI request failed', b.status || 502);
+  const o = await callOpenRouter(req, orKey);
+  logAttempt(req, 'openrouter', o, Date.now() - t0, {});
+  if (!o.ok) {
+    console.error('[ai-router] openrouter failed:', o.status, o.error);
+    throw new AiRouterError('AI request failed', o.status || 502);
   }
-  return { text: b.text || '', json: b.json, route: 'anthropic', model: b.model, usage: b.usage };
+  return { text: o.text || '', json: o.json, route: 'openrouter', model: o.model, usage: o.usage };
 }
