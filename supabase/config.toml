@@ -10,6 +10,10 @@ project_id = "counting-app"
 # pg_cron and the function's own continuation call it with x-kount-cron, not a user's sign-in
 verify_jwt = false
 
+[functions.kount-price-check]
+# 0176: pg_cron calls it with x-kount-cron (and the anon JWT); a person's JWT is checked in the function
+verify_jwt = false
+
 [functions.kount-chat-requests]
 # the Teams routine has no Supabase sign-in (0152, not deployed yet)
 verify_jwt = false
