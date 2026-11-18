@@ -2303,11 +2303,6 @@ html, body {
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l1.5 3.5 3.5.5-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5l3.5-.5z"/></svg>
           Ask AI
         </button>
-        <button onclick="openAPIKeySettings();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--text);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="10" r="3"/><path d="M8 8l5-5M11 5l2 2"/></svg>
-          AI Settings
-          <span id="headerAIKeyDot" style="margin-left:auto;width:6px;height:6px;border-radius:50%;background:var(--danger);display:none"></span>
-        </button>
         <div style="border-top:1px solid var(--border);margin:4px 0"></div>
         <button onclick="handleLogout();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--danger);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M6 2H4a2 2 0 00-2 2v8a2 2 0 002 2h2M10 12l4-4-4-4M14 8H6"/></svg>
@@ -2910,25 +2905,6 @@ html, body {
   </div>
 </div>
 
-<!-- ========== AI API KEY SETTINGS MODAL ========== -->
-<div class="modal-overlay hide" id="apiKeySettingsModal" onclick="closeAPIKeySettings(event)">
-  <div class="modal-sheet" onclick="event.stopPropagation()">
-    <h3>AI Settings <button class="close-x" onclick="closeAPIKeySettings()">X</button></h3>
-    <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
-      Photo labels and Ask AI run on the server through KevaOS's AI connection &mdash; no key needed on this phone. Optional: an OpenAI key saved here is used for label photos only if the server cannot be reached.
-    </div>
-    <div class="form-group">
-      <label>OpenAI API key <span style="color:var(--text-dim);font-weight:400">(optional offline fallback)</span></label>
-      <input class="form-input" id="openaiKeyInput" type="password" placeholder="sk-proj-... or sk-..." autocomplete="off" spellcheck="false">
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="submit-btn" onclick="saveAPIKey()" style="flex:1">Save</button>
-      <button class="submit-btn secondary" onclick="clearAPIKey()" style="background:var(--surface3);color:var(--text-muted)">Clear all</button>
-    </div>
-    <div id="apiKeyStatus" style="font-size:12px;margin-top:10px;text-align:center"></div>
-  </div>
-</div>
-
 <!-- ========== AI CHAT MODAL ========== -->
 <div class="modal-overlay hide" id="aiChatModal" onclick="closeAIChat(event)">
   <div class="modal-sheet" onclick="event.stopPropagation()" style="max-width:480px;height:85vh;max-height:85vh;display:flex;flex-direction:column;padding:0">
@@ -3203,7 +3179,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.34';
+const APP_VERSION = '2.35';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -17975,106 +17951,19 @@ function confirmAsync(message) {
      ask-ai. Both go through KevaOS's central AI connection (OpenRouter,
      data_collection=deny), with Anthropic direct as the fallback. Keys live
      in server secrets, never on the phone.
-   - Optional legacy fallback: an OpenAI key pasted on this device, used for
-     label photos only when the Edge Function fails.
+   - v2.35: OpenRouter only (no OpenAI / Anthropic key on the phone or the server).
    ================================================================ */
 // v2.22: the chat no longer uses a per-device Anthropic key -- drop any left
 // behind so a live key does not sit in localStorage on shared floor phones.
 try { localStorage.removeItem('hwood_anthropic_key'); } catch (e) {}
-const OPENAI_VISION_MODEL = 'gpt-4o-mini';              // vision model
-const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
-
-function getStoredOpenAIKey() {
-  try { return localStorage.getItem('hwood_openai_key') || ''; } catch (e) { return ''; }
-}
-
-function hasOpenAIKey() {
-  var k = getStoredOpenAIKey();
-  return !!(k && k.trim().length > 10);
-}
+// v2.35 (11/17, the user: all AI on OpenRouter): no OpenAI fallback any more - drop any key left on this phone.
+try { localStorage.removeItem('hwood_openai_key'); } catch (e) {}
 
 function updateAPIKeyIndicator() {
   var dot = document.getElementById('headerAIKeyDot');
   if (!dot) return;
   // v2.22: AI runs on server-side keys, so there is nothing to nag about.
   dot.style.display = 'none';
-}
-
-/* ---------- API KEY SETTINGS MODAL ---------- */
-function openAPIKeySettings() {
-  var oaInput = document.getElementById('openaiKeyInput');
-  var status = document.getElementById('apiKeyStatus');
-
-  // OpenAI field
-  var oa = getStoredOpenAIKey();
-  oaInput.value = '';
-  oaInput.placeholder = oa
-    ? 'Saved (****' + oa.slice(-4) + ') \u2014 paste a new one to replace'
-    : 'sk-proj-... or sk-...';
-
-  // Status line
-  status.textContent = oa
-    ? 'AI runs on the server. OpenAI fallback key saved on this device.'
-    : 'AI runs on the server \u2014 nothing to set up.';
-  status.style.color = 'var(--text-muted)';
-  document.getElementById('apiKeySettingsModal').classList.remove('hide');
-}
-
-function closeAPIKeySettings(evt) {
-  if (evt && evt.target !== evt.currentTarget) return;
-  document.getElementById('apiKeySettingsModal').classList.add('hide');
-}
-
-function saveAPIKey() {
-  var oaInput = document.getElementById('openaiKeyInput');
-  var status = document.getElementById('apiKeyStatus');
-
-  var oaKey = (oaInput.value || '').trim();
-
-  if (!oaKey) {
-    status.textContent = 'Paste a key, or tap Clear all to remove.';
-    status.style.color = 'var(--warning)';
-    return;
-  }
-
-  var saved = [];
-  var errors = [];
-
-  if (oaKey) {
-    if (!oaKey.startsWith('sk-')) {
-      errors.push("OpenAI key should start with sk-.");
-    } else {
-      try { localStorage.setItem('hwood_openai_key', oaKey); saved.push('OpenAI'); }
-      catch (e) { errors.push('Could not save OpenAI key (localStorage blocked).'); }
-    }
-  }
-
-  if (errors.length) {
-    status.textContent = errors.join(' ');
-    status.style.color = 'var(--danger)';
-    return;
-  }
-
-  oaInput.value = '';
-  status.textContent = 'Saved \u2713 ' + saved.join(' + ');
-  status.style.color = 'var(--success)';
-  updateAPIKeyIndicator();
-  showToast('AI key(s) saved', 'success');
-  setTimeout(closeAPIKeySettings, 900);
-}
-
-function clearAPIKey() {
-  try { localStorage.removeItem('hwood_anthropic_key'); } catch (e) {}
-  try { localStorage.removeItem('hwood_openai_key'); } catch (e) {}
-  var anthInput = document.getElementById('apiKeyInput');
-  var oaInput = document.getElementById('openaiKeyInput');
-  var status = document.getElementById('apiKeyStatus');
-  if (anthInput) { anthInput.value = ''; anthInput.placeholder = 'sk-ant-api03-...'; }
-  if (oaInput) { oaInput.value = ''; oaInput.placeholder = 'sk-proj-... or sk-...'; }
-  status.textContent = 'All keys cleared.';
-  status.style.color = 'var(--text-muted)';
-  updateAPIKeyIndicator();
-  showToast('AI keys cleared', 'success');
 }
 
 /* ---------- ASK AI CALL (v2.22) ---------- */
@@ -18106,75 +17995,6 @@ async function callAskAI(messages, system, maxTokens) {
   try { data = await res.json(); } catch (e) {}
   if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
   return (data && typeof data.text === 'string') ? data.text : '';
-}
-
-/* ---------- CLAUDE VISION: parse a photographed label ---------- */
-async function parseLabelWithOpenAI(imageDataUrl) {
-  var apiKey = getStoredOpenAIKey();
-  if (!apiKey) throw new Error('No OpenAI key \u2014 open AI Settings and paste your OpenAI key.');
-
-  // Build a compact list of known items for matching (limit to avoid token bloat)
-  var catalogLines = [];
-  var max = Math.min(itemMaster.length, 400);
-  for (var i = 0; i < max; i++) {
-    var it = itemMaster[i];
-    var line = (it.id || i) + '|' + (it.name || '') + (it.brand ? ' \u2014 ' + it.brand : '') + (it.size ? ' (' + it.size + ')' : '');
-    catalogLines.push(line);
-  }
-  var catalog = catalogLines.join('\n');
-
-  var systemPrompt =
-    'You are a bar/restaurant inventory assistant. Given a photo of a wine or liquor label/bottle, ' +
-    'extract key fields and match against the provided catalog when possible. ' +
-    'Always respond with STRICT JSON only \u2014 no prose, no markdown, no backticks. ' +
-    'Schema: {"name": string, "brand": string, "category": "wine"|"spirits"|"beer"|"food"|"other", ' +
-    '"vintage": string, "size": string, "details": string, "matchedId": string|null, "confidence": "high"|"medium"|"low"}. ' +
-    'Use matchedId ONLY if you are confident the photo corresponds to a catalog row (use its leading id before the pipe). ' +
-    'Leave fields as empty strings if not visible. Prefer exact brand + name from the label over the catalog spelling for name/brand, but do return matchedId when you can.';
-
-  // OpenAI Chat Completions accepts the image as a data URL directly under image_url.url
-  var body = {
-    model: OPENAI_VISION_MODEL,
-    max_tokens: 700,
-    temperature: 0.1,
-    response_format: { type: 'json_object' },
-    messages: [
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Catalog (id|name \u2014 brand (size)):\n' + catalog + '\n\nAnalyze the photo and return JSON only.' },
-          { type: 'image_url', image_url: { url: imageDataUrl, detail: 'low' } }
-        ]
-      }
-    ]
-  };
-
-  var res = await fetch(OPENAI_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + apiKey,
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    var errTxt = '';
-    try { var j = await res.json(); errTxt = j.error && j.error.message ? j.error.message : JSON.stringify(j); }
-    catch (e) { errTxt = 'HTTP ' + res.status; }
-    throw new Error(errTxt);
-  }
-
-  var data = await res.json();
-  var raw = (data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '';
-
-  // Strip any accidental code fences and extract first JSON block
-  var cleaned = String(raw).replace(/```json|```/g, '').trim();
-  var start = cleaned.indexOf('{');
-  var end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('AI response was not JSON: ' + raw.slice(0, 120));
-  return JSON.parse(cleaned.slice(start, end + 1));
 }
 
 /* ---------- populatePhotoFormFromParsed ---------- */
@@ -18340,9 +18160,9 @@ function populatePhotoFormFromParsed(parsed, statusEl) {
 }
 
 /* ---------- parseLabelWithClaude ---------- */
-/* Calls the parse-bottle-label Edge Function, which holds the Anthropic key
-   server-side and runs claude-haiku-4-5 with a cached system prompt + catalog.
-   Falls through to OpenAI/Tesseract via the parsePhotoLabel wrapper on error. */
+/* Calls the parse-bottle-label Edge Function, which runs a Claude model on OPENROUTER (v2.35: OpenRouter only,
+   the key in Supabase secrets) with a cached system prompt + catalog.
+   Falls through to the on-device reader via the parsePhotoLabel wrapper on error. */
 async function parseLabelWithClaude(imageDataUrl) {
   // Split the catalog into "carried" (this venue actually stocks it,
   // tracked in carriedSet) and "other" (broader inventory). Claude is
@@ -18453,9 +18273,8 @@ const PHOTO_AI_TIMEOUT_MS = 20000;
 
 /* ---------- parsePhotoLabel WRAPPER ---------- */
 /* Order of preference:
-   1. Claude (via Edge Function) — server-side key, best accuracy, no client setup
-   2. OpenAI — only if user pasted a personal key (legacy path)
-   3. Tesseract — on-device fallback for offline / both APIs failing
+   1. The Edge Function (a Claude model on OpenRouter) — server-side key, best accuracy, no client setup
+   2. Tesseract — on-device fallback for offline / the server failing (v2.35: no OpenAI step)
    The wrapper falls down the chain on each failure, so a flaky network or a
    transient Anthropic 5xx won't leave the user stuck — Tesseract still runs.
    seq = the capture this read belongs to (capturePhoto); a result for a stale
@@ -18463,12 +18282,13 @@ const PHOTO_AI_TIMEOUT_MS = 20000;
 async function parsePhotoLabel(imageDataUrl, seq) {
   var statusEl = document.getElementById('parsingStatus');
 
-  // Prefer Claude when the Supabase client is initialized (which means the
+  // Prefer the AI reader when the Supabase client is initialized (which means the
   // Edge Function URL is reachable in principle). No client-side key check
-  // needed — the key lives in supabase secrets.
+  // needed — the key lives in supabase secrets. v2.35: OpenRouter only (11/17),
+  // the model is Claude on OpenRouter; no Anthropic key is used.
   if (typeof supabaseClient !== 'undefined' && supabaseClient) {
     try {
-      statusEl.textContent = 'Analyzing with Claude\u2026';
+      statusEl.textContent = 'Analyzing with OpenRouter\u2026';
       statusEl.style.animation = 'pulse 1s infinite';
       statusEl.style.color = 'var(--text-muted)';
 
@@ -18476,7 +18296,7 @@ async function parsePhotoLabel(imageDataUrl, seq) {
       if (!photoParseIsCurrent(seq)) return;
       return populatePhotoFormFromParsed(parsed, statusEl);
     } catch (err) {
-      console.error('[Claude Vision] parse failed, falling back:', err);
+      console.error('[OpenRouter photo] parse failed, falling back:', err);
       if (!photoParseIsCurrent(seq)) return;
       // Raw detail (status + response body) is in the console line above.
       statusEl.textContent = 'Couldn\u2019t read the label automatically \u2014 trying another way\u2026';
@@ -18487,36 +18307,12 @@ async function parsePhotoLabel(imageDataUrl, seq) {
       // no-op when there's no active audit and we don't want a logging
       // miss to derail the fallback chain.
       try { logActivity('Photo label read failed \u2014 used the backup reader'); } catch (e) {}
-      // fall through to OpenAI / Tesseract below
+      // fall through to the on-device reader below
     }
   }
 
-  if (!hasOpenAIKey()) {
-    // No OpenAI key either — use the original Tesseract flow as a final fallback
-    return parsePhotoLabelTesseract(imageDataUrl, seq);
-  }
-
-  try {
-    statusEl.textContent = 'Analyzing with GPT-4o mini\u2026';
-    statusEl.style.animation = 'pulse 1s infinite';
-    statusEl.style.color = 'var(--text-muted)';
-
-    var parsed = await parseLabelWithOpenAI(imageDataUrl);
-    if (!photoParseIsCurrent(seq)) return;
-    populatePhotoFormFromParsed(parsed, statusEl);
-  } catch (err) {
-    console.error('[OpenAI Vision] parse failed, falling back to OCR:', err);
-    if (!photoParseIsCurrent(seq)) return;
-    statusEl.textContent = 'Couldn\u2019t read the label automatically \u2014 trying another way\u2026';
-    statusEl.style.color = 'var(--warning)';
-    // Graceful fallback — never leave user stuck
-    try { await parsePhotoLabelTesseract(imageDataUrl, seq); }
-    catch (e2) {
-      if (!photoParseIsCurrent(seq)) return;
-      statusEl.textContent = 'Parsing failed. Enter details manually.';
-      statusEl.style.color = 'var(--danger)';
-    }
-  }
+  // v2.35: no OpenAI step (OpenRouter only) - the on-device reader
+  return parsePhotoLabelTesseract(imageDataUrl, seq);
 }
 
 /* ---------- ASK AI CHAT ---------- */

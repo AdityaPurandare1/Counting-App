@@ -55,11 +55,17 @@ test.describe('v2.22 Ask AI is server-side', () => {
     expect(await page.evaluate(() => localStorage.getItem('hwood_anthropic_key'))).toBeNull();
   });
 
-  test('AI Settings no longer asks for an Anthropic key', async ({ page }) => {
+  // v2.35 (11/17, "lets switch all to openrouter please"): no AI key of any kind on the phone - the AI Settings
+  // dialog (it only held an optional OpenAI key) is gone, and a key left from before is dropped at load.
+  test('no AI Settings and no OpenAI key: photos and Ask AI run on the server (OpenRouter)', async ({ page }) => {
+    await page.addInitScript(() => {
+      try { localStorage.setItem('hwood_openai_key', 'sk-proj-old-device-key-123456'); } catch (e) {}
+    });
     await startAuditAs(page, 'manager');
-    await page.evaluate(() => window.openAPIKeySettings());
-    await expect(page.locator('#apiKeyInput')).toHaveCount(0);
-    await expect(page.locator('#apiKeySettingsModal')).toContainText('no key needed');
-    await expect(page.locator('#apiKeyStatus')).toContainText('AI runs on the server');
+    expect(await page.evaluate(() => localStorage.getItem('hwood_openai_key'))).toBeNull();
+    await expect(page.locator('#apiKeySettingsModal')).toHaveCount(0);
+    await expect(page.locator('#openaiKeyInput')).toHaveCount(0);
+    expect(await page.evaluate(() => typeof window.openAPIKeySettings)).toBe('undefined');
+    expect(await page.evaluate(() => typeof window.parseLabelWithOpenAI)).toBe('undefined');
   });
 });
