@@ -1211,13 +1211,32 @@ export interface StockRow {
   /** The part of `incoming` whose line already says delivered: it is at the
    *  warehouse, waiting for someone to receive it. */
   awaitingReceipt: number;
-  /** Average released per month over the last 90 days (or since the first release). */
+  /** Average used per month over the last 90 days (or since the item was first counted / moved, at least 30): what was
+   *  released plus what the counts found gone (v1.29). */
   monthlyUse: number;
   monthsCover: number | null;
+  /** v1.29 the same cover in days (E&E's "days of stock"), on hand only */
+  daysCover: number | null;
+  /** v1.29 what went out over the window: released (recorded) and counted out (a count under what the moves said) */
+  released: number;
+  countedOut: number;
+  /** the days the use is measured over */
+  useDays: number;
+  /** v1.29 the latest count against what the moves before it said: counted − expected (negative = went out unrecorded) */
+  lastCountChange: { day: string; expected: number; counted: number } | null;
   reorderPoint: number | null;
+  /** v1.29 where the reorder point comes from: set on the item, or worked out (use over the lead time + 25%) */
+  reorderSource: 'set' | 'auto' | null;
+  /** v1.29 the lead time the reorder point uses: the item's own, its past orders' (sent to arrived), else the default for its kind */
+  leadDays: number;
+  leadSource: 'item' | 'history' | 'custom default' | 'stock default';
+  /** how many past orders the history lead time is the median of */
+  leadOrders: number | null;
   /** The day on-hand + incoming falls to the reorder point at the current rate. */
   reorderBy: string | null;
   stockOutBy: string | null;
+  /** v1.29 when it is time to reorder: enough for the lead time (+25%) and REVIEW_DAYS more, less what is on hand and coming */
+  orderQty: number | null;
   lastCount: OtMove | null;
   lastReceipt: OtMove | null;
   state: 'reorder now' | 'reorder soon' | 'ok' | 'no usage yet';
@@ -1226,6 +1245,50 @@ export interface StockRow {
 const USE_WINDOW_DAYS = 90;
 const SAFETY = 1.25;   // reorder point = lead-time demand + 25%
 const SOON_DAYS = 30;
+/** v1.29 lead times when an item has none of its own and no past order says: custom printed goods come by sea (12 wks,
+ *  0151), E&E's stock lines in about 6 (OSE orders' median sent-to-delivered, 41 days, 11/18) */
+export const LEAD_DEFAULT_CUSTOM = 84;
+export const LEAD_DEFAULT_STOCK = 42;
+/** v1.29 an order placed now covers the lead time and this much more use */
+export const REVIEW_DAYS = 90;
+
+/** v1.29 custom printed (a venue's own: "Bird Streets", "Delilah", "The Nice Guy"…) or E&E stock ("h.wood", none). */
+export const isCustomItem = (i: Pick<OtItem, 'category'>) => !!i.category?.trim() && !/^h\.?\s*wood$/i.test(i.category.trim());
+
+/** v1.29 each count against what the moves before it said should be there: the moves in date order (same day, creation
+ *  order), from the first count or receipt on. A count under that = stock that went out unrecorded (used); over it =
+ *  stock that came in unrecorded (not use). Keyed by the count's id. */
+export function countChanges(moves: OtMove[]): Map<string, { day: string; expected: number; counted: number }> {
+  const sorted = [...moves].sort((a, b) => (a.moved_on === b.moved_on ? a.created_at.localeCompare(b.created_at) : a.moved_on < b.moved_on ? -1 : 1));
+  const out = new Map<string, { day: string; expected: number; counted: number }>();
+  let q = 0, based = false;
+  for (const m of sorted) {
+    if (m.kind === 'count') {
+      if (based) out.set(m.id, { day: m.moved_on, expected: q, counted: n(m.qty) });
+      q = n(m.qty); based = true;
+    } else if (m.kind === 'receipt') { q += n(m.qty); based = true; }
+    else q -= n(m.qty);
+  }
+  return out;
+}
+
+/** v1.29 the lead time an item's past orders took: from the day each order went to the vendor to the day its line came
+ *  in (received into stock, else delivered); the median over orders. Null when none came in yet. */
+export function itemLeadDays(item: Pick<OtItem, 'id'>, moves: OtMove[], lines: OtLine[], orders: OtOrder[]): { days: number; orders: number } | null {
+  const byId = new Map(orders.map(o => [o.id, o]));
+  const took: number[] = [];
+  for (const l of lines) {
+    if (l.item_id !== item.id || l.status === 'CANCELLED') continue;
+    const sent = byId.get(l.order_id)?.sent_on;
+    if (!sent) continue;
+    const got = moves.filter(m => m.kind === 'receipt' && m.line_id === l.id).map(m => m.moved_on).sort()[0] ?? l.delivered_on ?? null;
+    if (got && got >= sent) took.push(daysBetween(sent, got));
+  }
+  if (!took.length) return null;
+  took.sort((a, b) => a - b);
+  const mid = took.length >> 1;
+  return { days: took.length % 2 ? took[mid] : Math.round((took[mid - 1] + took[mid]) / 2), orders: took.length };
+}
 
 export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], orders: OtOrder[], today: string): StockRow[] {
   const linesByOrder = new Map<string, OtLine[]>();
@@ -1238,12 +1301,17 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
     const mv = moves.filter(m => m.item_id === item.id);
     const releases = mv.filter(m => m.kind === 'release');
     const since = addDays(today, -USE_WINDOW_DAYS);
-    const firstRelease = releases.reduce<string | null>((f, m) => (f === null || m.moved_on < f ? m.moved_on : f), null);
-    // Days the rate is measured over: 90, or less when releases started more recently (min 30 so
+    // v1.29 what went out: the releases recorded, and what each count found gone since the one before (E&E's levels
+    // only drop between its stock reports when nobody recorded the delivery)
+    const changes = countChanges(mv);
+    const shrinks = [...changes.values()].filter(c => c.counted < c.expected);
+    // Days the rate is measured over: 90, or less when the item was first counted / moved more recently (min 30 so
     // one early release does not read as a huge monthly rate).
-    const spanDays = firstRelease && firstRelease > since ? Math.max(30, daysBetween(firstRelease, today)) : USE_WINDOW_DAYS;
+    const firstSeen = mv.reduce<string | null>((f, m) => (f === null || m.moved_on < f ? m.moved_on : f), null);
+    const spanDays = firstSeen && firstSeen > since ? Math.max(30, daysBetween(firstSeen, today)) : USE_WINDOW_DAYS;
     const released = releases.filter(m => m.moved_on > since).reduce((s, m) => s + n(m.qty), 0);
-    const dailyUse = released / spanDays;
+    const countedOut = shrinks.filter(c => c.day > since).reduce((s, c) => s + (c.expected - c.counted), 0);
+    const dailyUse = (released + countedOut) / spanDays;
     const monthlyUse = dailyUse * 30;
 
     const itemLines = lines.filter(l => l.item_id === item.id && l.status !== 'CANCELLED' && l.status !== 'REQUESTED' && l.status !== 'RECEIVED'
@@ -1254,31 +1322,38 @@ export function stockRows(items: OtItem[], moves: OtMove[], lines: OtLine[], ord
     const awaitingReceipt = itemLines.filter(l => statusRank(l.status) >= statusRank('DELIVERED')).reduce((s, l) => s + unreceived(l), 0);
 
     const qty = onHand(mv);
-    const rp = item.reorder_point ?? (dailyUse > 0 && item.lead_time_days != null ? dailyUse * item.lead_time_days * SAFETY : null);
+    // v1.29 the lead time: the item's own, else what its past orders took, else the default for its kind
+    const hist = item.lead_time_days == null ? itemLeadDays(item, mv, lines, orders) : null;
+    const leadDays = item.lead_time_days ?? hist?.days ?? (isCustomItem(item) ? LEAD_DEFAULT_CUSTOM : LEAD_DEFAULT_STOCK);
+    const leadSource: StockRow['leadSource'] = item.lead_time_days != null ? 'item' : hist ? 'history' : isCustomItem(item) ? 'custom default' : 'stock default';
+    const rp = item.reorder_point ?? (dailyUse > 0 ? dailyUse * leadDays * SAFETY : null);
     let reorderBy: string | null = null, stockOutBy: string | null = null;
     let state: StockRow['state'] = 'no usage yet';
     if (dailyUse > 0) {
       stockOutBy = addDays(today, Math.max(0, qty) / dailyUse);
-      if (rp != null) {
-        const headroom = qty + incoming - rp;
-        reorderBy = addDays(today, Math.max(0, headroom) / dailyUse);
-        state = headroom <= 0 ? 'reorder now' : daysBetween(today, reorderBy) <= SOON_DAYS ? 'reorder soon' : 'ok';
-      } else {
-        // v1.02: no reorder point (none set, no lead time to work one out) — judge by cover, what is coming
-        // included: nothing left = reorder now (it showed OK at 0 cases), lasting 30 days or less = soon
-        const have = qty + incoming;
-        state = have <= 0 ? 'reorder now' : have / dailyUse <= SOON_DAYS ? 'reorder soon' : 'ok';
-      }
+      // v1.29 with use there is always a reorder point: the item's, else use over the lead time (+25%) - v1.02's "judge
+      // by cover" for items with none is gone, as every item now has a lead time (its own, its orders', a default)
+      const headroom = qty + incoming - rp!;
+      reorderBy = addDays(today, Math.max(0, headroom) / dailyUse);
+      state = headroom <= 0 ? 'reorder now' : daysBetween(today, reorderBy) <= SOON_DAYS ? 'reorder soon' : 'ok';
     } else if (item.reorder_point != null && qty + incoming <= item.reorder_point) {
       state = 'reorder now';
     }
     const latest = (k: OtMove['kind']) => mv.filter(m => m.kind === k)
       .sort((a, b) => (a.moved_on === b.moved_on ? b.created_at.localeCompare(a.created_at) : a.moved_on < b.moved_on ? 1 : -1))[0] ?? null;
+    const lastCount = latest('count');
+    // v1.29 time to reorder: cover the lead time (+25%) and REVIEW_DAYS more, less what is here and coming, whole units
+    const orderQty = (state === 'reorder now' || state === 'reorder soon') && rp != null
+      ? Math.max(0, Math.ceil(rp + dailyUse * REVIEW_DAYS - (qty + incoming) - 1e-9)) || null : null;
     return {
       item, onHand: qty, incoming, awaitingReceipt, monthlyUse,
       monthsCover: monthlyUse > 0 ? qty / monthlyUse : null,
-      reorderPoint: rp, reorderBy, stockOutBy,
-      lastCount: latest('count'), lastReceipt: latest('receipt'), state,
+      daysCover: dailyUse > 0 ? Math.max(0, qty) / dailyUse : null,
+      released, countedOut, useDays: spanDays,
+      lastCountChange: lastCount ? changes.get(lastCount.id) ?? null : null,
+      reorderPoint: rp, reorderSource: item.reorder_point != null ? 'set' : rp != null ? 'auto' : null,
+      leadDays, leadSource, leadOrders: hist?.orders ?? null, reorderBy, stockOutBy, orderQty,
+      lastCount, lastReceipt: latest('receipt'), state,
     };
   });
 }
