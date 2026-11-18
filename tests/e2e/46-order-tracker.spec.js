@@ -47,7 +47,7 @@ test.describe('v2.36 order tracker on the phone', () => {
     // the page itself refuses too (the database would return nothing anyway)
     await page.evaluate(() => { closeHeaderMenu(); showPage('orders'); });
     await expect(page.locator('#otList')).toContainText('Order tracker permission');
-    await expect(page.locator('.ot-card')).toHaveCount(0);
+    await expect(page.locator('.otx-card')).toHaveCount(0);
 
     await page.evaluate(() => handleLogout());
     await loginAs(page, 'manager');
@@ -63,51 +63,130 @@ test.describe('v2.36 order tracker on the phone', () => {
     await expect(page.locator('#headerOrdersBtn')).toBeVisible();
     await page.locator('#headerOrdersBtn').click();
     await expect(page.locator('#page-orders')).toBeVisible();
-    await expect(page.locator('#otSubtitle')).toContainText('view only');
-    await expect(page.locator('#otSubtitle')).toContainText('venues');
+    await expect(page.locator('#otSubtitle')).toContainText('View only');
+    await expect(page.locator('#otSubtitle')).toContainText('Your venues');
     expect(await page.evaluate(() => orderTrackerAccess())).toBe('view');
   });
 
-  test('corporate: open orders, late / unpaid, search, details, tracking and the invoice', async ({ page, db }) => {
+  // v2.37: the user's design (11/18, "Order tracker - mobile redesign")
+  test('corporate: the list - most overdue first, counts, late / unpaid pills, tracking sheet, venue picker, search', async ({ page, db }) => {
     seedOrders(db);
     await loginAs(page, 'corporate');
     await page.locator('#headerMenuBtn').click();
     await page.locator('#headerOrdersBtn').click();
-    await expect(page.locator('.ot-card')).toHaveCount(2);                       // open: the late one and the shipped one
-    await expect(page.locator('#otStats')).toContainText('2');
-    await expect(page.locator('.ot-card').first()).toContainText('EE Mercantile');  // late first
-    await expect(page.locator('.ot-card').first()).toContainText('LATE');
-    await expect(page.locator('.ot-card').first()).toContainText('UNPAID');
-    await expect(page.locator('.ot-card').first()).toContainText('Ordered');     // headline = the least advanced live line
-    await expect(page.locator('[data-order="o-ship"]')).toContainText('UPS 1Z999AA10123456784');
-    await expect(page.locator('[data-order="o-ship"] a')).toHaveAttribute('href', 'https://www.ups.com/track?tracknum=1Z999AA10123456784');
-    await expect(page.locator('[data-order="o-arch"]')).toHaveCount(0);           // archived never shows
+    await expect(page.locator('.otx-card')).toHaveCount(2);                        // open: the late one and the shipped one
+    await expect(page.locator('#otVenueTitle')).toHaveText('All venues');
+    await expect(page.locator('#otSubtitle')).toContainText('Order tracker');
+    await expect(page.locator('[data-otf="open"]')).toContainText('2');
+    await expect(page.locator('[data-otf="late"]')).toContainText('1');
+    await expect(page.locator('[data-otf="unpaid"]')).toContainText('1');
+    await expect(page.locator('#otListTitle')).toHaveText('Open orders');
+    const first = page.locator('.otx-card').first();                                 // most overdue first
+    await expect(first).toHaveAttribute('data-order', 'o-late');
+    await expect(first).toContainText('EE Mercantile');
+    await expect(first).toContainText('$826.08');
+    await expect(first).toContainText('OSE-0102');
+    await expect(first).toContainText('Delilah LA');
+    await expect(first).toContainText('2 lines');
+    await expect(first.locator('.otx-flag.late')).toContainText(/\d+d late/);
+    await expect(first.locator('.otx-pill')).toHaveText('Ordered');                 // headline = the least advanced live line
+    await expect(first.locator('.otx-flag.unpaid')).toHaveText('Unpaid');
+    await expect(page.locator('[data-order="o-arch"]')).toHaveCount(0);            // archived never shows
 
+    // the truck button: the tracking numbers in a sheet, each once, Copy all, on to the order
+    const ship = page.locator('[data-order="o-ship"]');
+    await expect(ship.locator('.otx-trackbtn')).toContainText('1');
+    await ship.locator('.otx-trackbtn').click();
+    const sheet = page.locator('#otSheet');
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toContainText('Tracking');
+    await expect(sheet.locator('a.otx-trackrow')).toHaveAttribute('href', 'https://www.ups.com/track?tracknum=1Z999AA10123456784');
+    await expect(sheet.locator('a.otx-trackrow')).toContainText('UPS');
+    await sheet.getByRole('button', { name: /Copy all/ }).click();
+    await expect(sheet).toContainText('Copied');
+    await sheet.getByRole('button', { name: /View order details/ }).click();
+    await expect(page.locator('#otDetailView')).toBeVisible();
+    await expect(page.locator('#otSheet')).toBeHidden();
+    await expect(page.locator('#otDetailView h1')).toHaveText('Everything Promo');
+    await page.locator('.otx-back').click();
+    await expect(page.locator('#otListView')).toBeVisible();
+
+    // filters
     await page.locator('[data-otf="late"]').click();
-    await expect(page.locator('.ot-card')).toHaveCount(1);
+    await expect(page.locator('.otx-card')).toHaveCount(1);
+    await expect(page.locator('#otListTitle')).toHaveText('Late orders');
     await page.locator('[data-otf="unpaid"]').click();
-    await expect(page.locator('.ot-card')).toHaveCount(1);
+    await expect(page.locator('.otx-card')).toHaveCount(1);
     await page.locator('[data-otf="all"]').click();
-    await expect(page.locator('.ot-card')).toHaveCount(3);                       // + the completed warehouse order
+    await expect(page.locator('.otx-card')).toHaveCount(3);                        // + the completed warehouse order
     await expect(page.locator('[data-order="o-done"]')).toContainText('Warehouse');
-    await page.fill('#otSearch', 'matchbooks');
-    await expect(page.locator('.ot-card')).toHaveCount(1);
-    await page.fill('#otSearch', 'INV-2026-100001');
-    await expect(page.locator('.ot-card')).toHaveCount(1);
+    await expect(page.locator('[data-order="o-done"]')).toContainText('Completed');
 
-    // details: the lines with their status and invoice, the notes, the invoice document
-    await page.locator('[data-order="o-late"] > div').first().click();
-    const card = page.locator('[data-order="o-late"]');
-    await expect(card).toContainText('Libbey Collins 10.5 oz');
-    await expect(card).toContainText('Inv INV-2026-100001');
-    await expect(card).toContainText('Rush for the opening');
-    // the fixture's catch-all is a PAGE route, so the signing mock is one too (later page routes win); the popup is a new page
+    // the venue picker; a venue with nothing open -> "No orders match", Clear filters
+    await page.locator('.otx-venue').click();
+    await expect(sheet).toContainText('Venue');
+    await sheet.locator('[data-venue="warehouse"]').click();
+    await expect(page.locator('#otVenueTitle')).toHaveText('Warehouse');
+    await expect(page.locator('.otx-card')).toHaveCount(1);
+    await page.locator('[data-otf="open"]').click();
+    await expect(page.locator('#otList')).toContainText('No orders match');
+    await page.getByRole('button', { name: 'Clear filters' }).click();
+    await expect(page.locator('#otVenueTitle')).toHaveText('All venues');
+    await expect(page.locator('.otx-card')).toHaveCount(2);
+
+    // search, and its clear button
+    await page.fill('#otSearch', 'matchbooks');
+    await page.locator('#otSearch').dispatchEvent('input');
+    await expect(page.locator('.otx-card')).toHaveCount(1);
+    await page.fill('#otSearch', 'INV-2026-100001');
+    await page.locator('#otSearch').dispatchEvent('input');
+    await expect(page.locator('.otx-card')).toHaveCount(1);
+    await page.locator('#otSearchClear').click();
+    await expect(page.locator('.otx-card')).toHaveCount(2);
+  });
+
+  test('corporate: the order page - summary, late banner, status bar, note, items by status, tracking, invoices', async ({ page, db }) => {
+    seedOrders(db);
+    await loginAs(page, 'corporate');
+    await page.locator('#headerMenuBtn').click();
+    await page.locator('#headerOrdersBtn').click();
+    await page.locator('[data-order="o-late"] .otx-cardbtn').click();
+    const d = page.locator('#otDetailView');
+    await expect(d).toBeVisible();
+    await expect(d.locator('.otx-dhead')).toContainText('OSE-0102');
+    await expect(d.locator('h1')).toHaveText('EE Mercantile');
+    await expect(d).toContainText('Delilah LA · 2 lines');
+    await expect(d.locator('.otx-big')).toHaveText('$826.08');
+    await expect(d.locator('.otx-latebar')).toContainText(/\d+ days late · ETA was 1\/10/);
+    await expect(d.locator('.otx-dl')).toContainText('10/20');                      // ordered
+    await expect(d.locator('.otx-dl')).toContainText('INV-2026-100001 · covers 1 of 2 lines');
+    await expect(d.locator('.otx-legend')).toContainText('1 ordered');
+    await expect(d.locator('.otx-legend')).toContainText('1 invoiced');
+    await expect(d.locator('.otx-note')).toContainText('Rush for the opening');
+    // items: grouped by status, the first group open
+    await expect(d.locator('[data-ottab="items"]')).toContainText('2');
+    await expect(d.locator('.otx-group')).toHaveCount(2);
+    await expect(d).toContainText('Libbey Rocks 9 oz');
+    await expect(d).not.toContainText('Libbey Collins 10.5 oz');
+    await d.locator('[data-status="INVOICED"]').click();
+    await expect(d).toContainText('Libbey Collins 10.5 oz');
+    await expect(d).toContainText('6 cs @ $68.84');
+    // tracking: none on this order
+    await d.locator('[data-ottab="tracking"]').click();
+    await expect(d).toContainText('No tracking numbers yet.');
+    // invoices: the PDF opens through a signed link
+    await page.locator('[data-ottab="invoices"]').click();
+    const row = page.locator('#otDetailView .otx-docrow').first();
+    await expect(row).toContainText('INV-2026-100001');
+    await expect(row).toContainText('1 line · $826.08');
     await page.route('**/storage/v1/object/sign/kount-order-docs/docs/inv-100001.pdf', (route) => route.fulfill({ status: 200, contentType: 'application/json',
       body: JSON.stringify({ signedURL: '/object/sign/kount-order-docs/docs/inv-100001.pdf?token=t' }) }));
     await page.context().route('**/storage/v1/object/sign/kount-order-docs/docs/inv-100001.pdf?token=t', (route) =>
       route.fulfill({ status: 200, contentType: 'text/plain', body: 'the invoice' }));   // text: a PDF would download, not navigate
-    const [popup] = await Promise.all([page.waitForEvent('popup'), card.getByRole('button', { name: /Invoice INV-2026-100001/ }).click()]);
+    const [popup] = await Promise.all([page.waitForEvent('popup'), row.click()]);
     await popup.waitForURL(/storage\/v1\/object\/sign\/kount-order-docs\/docs\/inv-100001\.pdf\?token=t/);
+    await page.locator('.otx-back').click();
+    await expect(page.locator('#otListView')).toBeVisible();
   });
 
   test('the permission taken away: the item goes, the page closes', async ({ page, db }) => {
@@ -115,7 +194,7 @@ test.describe('v2.36 order tracker on the phone', () => {
     await loginAs(page, 'corporate');
     await page.locator('#headerMenuBtn').click();
     await page.locator('#headerOrdersBtn').click();
-    await expect(page.locator('.ot-card')).toHaveCount(2);
+    await expect(page.locator('.otx-card')).toHaveCount(2);
     db.t.app_users.find((u) => u.email === 'apurandare@hwoodgroup.com').features = ['team:issues', 'phone:count'];
     await page.evaluate(() => refreshOrderTrackerAccess());
     await expect(page.locator('#page-orders')).toBeHidden();
