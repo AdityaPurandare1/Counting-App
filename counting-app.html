@@ -2271,7 +2271,7 @@ html, body {
 
 /* ========== ORDER TRACKER (v2.37, the user's mobile design) ========== */
 #page-orders { --ot-ink: #231F20; --ot-muted: #5C5856; --ot-dim: #767271; --ot-line: #E9E3DF; --ot-line2: #F0EBE7; --ot-sand: #F5F1EC; --ot-bg: #FFF9F5;
-  --ot-teal: #2D7D6F; --ot-red: #B4453A; --ot-amber: #A1652C; color: var(--ot-ink); font-family: var(--font); }
+  --ot-teal: #2D7D6F; --ot-red: #B4453A; --ot-amber: #A1652C; --ot-blue: #3E5C76; color: var(--ot-ink); font-family: var(--font); }
 #page-orders .muted { color: var(--ot-muted); }
 #page-orders .sm { font-size: 12px; }
 .otx-mono { font-family: var(--mono); font-size: 12.5px; font-weight: 500; color: var(--ot-ink); }
@@ -2298,6 +2298,10 @@ html, body {
 .otx-clear > span { width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; background: var(--ot-sand); border-radius: 999px; }
 .otx-seg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 4px; background: var(--ot-sand); border: 1px solid var(--ot-line); border-radius: 14px; }
 .otx-seg.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* v2.38: five filters (+ Follow up) share the row, and scroll sideways on a narrow phone */
+.otx-seg.five { display: flex; overflow-x: auto; scrollbar-width: none; }
+.otx-seg.five::-webkit-scrollbar { display: none; }
+.otx-seg.five .otx-segbtn { flex: 1 0 auto; padding: 0 6px; gap: 4px; }
 .otx-segbtn { height: 40px; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 0 4px; border: 0; border-radius: 10px; background: transparent;
   font: inherit; font-size: 14px; font-weight: 500; color: var(--ot-muted); cursor: pointer; }
 .otx-segbtn.on { background: #FFFFFF; box-shadow: 0 1px 2px rgba(35, 31, 32, 0.08), 0 0 0 1px var(--ot-line); color: var(--ot-ink); font-weight: 600; }
@@ -2323,6 +2327,7 @@ html, body {
 .otx-flag { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 999px; color: #FFFFFF; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .otx-flag.late { background: var(--ot-red); }
 .otx-flag.unpaid { background: var(--ot-amber); }
+.otx-flag.follow { background: var(--ot-blue); }
 .otx-trackbtn { position: absolute; right: 8px; bottom: 6px; width: 64px; height: 44px; display: flex; align-items: center; justify-content: flex-end; padding: 0 6px 0 0;
   background: none; border: 0; cursor: pointer; }
 .otx-trackbtn > span { display: inline-flex; align-items: center; gap: 5px; height: 30px; padding: 0 10px; background: var(--ot-bg); border: 1px solid var(--ot-line);
@@ -2352,6 +2357,8 @@ html, body {
 .otx-big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
 .otx-latebar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #FBECE9; border-radius: 10px; color: #8E352C; font-size: 14px; font-weight: 600; }
 .otx-latebar svg { flex: none; }
+.otx-quietbar { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #E8EEF3; border-radius: 10px; color: #2F4A61; font-size: 14px; font-weight: 600; }
+.otx-quietbar svg { flex: none; }
 .otx-dl { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
 .otx-dl > div { display: flex; flex-direction: column; gap: 2px; }
 .otx-dl > div.wide { grid-column: 1 / -1; }
@@ -2753,9 +2760,9 @@ html, body {
           <input id="otSearch" type="text" inputmode="search" enterkeyhint="search" placeholder="Search vendor, order #, item, invoice" autocomplete="off" oninput="otOnSearch()">
           <button type="button" id="otSearchClear" class="otx-clear hide" aria-label="Clear search" onclick="otClearSearch()"><span><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></span></button>
         </label>
-        <div class="otx-seg" id="otTabs" role="group" aria-label="Filter orders"></div>
+        <div class="otx-seg five" id="otTabs" role="group" aria-label="Filter orders"></div>
       </header>
-      <div class="otx-listhead"><h2 id="otListTitle">Open orders</h2><span>Most overdue first</span></div>
+      <div class="otx-listhead"><h2 id="otListTitle">Open orders</h2><span id="otListSub">Most overdue first</span></div>
       <div id="otList"></div>
       <div class="otx-foot" id="otFooter"></div>
     </div>
@@ -3357,7 +3364,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.37';
+const APP_VERSION = '2.38';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -16945,7 +16952,7 @@ async function loadOrderTracker() {
   var email = appState.user.email;
   try {
     var res = await Promise.all([
-      otFetchAll('kount_ot_orders', 'id,order_number,vendor_name,venue_id,deliver_to,ordered_on,expected_on,sent_on,notes,completed_at,archived_at,updated_at', 'archived_at=is.null&order=updated_at.desc'),
+      otFetchAll('kount_ot_orders', 'id,order_number,vendor_name,venue_id,deliver_to,ordered_on,expected_on,sent_on,notes,completed_at,archived_at,updated_at,created_at,last_email_at,last_email_from,last_vendor_email_at', 'archived_at=is.null&order=updated_at.desc'),
       otFetchAll('kount_ot_lines', 'id,order_id,description,sku,qty,unit,unit_price,status,quote_number,invoice_number,tracking_number,expected_on,delivered_on,venue_id,sort', 'order=sort.asc'),
       otFetchAll('kount_ot_tracking', 'order_id,tracking_number,carrier', ''),
       otFetchAll('kount_ot_documents', 'id,order_id,kind,doc_number,doc_date,total,file_name,storage_path', 'order=created_at.desc'),
@@ -17009,6 +17016,26 @@ function otGroup(rows) {
 /* One order as the screens show it: its headline status (the least advanced live line), open / completed, the date it
    is due (the earliest one of a line not there yet), days late, unpaid (a line invoiced, not paid), total, its venue
    (or "Multiple venues"), and its tracking numbers - each once, whatever the case or carrier spelling. */
+/* v2.38 "Follow up" (0178; the user, 11/18: "for any order without a new email in the thread for over 3 days, needs a
+   status marker saying followup required ... it should also have a filter for those"): an open order with a line not
+   delivered yet whose last e-mail - the newest in its threads, any sender (the hourly check), or the vendor's (0153) -
+   is more than OT_QUIET_DAYS days old in Los Angeles; with none on file, from the day it was sent / ordered / added. */
+var OT_QUIET_DAYS = 3;
+function otLaDay(iso) {
+  try { return new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }); } catch (e) { return String(iso).slice(0, 10); }
+}
+function otQuiet(o, open, today) {
+  if (!open) return null;
+  var mails = [{ at: o.last_email_at, from: o.last_email_from || null }, { at: o.last_vendor_email_at, from: null }]
+    .filter(function (m) { return m.at && isFinite(Date.parse(m.at)); })
+    .sort(function (a, b) { return Date.parse(b.at) - Date.parse(a.at); });
+  var last = mails[0] || null;
+  var since = last ? otLaDay(last.at) : (o.sent_on || o.ordered_on || (o.created_at ? otLaDay(o.created_at) : null));
+  if (!since) return null;
+  var days = otDaysBetween(since, today);
+  return days > OT_QUIET_DAYS ? { days: days, since: since, from: last ? last.from : null, known: !!last } : null;
+}
+
 function otOrderView(o, byOrder, today) {
   var ls = byOrder.lines[o.id] || [];
   var live = ls.filter(function (l) { return l.status !== 'CANCELLED'; });
@@ -17019,6 +17046,7 @@ function otOrderView(o, byOrder, today) {
   var dues = notThere.map(function (l) { return l.expected_on || o.expected_on; }).filter(Boolean).sort();
   var due = dues[0] || null;
   var daysLate = state === 'open' && due && due < today ? otDaysBetween(due, today) : 0;
+  var quiet = otQuiet(o, state === 'open' && notThere.length > 0, today);
   var unpaid = live.some(function (l) { return l.status === 'INVOICED'; });
   var total = live.reduce(function (t, l) { return t + (Number(l.qty) || 0) * (Number(l.unit_price) || 0); }, 0);
   var raw = (byOrder.tracking[o.id] || []).map(function (t) { return { number: String(t.tracking_number || '').trim(), carrier: otCarrierName(t.carrier) || otCarrier(t.tracking_number) }; });
@@ -17036,7 +17064,7 @@ function otOrderView(o, byOrder, today) {
     if (venueIds.indexOf(k) < 0) venueIds.push(k);
   });
   var venue = venueIds.length > 1 ? 'Multiple venues' : otVenueName(venueIds[0]);
-  return { o: o, lines: ls, live: live, head: head, state: state, due: due, daysLate: daysLate, late: daysLate > 0, unpaid: unpaid, total: total,
+  return { o: o, lines: ls, live: live, head: head, state: state, due: due, daysLate: daysLate, late: daysLate > 0, unpaid: unpaid, total: total, quiet: quiet,
     tracks: tracks, trackDupes: raw.filter(function (t) { return t.number; }).length - tracks.length, docs: byOrder.docs[o.id] || [], venueIds: venueIds, venue: venue };
 }
 
@@ -17124,10 +17152,12 @@ function otRenderList(views, access) {
   var open = inScope.filter(function (v) { return v.state === 'open'; });
   var late = inScope.filter(function (v) { return v.late; });
   var unpaid = inScope.filter(function (v) { return v.unpaid; });
+  var follow = inScope.filter(function (v) { return !!v.quiet; });
   var tabs = [
     { key: 'open', label: 'Open', count: open.length, on: '#231F20', off: '#5C5856' },
     { key: 'late', label: 'Late', count: late.length, on: '#B4453A', off: '#B4453A' },
     { key: 'unpaid', label: 'Unpaid', count: unpaid.length, on: '#A1652C', off: '#86531F' },
+    { key: 'follow', label: 'Follow up', count: follow.length, on: '#3E5C76', off: '#3E5C76' },
     { key: 'all', label: 'All', count: null, on: '#231F20', off: '#5C5856' },
   ];
   document.getElementById('otTabs').innerHTML = tabs.map(function (t) {
@@ -17135,11 +17165,14 @@ function otRenderList(views, access) {
     return '<button type="button" class="otx-segbtn' + (active ? ' on' : '') + '" data-otf="' + t.key + '" aria-pressed="' + active + '" onclick="setOtFilter(\'' + t.key + '\')">' +
       '<span>' + t.label + '</span>' + (t.count == null ? '' : '<span class="otx-count" style="color:' + (active ? t.on : t.off) + '">' + t.count + '</span>') + '</button>';
   }).join('');
-  var titles = { open: 'Open orders', late: 'Late orders', unpaid: 'Unpaid orders', all: 'All orders' };
+  var titles = { open: 'Open orders', late: 'Late orders', unpaid: 'Unpaid orders', follow: 'Follow up', all: 'All orders' };
   document.getElementById('otListTitle').textContent = titles[otFilter];
+  var sub = document.getElementById('otListSub');
+  if (sub) sub.textContent = otFilter === 'follow' ? 'No e-mail in over 3 days' : 'Most overdue first';
 
-  var shown = otFilter === 'open' ? open : otFilter === 'late' ? late : otFilter === 'unpaid' ? unpaid : inScope;
+  var shown = otFilter === 'open' ? open : otFilter === 'late' ? late : otFilter === 'unpaid' ? unpaid : otFilter === 'follow' ? follow : inScope;
   shown = shown.slice().sort(function (a, b) {
+    if (otFilter === 'follow' && a.quiet && b.quiet && a.quiet.days !== b.quiet.days) return b.quiet.days - a.quiet.days;
     if (a.daysLate !== b.daysLate) return b.daysLate - a.daysLate;
     if (a.state !== b.state) return a.state === 'open' ? -1 : 1;
     return String(b.o.updated_at || '').localeCompare(String(a.o.updated_at || ''));
@@ -17170,7 +17203,8 @@ function otCardHtml(v) {
       '<span class="otx-row3' + (v.tracks.length ? ' pad' : '') + '"><span class="otx-eta">' + esc(eta) + '</span>' +
         (v.late ? '<span class="otx-flag late">' + v.daysLate + 'd late</span>' : '') +
         otPill(v.head) +
-        (v.unpaid ? '<span class="otx-flag unpaid">Unpaid</span>' : '') + '</span>' +
+        (v.unpaid ? '<span class="otx-flag unpaid">Unpaid</span>' : '') +
+        (v.quiet ? '<span class="otx-flag follow" title="' + esc(otQuietText(v.quiet)) + '">Follow up \u00b7 ' + v.quiet.days + 'd</span>' : '') + '</span>' +
     '</button>';
   if (v.tracks.length) {
     h += '<button type="button" class="otx-trackbtn" data-id="' + esc(o.id) + '" onclick="otOpenTracking(this.dataset.id)" aria-label="Show ' + v.tracks.length + ' tracking number' +
@@ -17182,6 +17216,11 @@ function otCardHtml(v) {
 /* ---- the order page ---- */
 function otSetTab(t) { otTab = t; renderOrdersPage(); }
 function otToggleGroup(s) { otGroupsOpen[s] = !otGroupsOpen[s]; renderOrdersPage(); }
+
+function otQuietText(q) {
+  return q.known ? 'No e-mail for ' + q.days + ' days \u00b7 last ' + otDay(q.since) + (q.from ? ' from ' + q.from : '')
+    : 'No e-mail on file \u00b7 ordered ' + otDay(q.since) + ', ' + q.days + ' days ago';
+}
 
 function otDetailHtml(v) {
   var o = v.o;
@@ -17204,6 +17243,7 @@ function otDetailHtml(v) {
       '<span class="muted">' + esc(v.venue) + ' \u00b7 ' + v.lines.length + (v.lines.length === 1 ? ' line' : ' lines') + '</span></div>' +
     '<span class="otx-big">' + otMoney(v.total) + '</span>' +
     (v.late ? '<div class="otx-latebar">' + OT_ICON_CLOCK + '<span>' + v.daysLate + (v.daysLate === 1 ? ' day' : ' days') + ' late \u00b7 ETA was ' + otDay(v.due) + '</span></div>' : '') +
+    (v.quiet ? '<div class="otx-quietbar">' + OT_ICON_CLOCK + '<span>Follow up \u00b7 ' + esc(otQuietText(v.quiet)) + '</span></div>' : '') +
     '<dl class="otx-dl">' +
       '<div><dt>Ordered</dt><dd>' + (o.ordered_on ? otDay(o.ordered_on) : '\u2014') + '</dd></div>' +
       '<div><dt>' + (v.state === 'open' && v.due && !v.late ? 'ETA' : 'Sent') + '</dt><dd>' + (v.state === 'open' && v.due && !v.late ? otDay(v.due) : (o.sent_on ? otDay(o.sent_on) : '\u2014')) + '</dd></div>' +

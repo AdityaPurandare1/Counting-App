@@ -23,7 +23,7 @@ export function onList(domain: string, list: readonly string[]): boolean {
 /** A message of an order's e-mail thread, as Graph lists it (0147). */
 export interface ThreadMessage {
   id?: string; sentDateTime?: string; receivedDateTime?: string; isDraft?: boolean;
-  from?: { emailAddress?: { address?: string } };
+  from?: { emailAddress?: { address?: string; name?: string } };
   toRecipients?: Array<{ emailAddress?: { address?: string } }>;
   ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
 }
@@ -59,6 +59,34 @@ export function sentToVendor(messages: readonly ThreadMessage[], vendorDomains: 
   while (start > 0 && at(live[start]) - at(live[start - 1]) <= EXCHANGE_GAP_MS) start--;
   const first = live.slice(start, end + 1).find(m => isToVendor(m, vendorDomains));
   return first ? (first.sentDateTime ?? first.receivedDateTime ?? null) : null;
+}
+
+/** Mail in a thread that is no person's news: bounces and system notices ("Undeliverable: Re: ..." from
+ *  MicrosoftExchange...@, postmaster@, mailer-daemon@, no-reply@). */
+const SYSTEM_SENDER = /^(microsoftexchange[0-9a-z]*|postmaster|mailer-daemon|no-?reply|do-?not-?reply)@/i;
+
+/** The latest e-mail in an order's threads (0178, "Follow up"): any sender - ours too, since a message we sent two
+ *  days ago means we are waiting, not idle - but no draft and no bounce / system notice. Null when none counts. */
+export function latestThreadMail(messages: readonly ThreadMessage[]): { at: string; from: string } | null {
+  let best: { at: string; from: string; t: number } | null = null;
+  for (const m of messages) {
+    if (m.isDraft) continue;
+    const from = String(m.from?.emailAddress?.address ?? '').trim().toLowerCase();
+    if (SYSTEM_SENDER.test(from)) continue;
+    const t = Date.parse(m.receivedDateTime ?? m.sentDateTime ?? '');
+    if (!Number.isFinite(t)) continue;
+    if (!best || t > best.t) best = { at: new Date(t).toISOString(), from, t };
+  }
+  return best && { at: best.at, from: best.from };
+}
+
+/** Whether the order's last e-mail moves forward to `found`: never back (a deleted message, a thread no longer
+ *  read), and only to a real time. */
+export function laterMail(current: string | null | undefined, found: string | null | undefined): boolean {
+  const f = Date.parse(found ?? '');
+  if (!Number.isFinite(f)) return false;
+  const c = Date.parse(current ?? '');
+  return !Number.isFinite(c) || f > c;
 }
 
 /** Whether the e-mail's day replaces the order's sent day: only an earlier one (the sheet's Order Date or the PO

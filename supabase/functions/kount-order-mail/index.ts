@@ -30,7 +30,7 @@ import { readPurchaseFile, readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
 import { accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, stubCheckDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
 import { deviceCodePoll, deviceCodeStart, DRAFT_SCOPE, GraphError, graphGet, graphPost, graphPostJson, refreshAccess, SEND_SCOPE } from './graph.ts';
-import { ALL_DOC_KINDS, isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, type ProofMatch, type ProofRead, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
+import { latestThreadMail, laterMail, ALL_DOC_KINDS, isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, type ProofMatch, type ProofRead, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
 // 2026-11 key rotation: read the new API keys (SUPABASE_SECRET_KEYS / SUPABASE_PUBLISHABLE_KEYS are JSON maps
 // keyed by key name). Legacy env fallback only until the legacy keys are disabled; remove it at cleanup.
@@ -402,6 +402,18 @@ Deno.serve(async (req) => {
       return json(200, { found: stats.acct_sent ?? 0, requested: stats.acct_requested ?? 0, checked: stats.acct_checked ?? 0, error: stats.acct_error ?? null });
     }
 
+    if (action === 'threads') {
+      // each open order's latest e-mail (0178), on demand - the hourly check does the same
+      const stats = blankStats(`order threads by ${caller.email}`);
+      const { data: refresh, error: tErr } = await sb.rpc('kount_ot_mail_token_get');
+      if (tErr) throw tErr;
+      if (!refresh) return json(200, { checked: 0, error: 'Outlook is not connected.' });
+      const tok = await refreshAccess(String(refresh));
+      if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+      await threadPhase(sb, stats, tok.access_token, Date.now() + 100_000);
+      return json(200, { checked: stats.threads_checked ?? 0, moved: stats.threads_moved ?? 0, note: stats.threads_note ?? null, error: stats.threads_error ?? null });
+    }
+
     if (action === 'sent') {
       // when each order went to the vendor, from its e-mail threads (0147)
       const stats = blankStats(`sent dates by ${caller.email}`);
@@ -441,6 +453,8 @@ interface Stats {
   acct_checked?: number; acct_sent?: number; acct_error?: string;
   /** lines whose payment request was found as our own e-mail to AP / GA (0174) */
   acct_requested?: number;
+  /** open orders whose threads were read / whose last e-mail moved / why it stopped short or failed (0178) */
+  threads_checked?: number; threads_moved?: number; threads_note?: string; threads_error?: string;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -1161,13 +1175,16 @@ async function runStubCheck(sb: SupabaseClient) {
     const tok = await refreshAccess(String(refresh));
     if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
     await stubPhase(sb, tok.access_token, 0, stats, STUB_CHECK_DAYS);
+    // 0178: each open order's latest e-mail, for "Follow up" - hourly, so a reply clears the flag the same day
+    await threadPhase(sb, stats, tok.access_token);
   } catch (e) {
     stats.error = msg(e);
     stats.reconnect = e instanceof GraphError && e.reauth;
     console.error('[kount-order-mail] stub check failed:', stats.error);
   } finally {
     const check = { started_at: startedAt, finished_at: nowIso(), stubs: stats.stubs, stubs_sent: stats.stubs_sent ?? 0, proofs_read: stats.proofs_read ?? 0,
-      paid_by_proof: stats.paid_by_proof ?? 0, note: stats.stub_note ?? null, error: stats.error, reconnect: stats.reconnect };
+      paid_by_proof: stats.paid_by_proof ?? 0, note: stats.stub_note ?? null, error: stats.error, reconnect: stats.reconnect,
+      threads_checked: stats.threads_checked ?? 0, threads_moved: stats.threads_moved ?? 0, threads_note: stats.threads_note ?? null, threads_error: stats.threads_error ?? null };
     const { data: a } = await sb.from('kount_ot_mail_account').select('last_run').eq('id', 1).single();
     const prev = (a?.last_run ?? null) as Record<string, unknown> | null;
     await sb.from('kount_ot_mail_account').update({ running_since: null, last_run: prev ? { ...prev, stub_check: check } : { ...stats, finished_at: nowIso(), stub_check: check },
@@ -1585,6 +1602,65 @@ async function approvalPhase(sb: SupabaseClient, stats: Stats) {
   } catch (e) {
     stats.approval_error = msg(e).slice(0, 300);
     console.error('[kount-order-mail] quote approvals failed:', stats.approval_error);
+  }
+}
+
+/** "Follow up" on quiet orders (0178; the user, 11/18: "for any order without a new email in the thread for over 3
+ *  days, needs a status marker saying followup required"). For each open order with a line not delivered yet, the
+ *  latest e-mail in its threads - its documents', the Inbox's and its tracking's conversations - any sender, ours too
+ *  (latestThreadMail), stamped on kount_ot_orders.last_email_at; the screens flag the order when that is more than 3
+ *  days old. The least recently checked orders go first and the step stops at its deadline, so a check that runs short
+ *  carries on with the rest next time. Read-only on the mailbox. Never fails the run. */
+const THREAD_BUDGET_MS = 60_000;
+async function threadPhase(sb: SupabaseClient, stats: Stats, accessToken: string, deadline = Date.now() + THREAD_BUDGET_MS) {
+  try {
+    const data = await loadTracker(sb);
+    const inFlight = new Set(data.lines.filter(l => !['DELIVERED', 'RECEIVED', 'CANCELLED'].includes(l.status)).map(l => l.order_id));
+    type Quiet = OtOrder & { last_email_at?: string | null; thread_checked_at?: string | null };
+    const todo = (data.orders as Quiet[]).filter(o => !o.archived_at && !o.completed_at && inFlight.has(o.id))
+      .sort((a, b) => String(a.thread_checked_at ?? '').localeCompare(String(b.thread_checked_at ?? '')));
+    if (!todo.length) return;
+    const ids = todo.map(o => o.id);
+    const convs = new Map<string, Set<string>>();
+    const add = (orderId: string | null, c: string | null) => {
+      if (orderId && c) (convs.get(orderId) ?? convs.set(orderId, new Set()).get(orderId)!).add(c);
+    };
+    for (const d of data.documents) add(d.order_id, d.source_conversation_id ?? null);
+    for (let i = 0; i < ids.length; i += 200) {
+      const part = ids.slice(i, i + 200);
+      const [inbox, tracking] = await Promise.all([
+        sb.from('kount_ot_inbox').select('order_id, conversation_id').in('order_id', part).not('conversation_id', 'is', null),
+        sb.from('kount_ot_tracking').select('order_id, conversation_id').in('order_id', part).not('conversation_id', 'is', null),
+      ]);
+      if (inbox.error) throw inbox.error;
+      if (tracking.error) throw tracking.error;
+      for (const r of [...(inbox.data ?? []), ...(tracking.data ?? [])]) add(r.order_id, r.conversation_id);
+    }
+    const cache = new Map<string, ThreadMessage[]>();
+    let checked = 0, moved = 0;
+    for (const o of todo) {
+      if (Date.now() > deadline) { stats.threads_note = `stopped at the time limit: ${todo.length - checked} orders left for the next check`; break; }
+      const found: ThreadMessage[] = [];
+      for (const c of convs.get(o.id) ?? []) {
+        if (!cache.has(c)) {
+          const page = await graphGet<{ value?: ThreadMessage[] }>(accessToken, `/me/messages?$filter=${encodeURIComponent(`conversationId eq '${c.replace(/'/g, "''")}'`)}`
+            + '&$select=id,sentDateTime,receivedDateTime,isDraft,from&$top=250');
+          cache.set(c, page.value ?? []);
+        }
+        found.push(...cache.get(c)!);
+      }
+      const last = latestThreadMail(found);
+      const patch: Record<string, string> = { thread_checked_at: nowIso() };
+      if (last && laterMail(o.last_email_at, last.at)) { patch.last_email_at = last.at; patch.last_email_from = last.from; moved++; }
+      const { error } = await sb.from('kount_ot_orders').update(patch).eq('id', o.id);
+      if (error) throw error;
+      checked++;
+    }
+    stats.threads_checked = checked;
+    stats.threads_moved = moved;
+  } catch (e) {
+    stats.threads_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] order threads failed:', stats.threads_error);
   }
 }
 

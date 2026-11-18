@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-order-mail/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
+import { latestThreadMail, laterMail, isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, domainOf, fromBase64, isToVendor, sentToVendor, takeEmailSentDay, idTokenMailbox, isPdfAttachment, kindAllowed, laParts, looksLikePurchaseDoc, MAX_PDF_BYTES, onList, OWN_DOMAINS, invoiceToken, isStubAttachment, matchR365Payments, paidInvoices, safeEqual, sha256Hex, stubInvoices, toBase64, wantsAttachment } from './rules.ts';
 
 Deno.test('sender domain, with or without a display name', () => {
   assertEquals(domainOf('aleli@eemercantile.co'), 'eemercantile.co');
@@ -299,4 +299,31 @@ Deno.test("no invoice PDF: against the lines (no tax / shipping) paying at least
   // a cancelled line does not count toward the total; an order with only cancelled lines is not matched
   const cancelled = { ...data, lines: data.lines.map(l => l.order_id === "cus44" ? { ...l, status: "CANCELLED" } : l) };
   assertEquals(proofMatches({ payment_proof: true, paid_invoices: [{ invoice_number: "INV-2026-913653", amount: 533.09 }] }, cancelled), []);
+});
+
+Deno.test("0178 the latest e-mail in an order's threads: any sender, ours too; no drafts, no bounces", () => {
+  const m = (at: string, from: string, extra: Record<string, unknown> = {}) => ({ receivedDateTime: at, from: { emailAddress: { address: from } }, ...extra });
+  assertEquals(latestThreadMail([]), null);
+  assertEquals(latestThreadMail([
+    m("2026-11-10T17:00:00Z", "Jemma@EEMercantile.co"),
+    m("2026-11-12T20:30:00Z", "apurandare@hwoodgroup.com"),                          // ours counts: we are waiting on them
+    m("2026-11-13T09:00:00Z", "apurandare@hwoodgroup.com", { isDraft: true }),       // a draft never went out
+    m("2026-11-14T22:00:00Z", "MicrosoftExchange329e71ec88ae4615bbc36ab6ce41109e@hwoodgroup.com"),   // "Undeliverable: ..."
+    m("2026-11-15T22:00:00Z", "postmaster@eemercantile.co"),
+    m("not a date", "jemma@eemercantile.co"),
+  ]), { at: "2026-11-12T20:30:00.000Z", from: "apurandare@hwoodgroup.com" });
+  // a sent item carries its sentDateTime when receivedDateTime is missing
+  assertEquals(latestThreadMail([{ sentDateTime: "2026-11-16T15:00:00Z", from: { emailAddress: { address: "aleli@eemercantile.co" } } }]),
+    { at: "2026-11-16T15:00:00.000Z", from: "aleli@eemercantile.co" });
+  // no sender on the message: still an e-mail
+  assertEquals(latestThreadMail([{ receivedDateTime: "2026-11-16T15:00:00Z" }]), { at: "2026-11-16T15:00:00.000Z", from: "" });
+});
+
+Deno.test("0178 the order's last e-mail only moves forward", () => {
+  assert(laterMail(null, "2026-11-12T20:30:00Z"));
+  assert(laterMail("2026-11-10T17:00:00+00:00", "2026-11-12T20:30:00.000Z"));
+  assert(!laterMail("2026-11-12T20:30:00+00:00", "2026-11-12T20:30:00.000Z"), "the same moment, written two ways");
+  assert(!laterMail("2026-11-14T00:00:00Z", "2026-11-12T20:30:00Z"), "never back");
+  assert(!laterMail(null, null));
+  assert(!laterMail("2026-11-14T00:00:00Z", "garbage"));
 });

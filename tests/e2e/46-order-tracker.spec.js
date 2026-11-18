@@ -189,6 +189,49 @@ test.describe('v2.36 order tracker on the phone', () => {
     await expect(page.locator('#otListView')).toBeVisible();
   });
 
+  // v2.38 "Follow up" (0178): an open order with no e-mail in its threads for more than 3 days
+  test('corporate: Follow up - quiet orders flagged, their own filter, the reason on the order page', async ({ page, db }) => {
+    seedOrders(db);
+    const ago = (days) => new Date(Date.now() - days * 86400000).toISOString();
+    Object.assign(db.t.kount_ot_orders.find((o) => o.id === 'o-late'), { last_email_at: ago(6), last_email_from: 'jemma@eemercantile.co', last_vendor_email_at: ago(9) });
+    Object.assign(db.t.kount_ot_orders.find((o) => o.id === 'o-ship'), { last_email_at: ago(10), last_vendor_email_at: ago(1) });   // the vendor wrote yesterday
+    await loginAs(page, 'corporate');
+    await page.locator('#headerMenuBtn').click();
+    await page.locator('#headerOrdersBtn').click();
+    await expect(page.locator('.otx-card')).toHaveCount(2);
+    await expect(page.locator('[data-otf="follow"]')).toContainText('Follow up');
+    await expect(page.locator('[data-otf="follow"]')).toContainText('1');
+    await expect(page.locator('[data-order="o-late"] .otx-flag.follow')).toHaveText(/^Follow up . 6d$/);
+    await expect(page.locator('[data-order="o-ship"] .otx-flag.follow')).toHaveCount(0);
+    // the five filters fit one row on a 360-390 px phone: none hidden off the side
+    for (const width of [360, 375, 390]) {
+      await page.setViewportSize({ width, height: 760 });
+      expect(await page.evaluate(() => { const b = document.getElementById('otTabs'); return b.scrollWidth <= b.clientWidth; })).toBe(true);
+    }
+
+    await page.locator('[data-otf="follow"]').click();
+    await expect(page.locator('.otx-card')).toHaveCount(1);
+    await expect(page.locator('#otListTitle')).toHaveText('Follow up');
+    await expect(page.locator('#otListSub')).toHaveText('No e-mail in over 3 days');
+    await page.locator('[data-order="o-late"] .otx-cardbtn').click();
+    const bar = page.locator('#otDetailView .otx-quietbar');
+    await expect(bar).toContainText('No e-mail for 6 days');
+    await expect(bar).toContainText('from jemma@eemercantile.co');
+    await page.locator('.otx-back').click();
+    await page.locator('[data-otf="open"]').click();
+    await expect(page.locator('#otListSub')).toHaveText('Most overdue first');
+
+    // no e-mail on file at all: counted from the day it went out; completed orders never flag
+    Object.assign(db.t.kount_ot_orders.find((o) => o.id === 'o-ship'), { last_email_at: null, last_vendor_email_at: null, sent_on: null, ordered_on: '2026-11-01' });
+    await page.locator('.otx-icon[aria-label="Refresh"]').click();
+    await expect(page.locator('[data-order="o-ship"] .otx-flag.follow')).toBeVisible();
+    await page.locator('[data-order="o-ship"] .otx-cardbtn').click();
+    await expect(page.locator('#otDetailView .otx-quietbar')).toContainText('No e-mail on file');
+    await page.locator('.otx-back').click();
+    await page.locator('[data-otf="all"]').click();
+    await expect(page.locator('[data-order="o-done"] .otx-flag.follow')).toHaveCount(0);
+  });
+
   test('the permission taken away: the item goes, the page closes', async ({ page, db }) => {
     seedOrders(db);
     await loginAs(page, 'corporate');
