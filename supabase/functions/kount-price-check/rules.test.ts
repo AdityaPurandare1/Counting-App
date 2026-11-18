@@ -1,6 +1,6 @@
 // deno test supabase/functions/kount-price-check/rules.test.ts
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { bibleItems, itemNoKey, ourUnitPrice, overBudget, purchasesFor, readResearch, researchPrompt, verdict, type BibleRow, type PurchaseLine } from './rules.ts';
+import { bibleItems, itemNoKey, ourUnitPrice, purchaseIndex, purchasesFor, readResearch, researchPrompt, verdict, type BibleRow, type PurchaseLine } from './rules.ts';
 
 const HEAD = ['Image', 'Item', 'Manufacturer', 'Description/Color/Pattern', 'Manufacturer Item #', 'Size', 'Link', 'Delilah Dallas Opening Order', 'NOTES'];
 const bible = (id: string, venue: string, title: string, sheets: Array<{ name: string; header: string[]; rows: string[][] }>): BibleRow =>
@@ -118,7 +118,20 @@ Deno.test('our price per piece: the model, else a line bought by the piece', () 
   assertEquals(ourUnitPrice(null, purchasesFor({ item_no: 'WB33', checkable: true }, [pl({ sku: 'WB33', unit: 'cs' })])), null, 'a case: unknown pieces');
 });
 
-Deno.test('the weekly budget', () => {
-  assert(overBudget(250.01, 250) && overBudget(250, 250));
-  assert(!overBudget(249.99, 250) && !overBudget(1000, 0) && !overBudget(1000, null));
+Deno.test('the purchase index finds what scanning every line finds (one lookup per item, 11/18 CPU limit)', () => {
+  const lines = [
+    pl({ sku: '9156', description: 'Libbey Contour Goblet 16 oz', ordered_on: '2026-09-01', unit_price: 60 }),
+    pl({ description: 'Libbey 9156 Contour Goblet (case of 12)', ordered_on: '2026-10-20' }),
+    pl({ description: 'Steelite Monza oyster fork SPLM40Z025 (dozen)', unit_price: 98.4 }),
+    pl({ sku: 'SKU: WB33', description: 'Carafe 34 oz', unit: 'ea', unit_price: 11.5 }),
+    pl({ description: 'Libbey 9156', status: 'CANCELLED' }),
+    pl({ description: 'Libbey 9156', unit_price: null }),
+  ];
+  const ix = purchaseIndex(lines);
+  for (const no of ['9156', 'SPLM40Z025', 'WB33', '91567', 'NOPE123']) {
+    assertEquals(purchasesFor({ item_no: no, checkable: true }, ix), purchasesFor({ item_no: no, checkable: true }, lines), no);
+  }
+  assertEquals(purchasesFor({ item_no: '9156', checkable: true }, ix).map(p => p.date), ['2026-10-20', '2026-09-01']);
+  assertEquals(purchasesFor({ item_no: 'WB33', checkable: true }, ix)[0].unit_price, 11.5);
+  assertEquals(ix.get('9156')?.length, 2, 'cancelled and unpriced lines are not indexed');
 });

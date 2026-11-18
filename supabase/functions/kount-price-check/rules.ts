@@ -109,14 +109,30 @@ export interface PurchaseLine { sku: string | null; description: string; unit_pr
 export interface Purchase { vendor: string; order_number: string | null; invoice_number: string | null; date: string | null;
   unit_price: number; unit: string | null; qty: number | null; description: string }
 
+/** The order-tracker lines by every item-number token they carry (the SKU and each word of the description), built
+ *  once per run. Matching each item against every line (1,166 x 472) was ~1 s of CPU on a desktop and stopped the Edge
+ *  Function at its CPU limit on 11/18 ("Edge Function returned a non-2xx status code"). Cancelled and unpriced lines
+ *  are not prices. */
+export function purchaseIndex(lines: readonly PurchaseLine[]): Map<string, PurchaseLine[]> {
+  const ix = new Map<string, PurchaseLine[]>();
+  for (const l of lines) {
+    if (l.status === 'CANCELLED' || !(Number(l.unit_price) > 0)) continue;
+    const keys = new Set<string>();
+    const k = itemNoKey(l.sku);
+    if (k) keys.add(k);
+    for (const t of String(`${l.sku ?? ''} ${l.description ?? ''}`).split(/[\s,;/()|]+/)) { const tk = itemNoKey(t); if (tk) keys.add(tk); }
+    for (const key of keys) (ix.get(key) ?? ix.set(key, []).get(key)!).push(l);
+  }
+  return ix;
+}
+
 /** What we paid for an item: the order-tracker lines whose SKU or description carries its manufacturer item # as a
- *  whole token (normalized as the bible's), newest first, at most `max`. Cancelled and unpriced lines are not prices. */
-export function purchasesFor(item: Pick<PcItem, 'item_no' | 'checkable'>, lines: readonly PurchaseLine[], max = 3): Purchase[] {
+ *  whole token (normalized as the bible's), newest first, at most `max`. Takes the lines or their purchaseIndex. */
+export function purchasesFor(item: Pick<PcItem, 'item_no' | 'checkable'>, lines: readonly PurchaseLine[] | Map<string, PurchaseLine[]>, max = 3): Purchase[] {
   const key = itemNoKey(item.item_no);
   if (!item.checkable || !key) return [];
-  const hits = lines.filter(l => l.status !== 'CANCELLED' && Number(l.unit_price) > 0 && (
-    itemNoKey(l.sku) === key || String(`${l.sku ?? ''} ${l.description ?? ''}`).split(/[\s,;/()|]+/).some(t => itemNoKey(t) === key)));
-  return hits
+  const hits = (lines instanceof Map ? lines : purchaseIndex(lines)).get(key) ?? [];
+  return [...hits]
     .sort((a, b) => String(b.ordered_on ?? '').localeCompare(String(a.ordered_on ?? '')))
     .slice(0, max)
     .map(l => ({ vendor: l.vendor, order_number: l.order_number, invoice_number: l.invoice_number, date: l.ordered_on,
@@ -227,9 +243,4 @@ export function verdict(item: Pick<PcItem, 'checkable'>, research: Research | nu
   if (!ours) return { status: 'market_only', best, our_unit_price: null, savings_pct: null };
   const savings = Math.round(((ours - best.unit_price) / ours) * 1000) / 10;
   return { status: savings >= overpayPct ? 'overpaying' : 'ok', best, our_unit_price: ours, savings_pct: savings };
-}
-
-/** The run's spend has reached its budget: no more items are started this week. */
-export function overBudget(spentUsd: number, budgetUsd: number | null | undefined): boolean {
-  return Number(budgetUsd) > 0 && Number(spentUsd) >= Number(budgetUsd);
 }

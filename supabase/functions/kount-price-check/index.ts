@@ -10,7 +10,9 @@
 //   {action:'weekly'}  pg_cron 'kount-price-check-weekly' (x-kount-cron): the items re-read from the bibles, a run
 //                      started, every checkable item due (the ones we have bought first)
 //   {action:'work'}    pg_cron 'kount-price-check-work' every 3 min while items are due (x-kount-cron): claims a few
-//                      due items and checks them side by side, in the background; stops at the weekly budget
+//                      due items and checks them side by side, in the background (no budget: the user, 11/18, "this
+//                      function is just to check if the same items are available for cheaper else where. doesnt need
+//                      budget" - what a run costs is still recorded)
 //   {action:'sync' | 'start' | 'check', item_id?}  a person (JWT; Order tracker or Order prices permission):
 //                      re-read the bibles now / start a run now / check one item now and wait for it
 //
@@ -19,7 +21,9 @@
 
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { corsHeaders } from '../_shared/cors.ts';
-import { bibleItems, overBudget, purchasesFor, readResearch, RESEARCH_SYSTEM, researchPrompt, verdict, type BibleRow, type PcItem, type PurchaseLine, type Research } from './rules.ts';
+import { bibleItems, purchaseIndex, purchasesFor, readResearch, RESEARCH_SYSTEM, researchPrompt, verdict, type BibleRow, type PcItem, type PurchaseLine, type Research } from './rules.ts';
+
+type PurchaseIx = Map<string, PurchaseLine[]>;
 
 // 2026-11 key rotation (as kount-order-mail): the new API key maps, legacy env as the fallback
 function newApiKey(mapEnv: string, names: string[], legacyEnv: string): string {
@@ -111,7 +115,7 @@ Deno.serve(async (req) => {
       if (error) throw error;
       if (!item) return reject(404, 'No such item');
       const st = await settings(sb);
-      const check = await checkItem(sb, item as PcItemRow, st, null, await loadPurchaseLines(sb));
+      const check = await checkItem(sb, item as PcItemRow, st, null, purchaseIndex(await loadPurchaseLines(sb)));
       return json(200, { check });
     }
     return reject(400, 'Unknown action');
@@ -151,9 +155,9 @@ async function syncItems(sb: SupabaseClient): Promise<{ items: number; checkable
   const { data: bibles, error } = await sb.from('kount_ot_bibles').select('id, venue_id, title, text_index').eq('is_current', true);
   if (error) throw error;
   const items = bibleItems((bibles ?? []) as BibleRow[]);
-  const lines = await loadPurchaseLines(sb);
+  const ix = purchaseIndex(await loadPurchaseLines(sb));
   const at = nowIso();
-  const rows = items.map(i => ({ ...i, bought: purchasesFor(i, lines).length > 0, active: true, updated_at: at }));
+  const rows = items.map(i => ({ ...i, bought: purchasesFor(i, ix).length > 0, active: true, updated_at: at }));
   for (let k = 0; k < rows.length; k += 200) {
     const { error: e } = await sb.from('kount_pc_items').upsert(rows.slice(k, k + 200), { onConflict: 'item_key' });
     if (e) throw e;
@@ -174,23 +178,17 @@ async function startRun(sb: SupabaseClient, trigger: string) {
   const sync = await syncItems(sb);
   const st = await settings(sb);
   await sb.from('kount_pc_runs').update({ finished_at: nowIso(), stopped: 'replaced by a new run' }).is('finished_at', null);
-  const { data: run, error } = await sb.from('kount_pc_runs').insert({ trigger, items_total: sync.checkable, budget_usd: st.weekly_budget_usd, model: st.model }).select('id').single();
+  const { data: run, error } = await sb.from('kount_pc_runs').insert({ trigger, items_total: sync.checkable, budget_usd: null, model: st.model }).select('id').single();
   if (error) throw error;
   const { error: dErr } = await sb.from('kount_pc_items').update({ due_at: nowIso(), claimed_at: null, attempts: 0 }).eq('active', true).eq('checkable', true);
   if (dErr) throw dErr;
   return { run_id: run.id, ...sync };
 }
 
-/** One tick: a few due items claimed and checked side by side, in the background. Stops the run at its budget;
- *  closes it when nothing is left. */
+/** One tick: a few due items claimed and checked side by side, in the background; closes the run when nothing is left. */
 async function work(sb: SupabaseClient, st: Settings) {
-  const { data: run } = await sb.from('kount_pc_runs').select('id, cost_usd, budget_usd').is('finished_at', null).order('started_at', { ascending: false }).limit(1).maybeSingle();
+  const { data: run } = await sb.from('kount_pc_runs').select('id').is('finished_at', null).order('started_at', { ascending: false }).limit(1).maybeSingle();
   if (!run) return { skipped: 'no run in progress' };
-  if (overBudget(Number(run.cost_usd), Number(run.budget_usd))) {
-    await sb.from('kount_pc_runs').update({ finished_at: nowIso(), stopped: `the weekly budget ($${Number(run.budget_usd).toFixed(0)}) was reached` }).eq('id', run.id);
-    await sb.from('kount_pc_items').update({ due_at: null, claimed_at: null }).not('due_at', 'is', null);
-    return { stopped: 'budget' };
-  }
   const { data: claimed, error } = await sb.rpc('kount_pc_claim', { p_n: st.per_tick });
   if (error) throw error;
   const items = (claimed ?? []) as PcItemRow[];
@@ -199,8 +197,8 @@ async function work(sb: SupabaseClient, st: Settings) {
     if (!count) await sb.from('kount_pc_runs').update({ finished_at: nowIso() }).eq('id', run.id).is('finished_at', null);
     return { claimed: 0, left: count ?? 0 };
   }
-  const lines = await loadPurchaseLines(sb);
-  background(Promise.all(items.map(i => checkItem(sb, i, st, run.id, lines).catch(e => console.error('[kount-price-check] item', i.item_key, msg(e))))));
+  const ix = purchaseIndex(await loadPurchaseLines(sb));
+  background(Promise.all(items.map(i => checkItem(sb, i, st, run.id, ix).catch(e => console.error('[kount-price-check] item', i.item_key, msg(e))))));
   return { claimed: items.length };
 }
 
@@ -255,8 +253,8 @@ async function structure(model: string, prompt: string, notes: string): Promise<
 
 /** One item checked: its research, the verdict, a kount_pc_checks row, the item's latest status. A failure is
  *  retried by a later tick (MAX_ATTEMPTS), then kept as an error. Returns the check row. */
-async function checkItem(sb: SupabaseClient, item: PcItemRow, st: Settings, runId: string | null, lines: PurchaseLine[]) {
-  const purchases = purchasesFor(item, lines);
+async function checkItem(sb: SupabaseClient, item: PcItemRow, st: Settings, runId: string | null, ix: PurchaseIx) {
+  const purchases = purchasesFor(item, ix);
   const prompt = researchPrompt(item, purchases);
   let r: ResearchCall;
   try { r = await research(st.model, prompt); }
