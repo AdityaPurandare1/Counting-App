@@ -11,8 +11,10 @@ own project folder, so nothing else changes:
 
 ```sh
 cd supabase-live/ask-ai
-supabase functions deploy ask-ai --project-ref mnraeesscqsaappkaldb --use-api
+supabase --workdir . functions deploy ask-ai --project-ref mnraeesscqsaappkaldb --use-api
 ```
 
-verify_jwt stays true (the default; the live function has it on). Do not deploy `supabase/functions/ask-ai` over it
+verify_jwt stays true (supabase/config.toml here). The config.toml also makes this folder its own project root:
+without it the CLI walks up to the repo's config and deploys `supabase/functions/ask-ai` instead (it did once, 11/17).
+Check the upload lines list `_shared/counting-auth.ts`. Do not deploy `supabase/functions/ask-ai` over it
 without first merging what this build has.

@@ -1,0 +1,7 @@
+# Makes this folder its own Supabase project root, so `supabase functions deploy ask-ai` run here deploys THIS build
+# (the live one, see ../README.md) and not ../../supabase/functions/ask-ai. On 2026-11-17 a deploy from here without
+# this file walked up to the repo's config.toml and shipped the repo's ask-ai instead (fixed the same day).
+project_id = "counting-app-ask-ai-live"
+
+[functions.ask-ai]
+verify_jwt = true
