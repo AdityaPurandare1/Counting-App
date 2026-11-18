@@ -2299,6 +2299,11 @@ html, body {
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><rect x="2" y="9" width="3" height="5"/><rect x="6.5" y="5" width="3" height="9"/><rect x="11" y="2" width="3" height="12"/></svg>
           Audit Summary
         </button>
+        <!-- v2.36: Order tracker, only for people with the Order tracker / Order tracker (view) permission -->
+        <button id="headerOrdersBtn" onclick="showPage('orders');closeHeaderMenu()" style="display:none;width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--text);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);align-items:center;gap:8px">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5l6-3 6 3v6l-6 3-6-3z"/><path d="M2 5l6 3 6-3M8 8v6"/></svg>
+          Order tracker
+        </button>
         <button onclick="openAIChat();closeHeaderMenu()" style="width:100%;text-align:left;padding:10px 12px;background:none;border:none;color:var(--text);font-family:var(--font);font-size:13px;font-weight:500;cursor:pointer;border-radius:var(--radius-sm);display:flex;align-items:center;gap:8px">
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.5l1.5 3.5 3.5.5-2.5 2.5.5 3.5L8 9.5 5 11.5l.5-3.5L3 5.5l3.5-.5z"/></svg>
           Ask AI
@@ -2583,6 +2588,32 @@ html, body {
 
     <!-- Issues list -->
     <div id="issuesList"></div>
+  </div>
+
+  <!-- ========== ORDER TRACKER PAGE (v2.36, view only) ========== -->
+  <div class="page hide" id="page-orders">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div>
+        <div style="font-size:16px;font-weight:600">Order tracker</div>
+        <div style="font-size:12px;color:var(--text-muted)" id="otSubtitle">Orders, deliveries and invoices &middot; view only</div>
+      </div>
+      <button class="submit-btn secondary" style="padding:6px 12px;font-size:11px;margin-top:0;width:auto;flex:none" onclick="loadOrderTracker()">Refresh</button>
+    </div>
+    <div class="form-group" style="margin-bottom:8px">
+      <input class="form-input" id="otSearch" type="search" placeholder="Search vendor, order #, item, invoice" oninput="renderOrdersPage()" autocomplete="off">
+    </div>
+    <div class="form-group" style="margin-bottom:10px">
+      <select class="form-input" id="otVenueFilter" onchange="renderOrdersPage()"><option value="all">All venues</option></select>
+    </div>
+    <div class="mode-toggle" style="margin-bottom:12px">
+      <button class="mode-btn active" data-otf="open" onclick="setOtFilter('open', this)">Open</button>
+      <button class="mode-btn" data-otf="late" onclick="setOtFilter('late', this)">Late</button>
+      <button class="mode-btn" data-otf="unpaid" onclick="setOtFilter('unpaid', this)">Unpaid</button>
+      <button class="mode-btn" data-otf="all" onclick="setOtFilter('all', this)">All</button>
+    </div>
+    <div style="display:flex;gap:6px;margin-bottom:12px" id="otStats"></div>
+    <div id="otList"></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:12px;text-align:center" id="otFooter"></div>
   </div>
 
   <!-- ========== RECOUNT PAGE (Count 2 focus list) ========== -->
@@ -3179,7 +3210,7 @@ const FULL_CATALOG_LIST_VENUES = new Set(['v5', 'v11']);
 /* Bump APP_VERSION by 0.1 on every commit (even tiny ones) so admins can
    confirm at a glance that they are running the latest build. Keep the
    sw.js CACHE_NAME in lockstep so stale clients drop the old bundle. */
-const APP_VERSION = '2.35';
+const APP_VERSION = '2.36';
 
 /* ================================================================
    SUPABASE INTEGRATION
@@ -8923,7 +8954,9 @@ async function handleLogin() {
     role: resolvedRole,
     features: resolvedFeatures,
     venueIds: resolvedVenueIds,
+    otAccess: null,
   };
+  refreshOrderTrackerAccess();   // v2.36: the Order tracker menu item, for people with that permission
 
   saveState();
   // v2.00: re-pull the venue list now that we have a JWT. The boot-time
@@ -8997,6 +9030,7 @@ function showPage(page) {
     summary: renderSummaryPage,
     recount: renderRecountPage,
     issues: renderIssuesPage,
+    orders: renderOrdersPage,
   };
 
   if (renderMap[page]) renderMap[page]();
@@ -9298,8 +9332,10 @@ async function _hydrateUserProfileFromSession(opts) {
     role: row.role,
     features: rowFeatures(row),
     venueIds: rowVenueIds(row),
+    otAccess: (appState.user && appState.user.email === email && appState.user.otAccess) || null,
   };
   saveState();
+  refreshOrderTrackerAccess();   // v2.36
   // v2.00: same reason as the sign-in path — this runs once the JWT exists,
   // so it is the first venue read that RLS will actually answer.
   loadVenuesFromSupabase().catch(function() {});
@@ -16642,6 +16678,7 @@ function updateIssueCountBadge() {
 }
 
 function toggleHeaderMenu() {
+  updateOrderTrackerMenu();   // v2.36
   var menu = document.getElementById('headerMenu');
   menu.classList.toggle('hide');
   // Close on outside click
@@ -16668,6 +16705,324 @@ function setIssueFilter(filter, element) {
     btn.classList.toggle('active', btn.dataset.if === filter);
   });
   renderIssuesPage();
+}
+
+/* ================================================================
+   ORDER TRACKER (v2.36) - a view-only look at the Purchasing order tracker on
+   the phone, for people with the Order tracker or Order tracker (view)
+   permission. The user, 11/17: "in the phone app, i want a section that allows
+   me to check the order tracker as well but just for myself and people who have
+   access to order tracker ... for Everyone else it should still function the
+   way it is rightnow without the order tracker".
+   The permission is read on its own (app_users.features), so every other check
+   on the phone keeps using the role templates; the database (RLS) decides which
+   rows each person gets (Order tracker (view): their venues + the warehouse).
+   ================================================================ */
+var OT_STATUSES = ['REQUESTED', 'ORDERED', 'QUOTED', 'INVOICED', 'PAID', 'SHIPPED', 'DELIVERED', 'RECEIVED'];
+var OT_STATUS_LABEL = { REQUESTED: 'Requested', ORDERED: 'Ordered', QUOTED: 'Quoted', INVOICED: 'Invoiced', PAID: 'Paid',
+  SHIPPED: 'Shipped', DELIVERED: 'Delivered', RECEIVED: 'Received', CANCELLED: 'Cancelled' };
+var OT_STATUS_COLOR = { REQUESTED: 'var(--text-muted)', ORDERED: 'var(--accent)', QUOTED: 'var(--warning)', INVOICED: 'var(--warning)',
+  PAID: 'var(--success)', SHIPPED: 'var(--accent)', DELIVERED: 'var(--success)', RECEIVED: 'var(--success)', CANCELLED: 'var(--text-dim)' };
+var OT_DOC_LABEL = { quote: 'Quote', confirmation: 'Order confirmation', invoice: 'Invoice', shipping: 'Shipping notice', payment: 'Check stub', other: 'Document' };
+var OT_ADMIN_URL = 'https://adityapurandare1.github.io/Counting-Admin/';
+var otData = null;      // { email, orders, lines, tracking, documents, loadedAt, error }
+var otFilter = 'open';
+var otOpenId = null;
+var otLoading = false;
+
+function otRank(s) { return s === 'CANCELLED' ? OT_STATUSES.length : OT_STATUSES.indexOf(s); }
+
+/* 'full' (Order tracker), 'view' (Order tracker (view)) or null, from an app_users row. A row from before
+   per-person permissions (no list) goes by its role, as the admin and the mail pull read it: admin, corporate. */
+function orderTrackerAccessOf(row) {
+  if (!row) return null;
+  if (Array.isArray(row.features)) {
+    if (row.features.indexOf('purchasing:order-tracker') >= 0) return 'full';
+    if (row.features.indexOf('purchasing:order-tracker-view') >= 0) return 'view';
+    return null;
+  }
+  return (row.role === 'admin' || row.role === 'corporate') ? 'full' : null;
+}
+function orderTrackerAccess() { return (appState.user && appState.user.otAccess) || null; }
+
+/* The menu item shows only for people with the permission. */
+function updateOrderTrackerMenu() {
+  var btn = document.getElementById('headerOrdersBtn');
+  if (btn) btn.style.display = orderTrackerAccess() ? 'flex' : 'none';
+}
+
+/* Reads the signed-in person's order-tracker permission. A read that fails keeps what was known (never takes the
+   section away because of a network blip); a removed permission hides it and leaves the page. */
+async function refreshOrderTrackerAccess() {
+  if (!appState.user || !appState.user.email) { updateOrderTrackerMenu(); return; }
+  var email = appState.user.email;
+  var r = await supabaseRest.query('app_users', 'select=role,features&email=eq.' + encodeURIComponent(email) + '&limit=1');
+  if (r.error || !Array.isArray(r.data) || !appState.user || appState.user.email !== email) { updateOrderTrackerMenu(); return; }
+  appState.user.otAccess = orderTrackerAccessOf(r.data[0]);
+  try { saveState(); } catch (e) {}
+  updateOrderTrackerMenu();
+  var page = document.getElementById('page-orders');
+  if (!appState.user.otAccess && page && !page.classList.contains('hide')) showPage('venues');
+}
+
+async function otFetchAll(table, select, extra) {
+  var out = [];
+  for (var off = 0; off < 20000; off += 1000) {
+    var r = await supabaseRest.query(table, 'select=' + select + (extra ? '&' + extra : '') + '&limit=1000&offset=' + off);
+    if (r.error) throw r.error;
+    out = out.concat(r.data || []);
+    if (!r.data || r.data.length < 1000) break;
+  }
+  return out;
+}
+
+async function loadOrderTracker() {
+  if (!orderTrackerAccess() || otLoading) return;
+  otLoading = true;
+  renderOrdersPage();
+  var email = appState.user.email;
+  try {
+    var res = await Promise.all([
+      otFetchAll('kount_ot_orders', 'id,order_number,vendor_name,venue_id,deliver_to,ordered_on,expected_on,sent_on,notes,completed_at,archived_at,updated_at', 'archived_at=is.null&order=updated_at.desc'),
+      otFetchAll('kount_ot_lines', 'id,order_id,description,sku,qty,unit,unit_price,status,quote_number,invoice_number,tracking_number,expected_on,delivered_on,venue_id,sort', 'order=sort.asc'),
+      otFetchAll('kount_ot_tracking', 'order_id,tracking_number,carrier', ''),
+      otFetchAll('kount_ot_documents', 'id,order_id,kind,doc_number,doc_date,total,file_name,storage_path', 'order=created_at.desc'),
+    ]);
+    otData = { email: email, orders: res[0], lines: res[1], tracking: res[2], documents: res[3], loadedAt: new Date(), error: null };
+  } catch (e) {
+    console.warn('[order tracker] load failed:', e);
+    otData = { email: email, orders: (otData && otData.orders) || [], lines: (otData && otData.lines) || [], tracking: (otData && otData.tracking) || [],
+      documents: (otData && otData.documents) || [], loadedAt: otData && otData.loadedAt, error: 'Could not load the order tracker - check the connection and tap Refresh.' };
+  }
+  otLoading = false;
+  renderOrdersPage();
+}
+
+function otToday() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }); }
+function otDay(d) {
+  if (!d) return '';
+  var p = String(d).slice(0, 10).split('-');
+  return p.length === 3 ? Number(p[1]) + '/' + Number(p[2]) : String(d);
+}
+function otMoney(n) { return '$' + (Number(n) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function otCarrier(num) {
+  var n = String(num || '').replace(/\s+/g, '');
+  if (/^1Z[0-9A-Z]{16}$/i.test(n)) return 'UPS';
+  if (/^(\d{12}|\d{15}|\d{20})$/.test(n)) return 'FedEx';
+  if (/^(94|93|92|95)\d{20}$/.test(n)) return 'USPS';
+  return null;
+}
+function otTrackUrl(t) {
+  var n = encodeURIComponent(t.number);
+  if (t.carrier === 'UPS') return 'https://www.ups.com/track?tracknum=' + n;
+  if (t.carrier === 'FedEx') return 'https://www.fedex.com/fedextrack/?trknbr=' + n;
+  if (t.carrier === 'USPS') return 'https://tools.usps.com/go/TrackConfirmAction?tLabels=' + n;
+  if (t.carrier === 'DHL') return 'https://www.dhl.com/us-en/home/tracking.html?tracking-id=' + n;
+  return 'https://www.google.com/search?q=' + n;
+}
+function otVenueName(id) {
+  if (!id) return 'Warehouse';
+  var v = (appState.venues || []).find(function (x) { return x && x.id === id; });
+  return v ? v.name : id;
+}
+
+/* One order as the list shows it: its headline status (the least advanced live line), open / completed, late
+   (a live line past its date and not delivered), unpaid (a line invoiced, not paid), total, next ETA, tracking. */
+function otOrderView(o, byOrder, today) {
+  var ls = byOrder.lines[o.id] || [];
+  var live = ls.filter(function (l) { return l.status !== 'CANCELLED'; });
+  var head = !ls.length ? null : (!live.length ? 'CANCELLED'
+    : live.reduce(function (m, l) { return otRank(l.status) < otRank(m) ? l.status : m; }, live[0].status));
+  var state = o.completed_at || head === 'RECEIVED' || head === 'CANCELLED' ? 'completed' : 'open';
+  var notThere = live.filter(function (l) { return otRank(l.status) < otRank('DELIVERED'); });
+  var late = state === 'open' && notThere.some(function (l) { var due = l.expected_on || o.expected_on; return !!due && due < today; });
+  var unpaid = live.some(function (l) { return l.status === 'INVOICED'; });
+  var total = live.reduce(function (t, l) { return t + (Number(l.qty) || 0) * (Number(l.unit_price) || 0); }, 0);
+  var etas = notThere.map(function (l) { return l.expected_on || o.expected_on; }).filter(Boolean).sort();
+  var tracks = (byOrder.tracking[o.id] || []).map(function (t) { return { number: t.tracking_number, carrier: t.carrier || otCarrier(t.tracking_number) }; });
+  ls.forEach(function (l) {
+    if (l.tracking_number && !tracks.some(function (t) { return t.number === l.tracking_number; })) tracks.push({ number: l.tracking_number, carrier: otCarrier(l.tracking_number) });
+  });
+  var venueIds = [o.venue_id || null].concat(ls.map(function (l) { return l.venue_id || null; }));
+  return { o: o, lines: ls, head: head, state: state, late: late, unpaid: unpaid, total: total, eta: etas[0] || null,
+    tracks: tracks, docs: byOrder.docs[o.id] || [], venueIds: venueIds };
+}
+
+function otGroup(rows) {
+  var m = {};
+  (rows || []).forEach(function (r) { (m[r.order_id] = m[r.order_id] || []).push(r); });
+  return m;
+}
+
+function otMatchesSearch(v, q) {
+  if (!q) return true;
+  var hay = [v.o.vendor_name, v.o.order_number, otVenueName(v.o.venue_id), v.o.notes]
+    .concat(v.lines.map(function (l) { return [l.description, l.sku, l.invoice_number, l.quote_number, l.tracking_number].join(' '); }))
+    .concat(v.tracks.map(function (t) { return t.number; }))
+    .concat(v.docs.map(function (d) { return d.doc_number; })).join(' ').toLowerCase();
+  return q.toLowerCase().split(/\s+/).filter(Boolean).every(function (w) { return hay.indexOf(w) >= 0; });
+}
+
+function setOtFilter(f, btn) {
+  otFilter = f;
+  document.querySelectorAll('#page-orders .mode-btn').forEach(function (b) { b.classList.toggle('active', b === btn); });
+  renderOrdersPage();
+}
+function otToggle(id) { otOpenId = otOpenId === id ? null : id; renderOrdersPage(); }
+
+function otPill(status) {
+  if (!status) return '';
+  return '<span style="font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid ' + OT_STATUS_COLOR[status] +
+    ';color:' + OT_STATUS_COLOR[status] + ';white-space:nowrap">' + esc(OT_STATUS_LABEL[status] || status) + '</span>';
+}
+function otFlag(text, color) {
+  return '<span style="font-size:10px;font-weight:700;padding:1px 6px;border-radius:8px;background:' + color + ';color:#fff;white-space:nowrap">' + esc(text) + '</span>';
+}
+function otStat(n, label, color) {
+  return '<div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center">' +
+    '<div style="font-family:var(--mono);font-size:18px;font-weight:600;color:' + color + '">' + n + '</div>' +
+    '<div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px">' + label + '</div></div>';
+}
+
+function renderOrdersPage() {
+  var list = document.getElementById('otList');
+  if (!list) return;
+  var access = orderTrackerAccess();
+  if (!access) {
+    list.innerHTML = '<div class="empty-state"><p>The order tracker is for people with the Order tracker permission.</p></div>';
+    document.getElementById('otStats').innerHTML = '';
+    return;
+  }
+  document.getElementById('otSubtitle').textContent = access === 'view'
+    ? 'Your venues\u2019 orders and the warehouse \u00b7 view only' : 'Orders, deliveries and invoices \u00b7 view only';
+  if ((!otData || otData.email !== appState.user.email) && !otLoading) { otData = null; loadOrderTracker(); return; }
+  if (!otData) { list.innerHTML = '<div class="empty-state"><p>Loading orders\u2026</p></div>'; return; }
+
+  var today = otToday();
+  var byOrder = { lines: otGroup(otData.lines), tracking: otGroup(otData.tracking), docs: otGroup(otData.documents) };
+  var views = otData.orders.map(function (o) { return otOrderView(o, byOrder, today); });
+
+  var vSel = document.getElementById('otVenueFilter');
+  var cur = vSel.value || 'all';
+  var vIds = [];
+  views.forEach(function (v) { v.venueIds.forEach(function (id) { var k = id || 'warehouse'; if (vIds.indexOf(k) < 0) vIds.push(k); }); });
+  vIds.sort(function (a, b) { return otVenueName(a === 'warehouse' ? null : a).localeCompare(otVenueName(b === 'warehouse' ? null : b)); });
+  vSel.innerHTML = '<option value="all">All venues</option>' + vIds.map(function (id) {
+    return '<option value="' + esc(id) + '"' + (cur === id ? ' selected' : '') + '>' + esc(otVenueName(id === 'warehouse' ? null : id)) + '</option>';
+  }).join('');
+  if (cur !== 'all' && vIds.indexOf(cur) < 0) vSel.value = 'all';
+  var venue = vSel.value || 'all';
+  var q = (document.getElementById('otSearch').value || '').trim();
+
+  var inScope = views.filter(function (v) {
+    return (venue === 'all' || v.venueIds.some(function (id) { return (id || 'warehouse') === venue; })) && otMatchesSearch(v, q);
+  });
+  var open = inScope.filter(function (v) { return v.state === 'open'; });
+  document.getElementById('otStats').innerHTML =
+    otStat(open.length, 'Open', 'var(--accent)') +
+    otStat(inScope.filter(function (v) { return v.late; }).length, 'Late', 'var(--danger)') +
+    otStat(inScope.filter(function (v) { return v.unpaid; }).length, 'Unpaid', 'var(--warning)');
+
+  var shown = otFilter === 'open' ? open
+    : otFilter === 'late' ? inScope.filter(function (v) { return v.late; })
+    : otFilter === 'unpaid' ? inScope.filter(function (v) { return v.unpaid; })
+    : inScope;
+  shown = shown.slice().sort(function (a, b) {
+    if (a.late !== b.late) return a.late ? -1 : 1;
+    if (a.state !== b.state) return a.state === 'open' ? -1 : 1;
+    return String(b.o.updated_at || '').localeCompare(String(a.o.updated_at || ''));
+  });
+
+  var foot = otData.loadedAt ? 'Updated ' + otData.loadedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+  document.getElementById('otFooter').innerHTML = (otData.error ? '<div style="color:var(--danger);margin-bottom:6px">' + esc(otData.error) + '</div>' : '') +
+    esc(foot) + (foot ? ' \u00b7 ' : '') + '<a href="' + OT_ADMIN_URL + '" target="_blank" rel="noopener" style="color:var(--accent)">Full tracker in the admin</a>';
+
+  if (otLoading && !otData.orders.length) { list.innerHTML = '<div class="empty-state"><p>Loading orders\u2026</p></div>'; return; }
+  if (!shown.length) {
+    list.innerHTML = '<div class="empty-state"><p>No orders' + (otFilter !== 'all' || q || venue !== 'all' ? ' for this filter' : '') + '.</p></div>';
+    return;
+  }
+  list.innerHTML = shown.slice(0, 150).map(otCardHtml).join('') +
+    (shown.length > 150 ? '<div style="font-size:11px;color:var(--text-dim);text-align:center">Showing 150 of ' + shown.length + ' - search to narrow it down.</div>' : '');
+}
+
+function otCardHtml(v) {
+  var o = v.o;
+  var isOpen = otOpenId === o.id;
+  var border = v.late ? 'var(--danger)' : v.state === 'open' ? 'var(--accent)' : 'var(--border)';
+  var meta = [otVenueName(o.venue_id), v.lines.length + ' line' + (v.lines.length === 1 ? '' : 's'), v.total ? otMoney(v.total) : '',
+    v.state === 'open' && v.eta ? 'ETA ' + otDay(v.eta) : '', v.state === 'completed' ? 'Completed' : ''].filter(Boolean).join(' \u00b7 ');
+  var h = '<div class="ot-card" data-order="' + esc(o.id) + '" style="background:var(--surface);border:1px solid var(--border);border-left:3px solid ' + border +
+    ';border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:8px">' +
+    '<div onclick="otToggle(\'' + esc(o.id) + '\')" style="cursor:pointer">' +
+      '<div style="display:flex;align-items:center;gap:8px">' +
+        '<div style="flex:1;min-width:0;font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(o.vendor_name || 'Vendor') + '</div>' +
+        otPill(v.head) +
+      '</div>' +
+      '<div style="display:flex;align-items:center;gap:6px;margin-top:3px;flex-wrap:wrap">' +
+        '<span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + esc(o.order_number || '') + '</span>' +
+        '<span style="font-size:11px;color:var(--text-muted)">' + esc(meta) + '</span>' +
+        (v.late ? otFlag('LATE', 'var(--danger)') : '') + (v.unpaid ? otFlag('UNPAID', 'var(--warning)') : '') +
+      '</div>' +
+    '</div>';
+  if (v.tracks.length) {
+    h += '<div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">' + v.tracks.map(function (t) {
+      return '<a href="' + esc(otTrackUrl(t)) + '" target="_blank" rel="noopener" style="font-size:11px;font-family:var(--mono);color:var(--accent);text-decoration:none;border:1px solid var(--border);border-radius:8px;padding:2px 8px">' +
+        esc((t.carrier ? t.carrier + ' ' : '') + t.number) + ' \u2197</a>';
+    }).join('') + '</div>';
+  }
+  if (isOpen) h += otDetailHtml(v);
+  return h + '</div>';
+}
+
+function otDetailHtml(v) {
+  var o = v.o;
+  var h = '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">';
+  h += '<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">' + esc([o.ordered_on ? 'Ordered ' + otDay(o.ordered_on) : '', o.sent_on ? 'sent ' + otDay(o.sent_on) : '',
+    o.expected_on ? 'expected ' + otDay(o.expected_on) : '', o.deliver_to === 'warehouse' ? 'to the warehouse' : ''].filter(Boolean).join(' \u00b7 ')) + '</div>';
+  h += v.lines.map(function (l) {
+    var price = Number(l.unit_price) ? ' @ ' + otMoney(l.unit_price) : '';
+    var when = l.delivered_on ? 'delivered ' + otDay(l.delivered_on) : (l.expected_on ? 'ETA ' + otDay(l.expected_on) : '');
+    var refs = [l.invoice_number ? 'Inv ' + l.invoice_number : '', l.quote_number && !l.invoice_number ? 'Quote ' + l.quote_number : '', when,
+      l.venue_id && l.venue_id !== o.venue_id ? otVenueName(l.venue_id) : ''].filter(Boolean).join(' \u00b7 ');
+    return '<div style="padding:6px 0;border-bottom:1px dashed var(--border)">' +
+      '<div style="display:flex;gap:8px;align-items:flex-start"><div style="flex:1;font-size:12px">' + esc(l.description || l.sku || 'Item') + '</div>' + otPill(l.status) + '</div>' +
+      '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + esc((l.qty != null ? l.qty : '') + ' ' + (l.unit || '') + price) +
+        (refs ? ' \u00b7 ' + esc(refs) : '') + '</div></div>';
+  }).join('');
+  if (v.docs.length) {
+    h += '<div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">' + v.docs.map(function (d) {
+      var label = (OT_DOC_LABEL[d.kind] || 'Document') + (d.doc_number ? ' ' + d.doc_number : '') + (Number(d.total) ? ' \u00b7 ' + otMoney(d.total) : '');
+      return '<button onclick="otOpenDoc(\'' + esc(d.id) + '\')" ' + (d.storage_path ? '' : 'disabled ') +
+        'style="font-size:11px;padding:4px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2, var(--surface));color:var(--text);font-family:var(--font);cursor:pointer">' +
+        esc(label) + '</button>';
+    }).join('') + '</div>';
+  }
+  if (o.notes) h += '<div style="margin-top:8px;font-size:11px;color:var(--text-muted);white-space:pre-wrap">' + esc(o.notes) + '</div>';
+  return h + '</div>';
+}
+
+/* A document (invoice, quote, stub) opens in a new tab through a 5-minute signed link from the tracker's bucket. */
+async function otOpenDoc(docId) {
+  var d = otData && otData.documents.find(function (x) { return x.id === docId; });
+  if (!d || !d.storage_path) return;
+  var w = window.open('', '_blank');
+  try {
+    var path = String(d.storage_path).split('/').map(encodeURIComponent).join('/');
+    var resp = await fetch(SUPABASE_URL + '/storage/v1/object/sign/kount-order-docs/' + path, {
+      method: 'POST', headers: _supabaseAuthHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify({ expiresIn: 300 }),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var j = await resp.json();
+    var signed = j.signedURL || j.signedUrl;
+    if (!signed) throw new Error('no link');
+    var url = /^https?:/.test(signed) ? signed : SUPABASE_URL + '/storage/v1' + signed;
+    if (w) w.location.href = url; else window.open(url, '_blank');
+  } catch (e) {
+    console.warn('[order tracker] document link failed:', e);
+    if (w) try { w.close(); } catch (e2) {}
+    showToast('Could not open the document', 'error');
+  }
 }
 
 function renderIssuesPage() {
@@ -18510,6 +18865,7 @@ window.kountRefresh = function () {
 syncIssuesToLog();
 updateIssueCountBadge();
 updateAPIKeyIndicator();
+updateOrderTrackerMenu();   // v2.36: from the saved session; refreshed once the session is checked
 initUpcMappingsSync();
 
 if (appState.user) {
