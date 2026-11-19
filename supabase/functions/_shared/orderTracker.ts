@@ -1559,10 +1559,12 @@ export interface ReleaseRead {
 }
 
 const RELEASE_QTY = /\b\d+\s*(?:cases?|cs|ctns?|cartons?|boxes|box|packs?|pallets?)\b|\b(?:a|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:cases?|boxes|cartons?)\b/i;
-const RELEASE_MOVE = /\b(?:send|sent|ship|shipped|deliver|delivered|delivery|uber|courier|pick ?up|picked up|drop ?off|release|from (?:the )?(?:warehouse|storage|stock))\b/i;
+// v1.30 (11/19, the first run): the user writes a release as an order too - "I would like to place an order for 2 cases of
+// togo bags for birdstreet" - so ordering words pass; the reader tells it from a new purchase by the stock list
+const RELEASE_MOVE = /\b(?:send|sent|ship|shipped|deliver|delivered|delivery|uber|courier|pick ?up|picked up|drop ?off|release|order|ordering|request|need|needs|get|from (?:the )?(?:warehouse|storage|stock))\b/i;
 
-/** Worth reading: it names a number of cases AND sending / delivering / picking up. A words test before the reader, so
- *  quotes, payments and artwork never cost a read. */
+/** Worth reading: it names a number of cases AND sending / delivering / picking up / ordering. A words test before the
+ *  reader, so payments, artwork and lead-time questions never cost a read. */
 export function releaseMailCandidate(subject: string | null | undefined, body: string | null | undefined): boolean {
   const t = `${subject ?? ''}\n${body ?? ''}`;
   return RELEASE_QTY.test(t) && RELEASE_MOVE.test(t);
