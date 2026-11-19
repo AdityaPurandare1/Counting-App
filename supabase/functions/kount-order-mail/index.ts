@@ -1738,15 +1738,26 @@ async function releasePhase(sb: SupabaseClient, stats: Stats, accessToken: strin
     const fromMs = acct.release_cursor ? Date.parse(acct.release_cursor) - 86_400_000 : Date.now() - RELEASE_LOOKBACK_DAYS * 86_400_000;
     const sinceDay = new Date(fromMs).toISOString().slice(0, 10);
     const byId = new Map<string, ReleaseMsg>();
-    for (const d of ee) {
-      let url = `/me/messages?$search=${encodeURIComponent(`"participants:${d} received>=${sinceDay}"`)}&$select=${RELEASE_FIELDS}&$top=25`;
-      let pages = 0;
-      while (url && pages++ < 20) {
-        const page = await graphGet<{ value?: ReleaseMsg[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
-        for (const m of page.value ?? []) byId.set(m.id, m);
-        url = page['@odata.nextLink'] ?? '';
+    // one field per search: Outlook refuses "participants:" (an OR of from / to / cc) together with a date (11/19, the
+    // first run: "Unrecognized filter of type Microsoft.Exchange.Data.OrFilter"); "from:<domain> received>=" works
+    const searchErrors: string[] = [];
+    for (const d of ee) for (const field of ['to', 'cc']) {
+      try {
+        let url = `/me/messages?$search=${encodeURIComponent(`"${field}:${d} received>=${sinceDay}"`)}&$select=${RELEASE_FIELDS}&$top=25`;
+        let pages = 0;
+        while (url && pages++ < 20) {
+          const page = await graphGet<{ value?: ReleaseMsg[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+          for (const m of page.value ?? []) byId.set(m.id, m);
+          url = page['@odata.nextLink'] ?? '';
+        }
+      } catch (e) {
+        // one search refused still leaves the other (the e-mails to E&E are the most of them)
+        if (e instanceof GraphError && e.reauth) throw e;
+        searchErrors.push(`${field}: ${msg(e)}`.slice(0, 150));
       }
     }
+    if (searchErrors.length === ee.length * 2) throw new Error(searchErrors.join(' | '));
+    if (searchErrors.length) stats.releases_note = `a search was refused (${searchErrors.join(' | ')})`;
     // ours (a teammate's with us on copy too), not a draft, to or copying E&E; oldest first so the cursor only moves forward
     const toEe = (m: ReleaseMsg) => [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].some(r => onList(domainOf(r.emailAddress?.address), ee));
     const at = (m: ReleaseMsg) => m.sentDateTime ?? m.receivedDateTime ?? '';
