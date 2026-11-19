@@ -28,7 +28,8 @@ import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supa
 import { corsHeaders } from '../_shared/cors.ts';
 import { readPurchaseFile, readPurchasePdf } from '../_shared/purchase-doc.ts';
 import * as XLSX from 'https://esm.sh/xlsx@0.18.5';
-import { accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, stubCheckDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { releaseMailCandidate, planReleaseMail, matchRelease, linkStorageRows, isCustomItem, itemLocation, EE_WAREHOUSE, accountingBoxes, acctMailVerdict, firstAccountingMail, trackableInvoice, type AcctMail, awaitingApproval, decideMailDocument, extractTracking, isOwnSender, paymentRequestOf, planQuoteApprovals, quoteKey, scheduledPullDue, stubCheckDue, searchableQuote, type MailMessage, isSpreadsheet, isStorageLine, keepOtherAttachment, orderForEmail, sheetUpdates, statusRank, orderVenues, planStorageLine, storageMoveRows, type MailDecideOptions, type OtDocument, type OtItem, type OtLine, type OtMove, type OtOrder, type ReadDoc, type TrackingHit } from '../_shared/orderTracker.ts';
+import { readReleaseMail, releaseContext } from './release.ts';
 import { deviceCodePoll, deviceCodeStart, DRAFT_SCOPE, GraphError, graphGet, graphPost, graphPostJson, refreshAccess, SEND_SCOPE } from './graph.ts';
 import { latestThreadMail, laterMail, ALL_DOC_KINDS, isInvoiceFile, proofMatches, proofPrinted, saysPaid, stubThreadInvoices, type ProofMatch, type ProofRead, domainOf, fromBase64, idTokenMailbox, invoiceToken, isPdfAttachment, isStubAttachment, kindAllowed, laParts, paidInvoices, stubInvoices, type R365Tx, looksLikePurchaseDoc, onList, OWN_DOMAINS, safeEqual, sha256Hex, toBase64, wantsAttachment, sentToVendor, takeEmailSentDay, type GraphAttachment, type ThreadMessage } from './rules.ts';
 
@@ -402,6 +403,17 @@ Deno.serve(async (req) => {
       return json(200, { found: stats.acct_sent ?? 0, requested: stats.acct_requested ?? 0, checked: stats.acct_checked ?? 0, error: stats.acct_error ?? null });
     }
 
+    if (action === 'releases') {
+      // the release engine (0179), on demand: "Check my e-mails to E&E now" - then E&E's invoices link to what it found
+      const stats = blankStats(`releases by ${caller.email}`);
+      const token = await mailAccessToken(sb);
+      if (!token) return json(200, { recorded: 0, error: 'Outlook is not connected.' });
+      await releasePhase(sb, stats, token, Date.now() + 100_000);
+      await storagePhase(sb, stats, caller.email);
+      return json(200, { seen: stats.releases_seen ?? 0, read: stats.releases_read ?? 0, recorded: stats.releases_recorded ?? 0, review: stats.releases_review ?? 0,
+        linked: stats.storage_linked ?? 0, note: stats.releases_note ?? null, error: stats.releases_error ?? stats.storage_error ?? null });
+    }
+
     if (action === 'threads') {
       // each open order's latest e-mail (0178), on demand - the hourly check does the same
       const stats = blankStats(`order threads by ${caller.email}`);
@@ -455,6 +467,10 @@ interface Stats {
   acct_requested?: number;
   /** open orders whose threads were read / whose last e-mail moved / why it stopped short or failed (0178) */
   threads_checked?: number; threads_moved?: number; threads_note?: string; threads_error?: string;
+  /** the release engine (0179): e-mails to E&E found / read by the reader / recorded as releases / left for a person */
+  releases_seen?: number; releases_read?: number; releases_recorded?: number; releases_review?: number; releases_note?: string; releases_error?: string;
+  /** E&E invoice lines that took a release already asked by e-mail (0179) */
+  storage_linked?: number;
 }
 const blankStats = (trigger: string): Stats => ({ trigger, started_at: nowIso(), messages: 0, new_pdfs: 0, read: 0, applied: 0, pending: 0, ignored: 0, failed: 0, tracking: 0, paid: 0, stubs: 0, error: null, reconnect: false });
 
@@ -487,6 +503,9 @@ async function runPull(sb: SupabaseClient, trigger: string, depth: number, fromM
     await redecidePending(sb, stats, startedMs + READ_BUDGET_MS);
     await readPhase(sb, stats, startedMs + READ_BUDGET_MS, kinds);
     await r365PaidPhase(sb, stats);
+    // v1.30 (0179): stock asked out of E&E's storage by e-mail, before E&E's invoices for those trips link to it
+    const relToken = await mailAccessToken(sb).catch(e => { stats.releases_error = msg(e).slice(0, 300); return null; });
+    if (relToken) await releasePhase(sb, stats, relToken);
     await storagePhase(sb, stats, 'morning mail pull');
     await otherPhase(sb, stats);
     await sentPhase(sb, stats);
@@ -1177,6 +1196,9 @@ async function runStubCheck(sb: SupabaseClient) {
     await stubPhase(sb, tok.access_token, 0, stats, STUB_CHECK_DAYS);
     // 0178: each open order's latest e-mail, for "Follow up" - hourly, so a reply clears the flag the same day
     await threadPhase(sb, stats, tok.access_token);
+    // 0179: releases asked by e-mail during the day, then E&E's invoices that arrived since
+    await releasePhase(sb, stats, tok.access_token);
+    await storagePhase(sb, stats, 'hourly check');
   } catch (e) {
     stats.error = msg(e);
     stats.reconnect = e instanceof GraphError && e.reauth;
@@ -1184,7 +1206,10 @@ async function runStubCheck(sb: SupabaseClient) {
   } finally {
     const check = { started_at: startedAt, finished_at: nowIso(), stubs: stats.stubs, stubs_sent: stats.stubs_sent ?? 0, proofs_read: stats.proofs_read ?? 0,
       paid_by_proof: stats.paid_by_proof ?? 0, note: stats.stub_note ?? null, error: stats.error, reconnect: stats.reconnect,
-      threads_checked: stats.threads_checked ?? 0, threads_moved: stats.threads_moved ?? 0, threads_note: stats.threads_note ?? null, threads_error: stats.threads_error ?? null };
+      threads_checked: stats.threads_checked ?? 0, threads_moved: stats.threads_moved ?? 0, threads_note: stats.threads_note ?? null, threads_error: stats.threads_error ?? null,
+      releases_seen: stats.releases_seen ?? 0, releases_read: stats.releases_read ?? 0, releases_recorded: stats.releases_recorded ?? 0,
+      releases_review: stats.releases_review ?? 0, releases_note: stats.releases_note ?? null, releases_error: stats.releases_error ?? null,
+      storage: stats.storage ?? 0, storage_linked: stats.storage_linked ?? 0, storage_error: stats.storage_error ?? null };
     const { data: a } = await sb.from('kount_ot_mail_account').select('last_run').eq('id', 1).single();
     const prev = (a?.last_run ?? null) as Record<string, unknown> | null;
     await sb.from('kount_ot_mail_account').update({ running_since: null, last_run: prev ? { ...prev, stub_check: check } : { ...stats, finished_at: nowIso(), stub_check: check },
@@ -1474,13 +1499,25 @@ async function storagePhase(sb: SupabaseClient, stats: Stats, who: string) {
       if (plan.problem) { stats.storage_review = (stats.storage_review ?? 0) + 1; continue; }
       if (!(await claim(l.id))) continue;
       const rows = storageMoveRows(plan, l, l.invoice_date ?? o.ordered_on ?? laParts().isoDate).map(r => ({ ...r, created_by: who }));
-      const { error } = await sb.from('kount_ot_stock_moves').insert(rows);
+      // v1.30 (0179): a trip already asked for by e-mail is that release - it takes the invoice's day, cases and line
+      const { link, insert } = linkStorageRows(rows, moves);
+      for (const { move, row } of link) {
+        const { error } = await sb.from('kount_ot_stock_moves').update({ line_id: row.line_id, moved_on: row.moved_on, qty: row.qty,
+          note: `${move.note ?? ''} · ${row.note}`.slice(0, 500) }).eq('id', move.id);
+        if (error) {
+          await sb.from('kount_ot_lines').update({ stock_draw: null }).eq('id', l.id);
+          throw error;
+        }
+        Object.assign(move, { line_id: row.line_id, moved_on: row.moved_on, qty: row.qty });
+      }
+      const { error } = insert.length ? await sb.from('kount_ot_stock_moves').insert(insert) : { error: null };
       if (error) {
         await sb.from('kount_ot_lines').update({ stock_draw: null }).eq('id', l.id);
         throw error;
       }
-      moves.push(...rows.map(r => ({ ...r, id: '' })));
+      moves.push(...insert.map(r => ({ ...r, id: '' })));
       stats.storage = (stats.storage ?? 0) + 1;
+      if (link.length) stats.storage_linked = (stats.storage_linked ?? 0) + link.length;
     }
   } catch (e) {
     stats.storage_error = msg(e).slice(0, 300);
@@ -1661,6 +1698,134 @@ async function threadPhase(sb: SupabaseClient, stats: Stats, accessToken: string
   } catch (e) {
     stats.threads_error = msg(e).slice(0, 300);
     console.error('[kount-order-mail] order threads failed:', stats.threads_error);
+  }
+}
+
+/** A fresh Graph access token from the stored refresh token (rotated as Microsoft hands back a new one); null when
+ *  Outlook is not connected. */
+async function mailAccessToken(sb: SupabaseClient): Promise<string | null> {
+  const { data: refresh, error } = await sb.rpc('kount_ot_mail_token_get');
+  if (error) throw error;
+  if (!refresh) return null;
+  const tok = await refreshAccess(String(refresh));
+  if (tok.refresh_token) await sb.rpc('kount_ot_mail_token_set', { p_token: tok.refresh_token });
+  return tok.access_token;
+}
+
+/** The release engine (0179, admin v1.30; the user, 11/18: "I order a large batch, then EE stores it, then from that
+ *  large pile i keep ordering smaller batches ... build the engine that tracks them like this"). Every e-mail h.wood sent
+ *  E&E since the last read: one asking for cases out of storage becomes releases (the venue, the cases) dated the day it
+ *  was asked; one the reader is unsure of waits in the Warehouse tab for a person; anything else is noted and skipped.
+ *  A release already recorded for that trip (typed by hand, from E&E's invoice, the 11/18 back-fill) is linked, not added
+ *  again. A words test comes before the reader, so quotes and payments cost nothing. Read-only on the mailbox. Never
+ *  fails the run. */
+const RELEASE_LOOKBACK_DAYS = 14;
+const RELEASE_BUDGET_MS = 45_000;
+const RELEASE_FIELDS = 'id,subject,from,toRecipients,ccRecipients,sentDateTime,receivedDateTime,conversationId,internetMessageId,isDraft,uniqueBody,bodyPreview';
+interface ReleaseMsg {
+  id: string; subject?: string; sentDateTime?: string; receivedDateTime?: string; conversationId?: string; internetMessageId?: string; isDraft?: boolean;
+  from?: { emailAddress?: { address?: string; name?: string } };
+  toRecipients?: Array<{ emailAddress?: { address?: string } }>; ccRecipients?: Array<{ emailAddress?: { address?: string } }>;
+  uniqueBody?: { content?: string }; bodyPreview?: string;
+}
+async function releasePhase(sb: SupabaseClient, stats: Stats, accessToken: string, deadline = Date.now() + RELEASE_BUDGET_MS) {
+  try {
+    const { data: acct, error } = await sb.from('kount_ot_mail_account').select('vendor_domains, release_cursor').eq('id', 1).single();
+    if (error) throw error;
+    // E&E's own storage only (not a factory shipping straight to a venue, not i.Halper)
+    const ee = ((acct.vendor_domains ?? []) as string[]).filter(d => /eemercantile/i.test(d));
+    if (!ee.length) ee.push('eemercantile.co');
+    const fromMs = acct.release_cursor ? Date.parse(acct.release_cursor) - 86_400_000 : Date.now() - RELEASE_LOOKBACK_DAYS * 86_400_000;
+    const sinceDay = new Date(fromMs).toISOString().slice(0, 10);
+    const byId = new Map<string, ReleaseMsg>();
+    for (const d of ee) {
+      let url = `/me/messages?$search=${encodeURIComponent(`"participants:${d} received>=${sinceDay}"`)}&$select=${RELEASE_FIELDS}&$top=25`;
+      let pages = 0;
+      while (url && pages++ < 20) {
+        const page = await graphGet<{ value?: ReleaseMsg[]; '@odata.nextLink'?: string }>(accessToken, url, { textBody: true });
+        for (const m of page.value ?? []) byId.set(m.id, m);
+        url = page['@odata.nextLink'] ?? '';
+      }
+    }
+    // ours (a teammate's with us on copy too), not a draft, to or copying E&E; oldest first so the cursor only moves forward
+    const toEe = (m: ReleaseMsg) => [...(m.toRecipients ?? []), ...(m.ccRecipients ?? [])].some(r => onList(domainOf(r.emailAddress?.address), ee));
+    const at = (m: ReleaseMsg) => m.sentDateTime ?? m.receivedDateTime ?? '';
+    const mine = [...byId.values()].filter(m => !m.isDraft && onList(domainOf(m.from?.emailAddress?.address), OWN_DOMAINS) && toEe(m))
+      .sort((a, b) => at(a).localeCompare(at(b)));
+    stats.releases_seen = mine.length;
+    if (!mine.length) return;
+    const { data: seenRows, error: sErr } = await sb.from('kount_ot_release_mail').select('message_id').in('message_id', mine.map(m => m.id));
+    if (sErr) throw sErr;
+    const seen = new Set((seenRows ?? []).map(r => r.message_id as string));
+    const data = await loadTracker(sb);
+    const moves = (await selectAll<OtMove>(sb, 'kount_ot_stock_moves')).map(m => ({ ...m, qty: Number(m.qty) || 0 }));
+    const { venues = [] } = await decideOptions(sb);
+    const stock = data.items.filter(i => i.is_active && i.track_stock && itemLocation(i) === EE_WAREHOUSE && isCustomItem(i));
+    const context = releaseContext(stock, venues);
+    let cursor: string | null = acct.release_cursor ?? null;
+    const done = (m: ReleaseMsg) => { const t = at(m); if (t && (!cursor || Date.parse(t) > Date.parse(cursor))) cursor = t; };
+    const keep = async (row: Record<string, unknown>) => {
+      const { error: e } = await sb.from('kount_ot_release_mail').insert(row);
+      if (e && e.code !== '23505') throw e;
+    };
+    for (const m of mine) {
+      if (seen.has(m.id)) { done(m); continue; }
+      if (Date.now() > deadline) { stats.releases_note = 'stopped at the time limit; the rest next time'; break; }
+      const sentAt = at(m) || nowIso();
+      const body = String(m.uniqueBody?.content ?? m.bodyPreview ?? '').replace(/\r/g, '').trim();
+      const base = {
+        message_id: m.id, conversation_id: m.conversationId ?? null, internet_message_id: m.internetMessageId ?? null, sent_at: sentAt,
+        sender_email: (m.from?.emailAddress?.address ?? '').toLowerCase() || null, sender_name: m.from?.emailAddress?.name ?? null,
+        subject: (m.subject ?? '').slice(0, 300), excerpt: body.slice(0, 1500),
+      };
+      if (!releaseMailCandidate(m.subject, body)) {
+        await keep({ ...base, state: 'not_release', decision: 'No cases sent, delivered or picked up in it.' });
+        done(m); continue;
+      }
+      const { read, model } = await readReleaseMail({ subject: base.subject, from: `${base.sender_name ?? ''} <${base.sender_email ?? ''}>`, sentAt, body, context, messageId: m.id });
+      stats.releases_read = (stats.releases_read ?? 0) + 1;
+      const kept = { ...read, model };
+      if (!read.is_release) {
+        await keep({ ...base, read: kept, state: 'not_release', decision: 'Not stock out of storage (read).' });
+        done(m); continue;
+      }
+      const day = laParts(new Date(sentAt)).isoDate;
+      const plan = planReleaseMail(read, day, data.items, moves, venues);
+      if (plan.problem) {
+        await keep({ ...base, read: kept, state: 'review', decision: plan.problem.slice(0, 500) });
+        stats.releases_review = (stats.releases_review ?? 0) + 1;
+        done(m); continue;
+      }
+      const { data: row, error: iErr } = await sb.from('kount_ot_release_mail').insert({ ...base, read: kept, state: 'recorded', decision: '' }).select('id').single();
+      if (iErr) { if (iErr.code === '23505') { done(m); continue; } throw iErr; }
+      const ids: string[] = [], said: string[] = [];
+      for (const d of plan.draws) {
+        // the same trip already in (typed, E&E's invoice, the 11/18 back-fill): link it, never add it twice
+        const had = matchRelease(moves, d.itemId, plan.venueId, day, d.qty, 7, x => !x.mail_id);
+        if (had) {
+          const { error: e } = await sb.from('kount_ot_stock_moves').update({ mail_id: row.id }).eq('id', had.id);
+          if (e) throw e;
+          had.mail_id = row.id; ids.push(had.id); said.push(`${d.qty} ${d.name} (already in, ${had.moved_on})`);
+          continue;
+        }
+        const ins = { item_id: d.itemId, moved_on: day, kind: 'release' as const, qty: d.qty, venue_id: plan.venueId, line_id: null,
+          note: `Asked E&E by e-mail: ${base.subject}`.slice(0, 500), created_by: base.sender_email, created_at: `${day}T19:00:00Z`, mail_id: row.id };
+        const { data: mv, error: e } = await sb.from('kount_ot_stock_moves').insert(ins).select('id').single();
+        if (e) throw e;
+        moves.push({ ...ins, id: mv.id } as OtMove); ids.push(mv.id); said.push(`${d.qty} ${d.name}`);
+      }
+      const { error: uErr } = await sb.from('kount_ot_release_mail').update({ move_ids: ids, decision: said.join('; ').slice(0, 500) }).eq('id', row.id);
+      if (uErr) throw uErr;
+      stats.releases_recorded = (stats.releases_recorded ?? 0) + 1;
+      done(m);
+    }
+    if (cursor && cursor !== acct.release_cursor) {
+      const { error: cErr } = await sb.from('kount_ot_mail_account').update({ release_cursor: cursor }).eq('id', 1);
+      if (cErr) throw cErr;
+    }
+  } catch (e) {
+    stats.releases_error = msg(e).slice(0, 300);
+    console.error('[kount-order-mail] releases failed:', stats.releases_error);
   }
 }
 

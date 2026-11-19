@@ -131,6 +131,8 @@ export interface OtMove {
   note: string | null;
   created_at: string;
   created_by?: string | null;
+  /** v1.30 the e-mail asking E&E for this release (0179, the release engine) */
+  mail_id?: string | null;
 }
 
 export interface OtDocument {
@@ -1540,6 +1542,73 @@ export function storageMoveRows(plan: StoragePlan, l: Pick<OtLine, 'id' | 'descr
     venue_id: plan.kind === 'release' ? plan.venueId : null, line_id: l.id,
     note: `E&E: ${l.description}`.slice(0, 500), created_at: `${day}T19:00:00Z`,
   }));
+}
+
+/* ── v1.30 the release engine (0179): stock asked out of E&E's storage by e-mail ─────────────────
+   The user (11/18): "I order a large batch, then EE stores it, then from that large pile i keep ordering smaller
+   batches as time goes ... 5 cases to be sent to delilah LA / miami ... I only order when the venue is running
+   super low" -> "build the engine that tracks them like this". The mail pull reads each e-mail h.wood sends E&E;
+   one asking for cases out of storage becomes a release the day it was asked. E&E's delivery invoice for the same
+   trip (a storage line) then links to it instead of counting it twice, and gives it the delivery day. */
+
+/** What the reader took from one e-mail to E&E (kount_ot_release_mail.read). */
+export interface ReleaseRead {
+  is_release: boolean;
+  venue: string | null;
+  lines: Array<{ sku: string | null; item: string; qty: number | null; unit: string | null }>;
+}
+
+const RELEASE_QTY = /\b\d+\s*(?:cases?|cs|ctns?|cartons?|boxes|box|packs?|pallets?)\b|\b(?:a|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:cases?|boxes|cartons?)\b/i;
+const RELEASE_MOVE = /\b(?:send|sent|ship|shipped|deliver|delivered|delivery|uber|courier|pick ?up|picked up|drop ?off|release|from (?:the )?(?:warehouse|storage|stock))\b/i;
+
+/** Worth reading: it names a number of cases AND sending / delivering / picking up. A words test before the reader, so
+ *  quotes, payments and artwork never cost a read. */
+export function releaseMailCandidate(subject: string | null | undefined, body: string | null | undefined): boolean {
+  const t = `${subject ?? ''}\n${body ?? ''}`;
+  return RELEASE_QTY.test(t) && RELEASE_MOVE.test(t);
+}
+
+const CASE_UNIT = /^(?:cases?|cs|ctns?|cartons?|boxes|box)$/i;
+
+/** What one read e-mail records, by the storage-line reader's own rules (planStorageLine): the venue by name or short
+ *  name, each line's item by the SKU the reader picked or its words among the venue's brand, its cases. A line in
+ *  pieces, an unknown venue or item, a missing count is a problem for a person - never a guess. */
+export function planReleaseMail(read: ReleaseRead, day: string, items: OtItem[], moves: OtMove[],
+                                venues: Array<{ id: string; name: string }>): StoragePlan {
+  const parts = read.lines.map(x => {
+    // the part separators of a storage line never come from the item's own words ("Tray liners 8x8 / 1000")
+    const what = [x.sku, x.item].filter(s => s && String(s).trim()).join(' ').replace(/[/;,+&]/g, ' ');
+    const unit = !x.unit || CASE_UNIT.test(x.unit.trim()) ? 'cases' : x.unit.trim();
+    return x.qty != null && Number.isFinite(Number(x.qty)) && unit === 'cases' ? `${Number(x.qty)} cases ${what}` : `${what}${x.qty != null ? ` ${x.qty} ${unit}` : ''}`;
+  });
+  const text = `${read.venue ?? ''} delivery - ${parts.join(' / ')}`;
+  const plan = planStorageLine({ description: text, venue_id: null }, { venue_id: null }, items, moves, venues);
+  if (!read.lines.length) plan.problem = 'No item or number of cases read from it.';
+  return { ...plan, kind: 'release', day };
+}
+
+/** A release already recorded for this item and venue within `tol` days of `day` - the same trip asked by e-mail, typed
+ *  by hand, or billed by E&E: the same quantity first, then the closest day. `free` keeps out releases already claimed. */
+export function matchRelease(moves: OtMove[], itemId: string, venueId: string | null, day: string, qty: number,
+                             tol = 7, free: (m: OtMove) => boolean = () => true): OtMove | null {
+  const near = moves.filter(m => m.kind === 'release' && m.item_id === itemId && free(m)
+    && (venueId == null || m.venue_id == null || m.venue_id === venueId) && Math.abs(daysBetween(m.moved_on, day)) <= tol);
+  near.sort((a, b) => Number(n(a.qty) !== qty) - Number(n(b.qty) !== qty) || Math.abs(daysBetween(a.moved_on, day)) - Math.abs(daysBetween(b.moved_on, day)));
+  return near[0] ?? null;
+}
+
+/** E&E's invoice line for a trip already asked by e-mail: its rows link to those releases (they take the invoice's day,
+ *  cases and line) instead of adding them twice; the rest are new. */
+export function linkStorageRows<R extends { item_id: string; venue_id: string | null; moved_on: string; qty: number; kind: OtMove['kind'] }>(
+    rows: R[], moves: OtMove[], tol = 10): { link: Array<{ move: OtMove; row: R }>; insert: R[] } {
+  const taken = new Set<string>();
+  const link: Array<{ move: OtMove; row: R }> = [], insert: R[] = [];
+  for (const r of rows) {
+    const m = r.kind === 'release'
+      ? matchRelease(moves, r.item_id, r.venue_id, r.moved_on, r.qty, tol, x => !!x.mail_id && !x.line_id && !taken.has(x.id)) : null;
+    if (m) { taken.add(m.id); link.push({ move: m, row: r }); } else insert.push(r);
+  }
+  return { link, insert };
 }
 
 /* ── validation ───────────────────────────────────────────────────────── */
